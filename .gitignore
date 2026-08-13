@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets — NEVER commit real keys
+.env
+
+# Local data / vector store / databases
+data/
+.chroma/
+*.db
+*.sqlite3
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local planning doc, keep private
+Project_AgenticInvestor_MVP.md

@@ -1,0 +1,44 @@
+[project]
+name = "agentic-investor"
+version = "0.1.0"
+description = "Multi-agent LLM investment research assistant (paper/backtest only)"
+readme = "README.md"
+authors = [
+    { name = "MihirShinde-29", email = "mihirushinde29@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic-settings>=2.15.0",
+]
+
+[project.scripts]
+agentic-investor = "agentic_investor.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.4,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.3",
+]
+
+[tool.uv]
+# Project and uv cache live on different drives (D: vs C:), so hardlinking
+# isn't possible — copy instead and silence the warning.
+link-mode = "copy"
+
+[tool.ruff]
+# Keep line length generous; agents/prompts get wide.
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F = pyflakes+pycodestyle, I = isort (import sorting), UP = pyupgrade,
+# B = bugbear (likely-bug patterns). A pragmatic, widely-used default set.
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
