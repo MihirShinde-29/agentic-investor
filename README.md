@@ -82,7 +82,7 @@ tests/
 ## Roadmap
 
 - [x] M0: setup & scaffold
-- [ ] M1: data tools + Technical Agent
+- [x] M1: data tools + Technical Agent
 - [ ] M2: News-Sentiment Agent + RAG
 - [ ] M3: orchestrator + allocation
 - [ ] M4: backtesting + evals
