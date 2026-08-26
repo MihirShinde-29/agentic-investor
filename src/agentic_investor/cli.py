@@ -4,6 +4,7 @@
   agentic-investor analyze AAPL NVDA                            run the technical agent
   agentic-investor recommend AAPL NVDA --amount 10000 --risk moderate
                                                                 run the full orchestrator
+  agentic-investor backtest 1 --start 2024-01-01                backtest a recommendation vs SPY
 """
 
 import argparse
@@ -73,6 +74,39 @@ def _recommend(tickers: list[str], amount: float, risk: str, target: str) -> Non
             print(f"  - {v}")
 
 
+def _backtest(rec_id: int, start: str | None, end: str | None, benchmark: str) -> None:
+    from agentic_investor.eval.backtest import backtest_recommendation
+    from agentic_investor.orchestrator.store import load_recommendation
+
+    rec = load_recommendation(rec_id)
+    if rec is None:
+        print(f"No recommendation with id {rec_id}. Run `agentic-investor recommend ...` first.")
+        return
+    result = backtest_recommendation(rec, start=start, end=end, benchmark=benchmark)
+
+    print(
+        f"Backtest of recommendation #{rec_id}  ({result.start} -> {result.end}, "
+        f"{result.n_days} bars, ${result.init_cash:,.0f} init)\n"
+    )
+    print(f"  {'':16}{'Portfolio':>12}   {benchmark:>10}")
+    for label, key in [
+        ("Total return %", "total_return_pct"),
+        ("CAGR %", "cagr_pct"),
+        ("Sharpe", "sharpe"),
+        ("Max drawdown %", "max_drawdown_pct"),
+        ("Volatility %", "volatility_annual_pct"),
+    ]:
+        p = getattr(result.portfolio, key)
+        b = getattr(result.benchmark, key)
+        print(f"  {label:16}{p:>12.2f}   {b:>10.2f}")
+    print(f"\n  Alpha (annualized): {result.alpha_annual_pct:+.2f}%")
+    print(f"  Beta vs {benchmark}:       {result.beta:.3f}")
+    print(
+        f"\n  Final value:   ${result.portfolio_final_value:>12,.2f}   "
+        f"(vs {benchmark}: ${result.benchmark_final_value:,.2f})"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="agentic-investor")
     sub = parser.add_subparsers(dest="cmd")
@@ -93,11 +127,19 @@ def main() -> None:
     )
     rec.add_argument("--target", default="12-month growth")
 
+    bt = sub.add_parser("backtest", help="backtest a saved recommendation vs a benchmark")
+    bt.add_argument("rec_id", type=int)
+    bt.add_argument("--start", default=None, help="YYYY-MM-DD")
+    bt.add_argument("--end", default=None, help="YYYY-MM-DD")
+    bt.add_argument("--benchmark", default="SPY")
+
     args = parser.parse_args()
     if args.cmd == "analyze":
         _analyze(args.tickers, args.model)
     elif args.cmd == "recommend":
         _recommend(args.tickers, args.amount, args.risk, args.target)
+    elif args.cmd == "backtest":
+        _backtest(args.rec_id, args.start, args.end, args.benchmark)
     else:
         _print_config()
 
