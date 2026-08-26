@@ -84,8 +84,9 @@ tests/
 - [x] M0: setup & scaffold
 - [x] M1: data tools + Technical Agent
 - [x] M2: News-Sentiment Agent + RAG
-- [ ] M3: orchestrator + allocation
-- [ ] M4: backtesting + evals
+- [x] M3: orchestrator + allocation
+- [ ] M4: eval harness (backtest + agent/RAG evals + LLM-judge)
 - [ ] M5: FastAPI + Streamlit dashboard
-- [ ] M6: Langfuse + Docker + CI
-- [ ] Later: Fundamentals & Catalyst agents, pgvector, React dashboard, Alpaca paper API
+- [ ] M6: Langfuse + Docker + CI (+ eval-gated CI, ops metrics)
+- [ ] M7: paper trading (Alpaca sandbox, live P&L)
+- [ ] Later: Fundamentals & Catalyst agents, pgvector, React dashboard

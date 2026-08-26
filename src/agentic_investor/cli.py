@@ -1,7 +1,9 @@
 """Console entry point (agentic-investor).
 
-  agentic-investor                 show resolved config
-  agentic-investor analyze AAPL NVDA   run the technical agent on tickers
+  agentic-investor                                              show resolved config
+  agentic-investor analyze AAPL NVDA                            run the technical agent
+  agentic-investor recommend AAPL NVDA --amount 10000 --risk moderate
+                                                                run the full orchestrator
 """
 
 import argparse
@@ -40,16 +42,62 @@ def _analyze(tickers: list[str], model: str | None) -> None:
         print(f"  {sig.reasoning}\n")
 
 
+def _recommend(tickers: list[str], amount: float, risk: str, target: str) -> None:
+    from agentic_investor.orchestrator.graph import run_orchestrator
+    from agentic_investor.orchestrator.state import OrchestratorRequest
+    from agentic_investor.orchestrator.store import save_recommendation
+
+    req = OrchestratorRequest(
+        tickers=[t.upper() for t in tickers],
+        amount=amount,
+        risk=risk,  # type: ignore[arg-type]  argparse choices restrict values
+        target=target,
+    )
+    rec = run_orchestrator(req)
+    rec_id = save_recommendation(rec)
+
+    print(
+        f"Recommendation #{rec_id}  "
+        f"(risk: {req.risk}, ${req.amount:,.2f}, target: {req.target})\n"
+    )
+    for p in rec.allocation.positions:
+        print(f"  {p.ticker:6} {p.weight_pct:5.1f}%  ${p.dollars:>10,.2f}   {p.rationale}")
+    print(
+        f"  {'CASH':6} {rec.allocation.cash_pct:5.1f}%  "
+        f"${rec.allocation.cash_dollars:>10,.2f}"
+    )
+    print(f"\n{rec.allocation.portfolio_rationale}")
+    if rec.violations:
+        print("\nGuardrail violations:")
+        for v in rec.violations:
+            print(f"  - {v}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="agentic-investor")
     sub = parser.add_subparsers(dest="cmd")
+
     analyze = sub.add_parser("analyze", help="run the technical agent on tickers")
     analyze.add_argument("tickers", nargs="+")
     analyze.add_argument("--model", default=None, help="override the LLM model string")
 
+    rec = sub.add_parser(
+        "recommend", help="run full pipeline; persist a paper portfolio recommendation"
+    )
+    rec.add_argument("tickers", nargs="+")
+    rec.add_argument("--amount", type=float, required=True, help="portfolio dollars to allocate")
+    rec.add_argument(
+        "--risk",
+        choices=["conservative", "moderate", "aggressive"],
+        default="moderate",
+    )
+    rec.add_argument("--target", default="12-month growth")
+
     args = parser.parse_args()
     if args.cmd == "analyze":
         _analyze(args.tickers, args.model)
+    elif args.cmd == "recommend":
+        _recommend(args.tickers, args.amount, args.risk, args.target)
     else:
         _print_config()
 
