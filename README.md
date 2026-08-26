@@ -83,7 +83,7 @@ tests/
 
 - [x] M0: setup & scaffold
 - [x] M1: data tools + Technical Agent
-- [ ] M2: News-Sentiment Agent + RAG
+- [x] M2: News-Sentiment Agent + RAG
 - [ ] M3: orchestrator + allocation
 - [ ] M4: backtesting + evals
 - [ ] M5: FastAPI + Streamlit dashboard
