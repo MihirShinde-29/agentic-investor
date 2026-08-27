@@ -5,6 +5,7 @@ The vector store is Chroma, persistent under settings.chroma_dir. The heavy
 embedding model is imported lazily so tests that mock the embedder never load it.
 """
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -12,8 +13,16 @@ from functools import lru_cache
 import chromadb
 import finnhub
 from pydantic import BaseModel
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from agentic_investor.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class NewsArticle(BaseModel):
@@ -35,12 +44,35 @@ def _finnhub_client() -> finnhub.Client:
     return finnhub.Client(api_key=s.finnhub_api_key)
 
 
+def _is_rate_limit(e: BaseException) -> bool:
+    # Finnhub free tier: 60 req/min. Parallel picker runs blow this out easily.
+    return (
+        isinstance(e, finnhub.FinnhubAPIException) and getattr(e, "status_code", 0) == 429
+    )
+
+
+@retry(
+    retry=retry_if_exception(_is_rate_limit),
+    wait=wait_exponential(multiplier=1.0, min=1.0, max=30.0),
+    stop=stop_after_attempt(5),
+    reraise=True,
+)
+def _finnhub_company_news(ticker: str, frm: str, to: str) -> list[dict]:
+    """Retry the raw Finnhub call with exponential backoff on 429s only."""
+    return _finnhub_client().company_news(ticker.upper(), _from=frm, to=to)
+
+
+@lru_cache(maxsize=512)
+def _cached_company_news(ticker: str, frm: str, to: str) -> tuple[dict, ...]:
+    """In-process cache keyed on (ticker, from, to). Same call re-uses result."""
+    return tuple(_finnhub_company_news(ticker, frm, to))
+
+
 def fetch_company_news(ticker: str, days: int = 7) -> list[NewsArticle]:
-    """Pull recent company news for a ticker from Finnhub."""
-    client = _finnhub_client()
+    """Pull recent company news for a ticker from Finnhub (retries on 429)."""
     to = datetime.now(UTC).date()
     frm = to - timedelta(days=days)
-    raw = client.company_news(ticker.upper(), _from=frm.isoformat(), to=to.isoformat())
+    raw = list(_cached_company_news(ticker.upper(), frm.isoformat(), to.isoformat()))
 
     out: list[NewsArticle] = []
     for item in raw:
