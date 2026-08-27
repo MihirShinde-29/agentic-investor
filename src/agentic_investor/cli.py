@@ -75,7 +75,17 @@ def _recommend(tickers: list[str], amount: float, risk: str, target: str) -> Non
 
 
 def _backtest(
-    rec_id: int, start: str | None, end: str | None, benchmark: str, plot: str | None
+    rec_id: int,
+    start: str | None,
+    end: str | None,
+    benchmark: str,
+    plot: str | None,
+    rebalance: str,
+    band_abs_pct: float,
+    band_rel_pct: float,
+    cash_yield: float,
+    tcost_bps: float,
+    slippage_bps: float,
 ) -> None:
     from agentic_investor.eval.backtest import backtest_recommendation
     from agentic_investor.orchestrator.store import load_recommendation
@@ -84,7 +94,18 @@ def _backtest(
     if rec is None:
         print(f"No recommendation with id {rec_id}. Run `agentic-investor recommend ...` first.")
         return
-    result = backtest_recommendation(rec, start=start, end=end, benchmark=benchmark)
+    result = backtest_recommendation(
+        rec,
+        start=start,
+        end=end,
+        benchmark=benchmark,
+        rebalance=rebalance,
+        band_abs_pct=band_abs_pct,
+        band_rel_pct=band_rel_pct,
+        cash_yield_annual=cash_yield,
+        tcost_bps=tcost_bps,
+        slippage_bps=slippage_bps,
+    )
 
     print(
         f"Backtest of recommendation #{rec_id}  ({result.start} -> {result.end}, "
@@ -107,12 +128,25 @@ def _backtest(
         f"\n  Final value:   ${result.portfolio_final_value:>12,.2f}   "
         f"(vs {benchmark}: ${result.benchmark_final_value:,.2f})"
     )
+    if result.n_trades:
+        print(f"  Trades: {result.n_trades}   Total friction: ${result.total_costs:,.2f}")
 
     if plot is not None:
         from agentic_investor.eval.plots import plot_equity_curve
 
         out = plot_equity_curve(
-            rec, start=start, end=end, benchmark=benchmark, out_path=plot, rec_id=rec_id
+            rec,
+            start=start,
+            end=end,
+            benchmark=benchmark,
+            out_path=plot,
+            rec_id=rec_id,
+            rebalance=rebalance,
+            band_abs_pct=band_abs_pct,
+            band_rel_pct=band_rel_pct,
+            cash_yield_annual=cash_yield,
+            tcost_bps=tcost_bps,
+            slippage_bps=slippage_bps,
         )
         print(f"\n  Equity curve saved: {out}")
 
@@ -149,6 +183,22 @@ def main() -> None:
         default=None,
         help="save equity curve PNG (default: out/equity_curve.png)",
     )
+    bt.add_argument(
+        "--rebalance",
+        choices=["never", "monthly", "quarterly", "bands"],
+        default="never",
+        help="rebalance mode (default: never = buy-and-hold)",
+    )
+    bt.add_argument("--band-abs-pct", type=float, default=5.0,
+                    help="drift threshold in percentage points for --rebalance bands (default 5)")
+    bt.add_argument("--band-rel-pct", type=float, default=20.0,
+                    help="relative drift threshold %% of target for bands mode (default 20)")
+    bt.add_argument("--cash-yield", type=float, default=0.0,
+                    help="annual risk-free yield on cash, e.g. 0.045 for 4.5%% (default 0)")
+    bt.add_argument("--tcost-bps", type=float, default=0.0,
+                    help="commission in basis points per trade (default 0)")
+    bt.add_argument("--slippage-bps", type=float, default=0.0,
+                    help="slippage in basis points per fill (default 0)")
 
     args = parser.parse_args()
     if args.cmd == "analyze":
@@ -156,7 +206,19 @@ def main() -> None:
     elif args.cmd == "recommend":
         _recommend(args.tickers, args.amount, args.risk, args.target)
     elif args.cmd == "backtest":
-        _backtest(args.rec_id, args.start, args.end, args.benchmark, args.plot)
+        _backtest(
+            args.rec_id,
+            args.start,
+            args.end,
+            args.benchmark,
+            args.plot,
+            args.rebalance,
+            args.band_abs_pct,
+            args.band_rel_pct,
+            args.cash_yield,
+            args.tcost_bps,
+            args.slippage_bps,
+        )
     else:
         _print_config()
 

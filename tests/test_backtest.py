@@ -10,6 +10,7 @@ from agentic_investor.eval.backtest import (
     alpha_beta,
     backtest_recommendation,
     compute_metrics,
+    multi_window_backtest,
     simulate_portfolio,
 )
 from agentic_investor.orchestrator.state import (
@@ -29,26 +30,27 @@ def _prices(**cols) -> pd.DataFrame:
     return pd.DataFrame(cols, index=_dates(n))
 
 
-# simulate_portfolio
+# simulate_portfolio: buy-and-hold basics
 
 
 def test_simulate_flat_prices_leaves_value_unchanged():
     prices = _prices(AAPL=[100.0] * 5)
-    v = simulate_portfolio(prices, {"AAPL": 1.0}, init_cash=1000)
+    v, trades = simulate_portfolio(prices, {"AAPL": 1.0}, init_cash=1000)
     assert v.iloc[0] == pytest.approx(1000)
     assert v.iloc[-1] == pytest.approx(1000)
+    assert len(trades) == 1  # only day-0 buy
 
 
 def test_simulate_100pct_equity_doubles_when_price_doubles():
     prices = _prices(AAPL=[100.0, 200.0])
-    v = simulate_portfolio(prices, {"AAPL": 1.0}, init_cash=1000)
+    v, _ = simulate_portfolio(prices, {"AAPL": 1.0}, init_cash=1000)
     assert v.iloc[-1] == pytest.approx(2000)
 
 
-def test_simulate_cash_portion_is_flat():
+def test_simulate_cash_portion_is_flat_by_default():
     # 50% AAPL, 50% cash. AAPL doubles -> portfolio = 500*2 + 500 = 1500.
     prices = _prices(AAPL=[100.0, 200.0])
-    v = simulate_portfolio(prices, {"AAPL": 0.5}, init_cash=1000)
+    v, _ = simulate_portfolio(prices, {"AAPL": 0.5}, init_cash=1000)
     assert v.iloc[-1] == pytest.approx(1500)
 
 
@@ -58,6 +60,71 @@ def test_simulate_rejects_overweight():
         simulate_portfolio(prices, {"AAPL": 1.5}, init_cash=1000)
 
 
+# simulate_portfolio: new features (M4b)
+
+
+def test_cash_yield_grows_all_cash_series():
+    # 100% cash (weights = {}), 10% annual yield over 252 days = ~10% growth.
+    prices = _prices(AAPL=[100.0] * 252)
+    v, trades = simulate_portfolio(
+        prices, {}, init_cash=1000, cash_yield_annual=0.10
+    )
+    assert v.iloc[-1] == pytest.approx(1100, rel=0.005)
+    assert trades.empty
+
+
+def test_monthly_rebalance_triggers_on_month_change():
+    # 60 business days spans ~3 months; expect rebalance on day 0 + 2 month boundaries.
+    n = 60
+    prices = _prices(AAPL=[100.0] * n, NVDA=list(np.linspace(100, 200, n)))
+    _, trades = simulate_portfolio(
+        prices, {"AAPL": 0.5, "NVDA": 0.5}, init_cash=1000, rebalance="monthly"
+    )
+    # Trades happen in batches (one per ticker per rebalance day); count unique dates.
+    rebalance_days = trades["date"].nunique()
+    assert 3 <= rebalance_days <= 4
+
+
+def test_bands_rebalance_triggers_when_drift_exceeds_threshold():
+    # Two tickers start balanced, one rockets 3x -> weight drifts far past ±5pp.
+    n = 20
+    prices = _prices(
+        AAPL=[100.0] * n,
+        NVDA=list(np.linspace(100, 300, n)),
+    )
+    _, trades = simulate_portfolio(
+        prices,
+        {"AAPL": 0.5, "NVDA": 0.5},
+        init_cash=1000,
+        rebalance="bands",
+        band_abs_pct=5.0,
+        band_rel_pct=20.0,
+    )
+    # Should rebalance at least once past the initial buy.
+    assert trades["date"].nunique() > 1
+
+
+def test_transaction_cost_reduces_final_value():
+    prices = _prices(AAPL=[100.0, 100.0, 100.0])
+    v_no_cost, _ = simulate_portfolio(prices, {"AAPL": 1.0}, init_cash=1000)
+    v_with_cost, _ = simulate_portfolio(
+        prices, {"AAPL": 1.0}, init_cash=1000, tcost_bps=50  # 0.5%
+    )
+    # Cost is deducted from cash on day 0 buy, so final value is lower.
+    assert v_with_cost.iloc[-1] < v_no_cost.iloc[-1]
+
+
+def test_slippage_worsens_buy_fill_price():
+    prices = _prices(AAPL=[100.0, 100.0])
+    _, trades_no_slip = simulate_portfolio(prices, {"AAPL": 1.0}, init_cash=1000)
+    _, trades_slip = simulate_portfolio(
+        prices, {"AAPL": 1.0}, init_cash=1000, slippage_bps=100  # 1%
+    )
+    # Buy fill with slippage should be above spot.
+    assert trades_no_slip.iloc[0]["price"] == pytest.approx(100.0)
+    assert trades_slip.iloc[0]["price"] == pytest.approx(101.0)
+
+
 # compute_metrics
 
 
@@ -65,14 +132,12 @@ def test_total_return_and_cagr_for_known_series():
     value = pd.Series([100.0, 100.0, 100.0, 110.0], index=_dates(4))
     m = compute_metrics(value)
     assert m.total_return_pct == pytest.approx(10.0)
-    # 10% over 3 daily returns, annualized to 252 -> should be very high.
     assert m.cagr_pct > 100
 
 
 def test_max_drawdown_captures_worst_peak_to_trough():
     value = pd.Series([100, 120, 60, 80, 90], index=_dates(5), dtype="float64")
     m = compute_metrics(value)
-    # Peak 120 -> trough 60 = -50% drawdown.
     assert m.max_drawdown_pct == pytest.approx(-50.0)
 
 
@@ -131,7 +196,6 @@ def _rec(amount: float = 10_000) -> Recommendation:
 def test_backtest_recommendation_end_to_end(monkeypatch):
     n = 100
     idx = _dates(n)
-    # AAPL and NVDA rise linearly to 2x; SPY rises linearly to 1.5x.
     prices = pd.DataFrame(
         {
             "AAPL": np.linspace(100, 200, n),
@@ -144,11 +208,26 @@ def test_backtest_recommendation_end_to_end(monkeypatch):
 
     result = backtest_recommendation(_rec())
     assert isinstance(result.portfolio, BacktestMetrics)
-    # Portfolio: 60% equity doubles + 40% cash flat -> 60%*2 + 40%*1 = 1.6x
+    # 60% equity doubles + 40% cash flat -> 60%*2 + 40%*1 = 1.6x
     assert result.portfolio_final_value == pytest.approx(16_000, rel=1e-2)
-    # Benchmark: 1.5x -> 15,000
     assert result.benchmark_final_value == pytest.approx(15_000, rel=1e-2)
-    # Portfolio holds 60% high-beta equity + 40% cash. With linear-price series
-    # the exact beta depends on how return magnitudes evolve (base grows over
-    # time), so bound directionally: >1 (above market) and <2 (cash drags it).
+    # 60% high-beta equity + 40% cash: expect beta > 1 and < 2.
     assert 1.0 < result.beta < 2.0
+    # No rebalancing means no trades after day 0.
+    assert result.n_trades == 2  # one buy per ticker
+
+
+def test_multi_window_backtest_runs_each_window(monkeypatch):
+    n = 50
+    prices = pd.DataFrame(
+        {"AAPL": np.linspace(100, 200, n), "NVDA": np.linspace(100, 200, n),
+         "SPY": np.linspace(100, 150, n)},
+        index=_dates(n),
+    )
+    monkeypatch.setattr(backtest, "fetch_prices", lambda *a, **k: prices)
+
+    windows = [("2024-01-01", "2024-06-01"), ("2024-06-01", "2024-12-01")]
+    results = multi_window_backtest(_rec(), windows)
+    assert len(results) == 2
+    for r in results:
+        assert r.n_days > 0
