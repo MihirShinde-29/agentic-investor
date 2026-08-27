@@ -47,15 +47,80 @@ class Allocation(BaseModel):
     cash_dollars: float = Field(ge=0.0)
     portfolio_rationale: str
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_cash_pseudo_position(cls, data):
+        # gpt-4o-mini occasionally emits a Position with ticker "cash" AND a
+        # cash_pct field, double-counting cash. Roll any such pseudo-positions
+        # into cash_pct/cash_dollars so the real validators see a clean input.
+        if not isinstance(data, dict):
+            return data
+        positions = data.get("positions") or []
+        if not positions:
+            return data
+        def _field(p, name):
+            return p.get(name) if isinstance(p, dict) else getattr(p, name, None)
+
+        cash_labels = {"cash", "$", "usd"}
+        real_positions = []
+        pseudo_cash_pct = 0.0
+        pseudo_cash_dollars = 0.0
+        for p in positions:
+            ticker = (_field(p, "ticker") or "").strip().lower()
+            if ticker in cash_labels or ticker == "":
+                pseudo_cash_pct += float(_field(p, "weight_pct") or 0.0)
+                pseudo_cash_dollars += float(_field(p, "dollars") or 0.0)
+                continue
+            real_positions.append(p)
+        if pseudo_cash_pct or pseudo_cash_dollars:
+            existing_cash_pct = float(data.get("cash_pct") or 0.0)
+            existing_cash_dollars = float(data.get("cash_dollars") or 0.0)
+            # If BOTH fields are set the LLM duplicated cash - take the max
+            # (the more conservative interpretation). If only one is set, sum
+            # is trivially correct.
+            merged_cash_pct = (
+                max(existing_cash_pct, pseudo_cash_pct)
+                if existing_cash_pct and pseudo_cash_pct
+                else existing_cash_pct + pseudo_cash_pct
+            )
+            merged_cash_dollars = (
+                max(existing_cash_dollars, pseudo_cash_dollars)
+                if existing_cash_dollars and pseudo_cash_dollars
+                else existing_cash_dollars + pseudo_cash_dollars
+            )
+            data = {
+                **data,
+                "positions": real_positions,
+                "cash_pct": merged_cash_pct,
+                "cash_dollars": merged_cash_dollars,
+            }
+        return data
+
     @model_validator(mode="after")
     def _weights_sum_to_100(self):
         total = sum(p.weight_pct for p in self.positions) + self.cash_pct
-        # Small tolerance for LLM float rounding; instructor retries on failure.
-        if not (99.5 <= total <= 100.5):
-            raise ValueError(
-                f"weights must sum to 100 (got {total:.2f}); adjust positions or cash_pct"
-            )
-        return self
+        # Perfect / near-perfect: no repair needed.
+        if 99.5 <= total <= 100.5:
+            return self
+        # LLM arithmetic error inside a reasonable band: silently renormalize.
+        # gpt-4o-mini reliably outputs sums like 105 or 110 with 8-10 tickers;
+        # instructor retries eat cost without helping. Preserving ratios keeps
+        # the LLM's relative conviction intact - only the absolute scale moves.
+        if 90.0 <= total <= 115.0:
+            factor = 100.0 / total
+            for p in self.positions:
+                p.weight_pct = round(p.weight_pct * factor, 2)
+                p.dollars = round(p.dollars * factor, 2)
+            self.cash_pct = round(self.cash_pct * factor, 2)
+            self.cash_dollars = round(self.cash_dollars * factor, 2)
+            # Absorb sub-percent residual into cash_pct so the total hits 100.
+            residual = 100.0 - (sum(p.weight_pct for p in self.positions) + self.cash_pct)
+            self.cash_pct = round(self.cash_pct + residual, 2)
+            return self
+        raise ValueError(
+            f"weights sum to {total:.2f}, outside repair band [90, 115]; "
+            f"regenerate allocation"
+        )
 
 
 def check_risk_rules(allocation: Allocation, risk: RiskLevel) -> list[str]:
