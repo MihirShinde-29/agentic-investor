@@ -4,6 +4,8 @@
   agentic-investor analyze AAPL NVDA                            run the technical agent
   agentic-investor recommend AAPL NVDA --amount 10000 --risk moderate
                                                                 run the full orchestrator
+  agentic-investor recommend --auto --universe dow30 --amount 10000
+                                                                AI picks tickers itself
   agentic-investor backtest 1 --start 2024-01-01                backtest a recommendation vs SPY
   agentic-investor eval-agents --n-samples 3                    L2 agent eval vs golden set
   agentic-investor eval-retrieval --k 5                         L1 RAG retrieval eval
@@ -46,10 +48,48 @@ def _analyze(tickers: list[str], model: str | None) -> None:
         print(f"  {sig.reasoning}\n")
 
 
-def _recommend(tickers: list[str], amount: float, risk: str, target: str) -> None:
+def _recommend(
+    tickers: list[str],
+    amount: float,
+    risk: str,
+    target: str,
+    auto: bool,
+    universe: str,
+    top_n: int,
+    exclude: list[str] | None,
+) -> None:
     from agentic_investor.orchestrator.graph import run_orchestrator
     from agentic_investor.orchestrator.state import OrchestratorRequest
     from agentic_investor.orchestrator.store import save_recommendation
+
+    if auto and tickers:
+        print("Cannot combine --auto with explicit tickers.")
+        return
+    if not auto and not tickers:
+        print("Provide tickers, or use --auto to let the AI pick from a universe.")
+        return
+
+    if auto:
+        from agentic_investor.orchestrator.picker import pick_top_n
+        from agentic_investor.universes import get_universe
+
+        pool = get_universe(universe)
+        excludes = {t.upper() for t in (exclude or [])}
+        picks = pick_top_n(pool, top_n=top_n, exclude=excludes)
+        if not picks:
+            print(f"No tickers passed the picker from universe '{universe}'.")
+            return
+        print(
+            f"\nAuto picker: {len(picks)} of {len(pool) - len(excludes & set(pool))} "
+            f"scanned tickers (universe '{universe}')\n"
+        )
+        print(f"  {'Ticker':<8}{'Score':>7}   Reasons")
+        print("  " + "-" * 80)
+        for p in picks:
+            reasons = ", ".join(p.reasons[:4]) or "(no notable signals)"
+            print(f"  {p.ticker:<8}{p.score:>7.2f}   {reasons}")
+        print()
+        tickers = [p.ticker for p in picks]
 
     req = OrchestratorRequest(
         tickers=[t.upper() for t in tickers],
@@ -331,7 +371,8 @@ def main() -> None:
     rec = sub.add_parser(
         "recommend", help="run full pipeline; persist a paper portfolio recommendation"
     )
-    rec.add_argument("tickers", nargs="+")
+    rec.add_argument("tickers", nargs="*",
+                     help="tickers to allocate over (omit and use --auto for AI picking)")
     rec.add_argument("--amount", type=float, required=True, help="portfolio dollars to allocate")
     rec.add_argument(
         "--risk",
@@ -339,6 +380,14 @@ def main() -> None:
         default="moderate",
     )
     rec.add_argument("--target", default="12-month growth")
+    rec.add_argument("--auto", action="store_true",
+                     help="AI picks tickers itself via rules-based Selector")
+    rec.add_argument("--universe", default="dow30",
+                     help="universe name for --auto (dow30, sectors, mega_tech)")
+    rec.add_argument("--top-n", type=int, default=5,
+                     help="how many top-scored tickers to keep (default 5)")
+    rec.add_argument("--exclude", nargs="*", default=None,
+                     help="tickers to skip in --auto mode")
 
     ev = sub.add_parser("eval-agents", help="run L2 agent output evals vs golden set")
     ev.add_argument("--n-samples", type=int, default=3,
@@ -418,7 +467,8 @@ def main() -> None:
     if args.cmd == "analyze":
         _analyze(args.tickers, args.model)
     elif args.cmd == "recommend":
-        _recommend(args.tickers, args.amount, args.risk, args.target)
+        _recommend(args.tickers, args.amount, args.risk, args.target,
+                   args.auto, args.universe, args.top_n, args.exclude)
     elif args.cmd == "eval-agents":
         _eval_agents(args.n_samples, args.model, args.cases, args.judge, args.judge_model)
     elif args.cmd == "eval-retrieval":
