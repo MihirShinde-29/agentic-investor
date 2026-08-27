@@ -2,10 +2,13 @@
 
 The risk parameter drives WHICH strategies run, not just guardrails. Users
 either pick a preset (conservative / moderate / aggressive) with empirically-
-validated defaults (from M4b multi-window backtests) or override individual
-dimensions via CLI flags / API fields.
+validated defaults (from M4b multi-window backtests), or override individual
+dimensions via CLI flags, or supply a fully custom profile via TOML file
+(stdlib tomllib, no extra dep).
 """
 
+import tomllib
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -117,3 +120,23 @@ def apply_overrides(profile: StrategyProfile, **overrides) -> StrategyProfile:
     """Return a copy of profile with non-None override fields applied."""
     filtered = {k: v for k, v in overrides.items() if v is not None}
     return profile.model_copy(update=filtered)
+
+
+def load_profile(name_or_path: str) -> StrategyProfile:
+    """Resolve a profile from a preset name OR a TOML file path.
+
+    Examples:
+      load_profile("conservative")     -> the preset
+      load_profile("my_custom.toml")   -> loaded + validated from disk
+    """
+    if name_or_path in PRESETS:
+        return get_preset(name_or_path)  # type: ignore[arg-type]
+    path = Path(name_or_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"profile {name_or_path!r} not found: not a preset "
+            f"({sorted(PRESETS)}) and no file at {path}"
+        )
+    with path.open("rb") as f:
+        data = tomllib.load(f)
+    return StrategyProfile.model_validate(data)

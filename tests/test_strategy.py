@@ -11,6 +11,7 @@ from agentic_investor.orchestrator.strategy import (
     StrategyProfile,
     apply_overrides,
     get_preset,
+    load_profile,
 )
 
 
@@ -65,3 +66,35 @@ def test_apply_overrides_only_touches_provided_fields():
 def test_strategy_profile_validates_caps():
     with pytest.raises(ValidationError):
         StrategyProfile(max_single_pct=150.0)
+
+
+# load_profile
+
+
+def test_load_profile_returns_preset_by_name():
+    p = load_profile("moderate")
+    assert p.name == "moderate"
+    assert p.allocator == "llm"
+
+
+def test_load_profile_raises_for_missing_file():
+    with pytest.raises(FileNotFoundError):
+        load_profile("nonexistent-preset-name")
+
+
+def test_load_profile_reads_toml_file(tmp_path):
+    toml = tmp_path / "custom.toml"
+    toml.write_text(
+        'name = "my-conservative-plus"\n'
+        'allocator = "inverse_vol"\n'
+        'rebalance = "quarterly"\n'
+        'cash_yield_annual = 0.05\n'
+        'max_single_pct = 15.0\n'
+        'cash_floor_pct = 25.0\n'
+        'universe_extras = ["TLT", "GLD", "IEF"]\n'
+    )
+    p = load_profile(str(toml))
+    assert p.name == "my-conservative-plus"
+    assert p.allocator == "inverse_vol"
+    assert p.max_single_pct == 15.0
+    assert "IEF" in p.universe_extras

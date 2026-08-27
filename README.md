@@ -87,7 +87,7 @@ tests/
 - [x] M3: orchestrator + allocation
 - [x] M4: eval harness (backtest + agent/RAG evals + LLM-judge; also calibration Brier/ECE, rubric judge, NDCG/MAP, adversarial + regression suites)
 - [x] M5: autonomous stock picking (universe scan + selector for full-auto mode)
-- [ ] M6: risk-driven strategy engine v2 (presets per risk tier, per-dimension user overrides)
+- [x] M6: risk-driven strategy engine v2 (presets per risk tier, per-dimension user overrides)
 - [ ] M7: paper trading (Alpaca sandbox, live P&L, continuous AI loop scheduler)
 - [ ] M8: **live operating dashboard** (capstone: config panel, per-stock live charts with AI buy/sell markers, live reasoning feed, decision timeline, "Start AI" button)
 - [ ] M9: Langfuse + Docker + CI (+ eval-gated CI, ops metrics, prompt versioning + A/B, semantic cache, model routing, prompt-injection defense)

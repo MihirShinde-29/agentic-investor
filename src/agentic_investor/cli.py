@@ -61,12 +61,26 @@ def _recommend(
     top_n: int,
     exclude: list[str] | None,
     allocator: str | None,
+    profile_name: str | None,
+    rebalance: str | None,
+    band_abs_pct: float | None,
+    band_rel_pct: float | None,
+    band_buy_multiplier: float | None,
+    dd_buy_pause_pct: float | None,
+    cash_yield: float | None,
+    max_single_pct: float | None,
+    cash_floor_pct: float | None,
+    universe_extras: list[str] | None,
 ) -> None:
     from agentic_investor.llm.client import format_call_stats, reset_call_stats
     from agentic_investor.orchestrator.graph import run_orchestrator
     from agentic_investor.orchestrator.state import OrchestratorRequest
     from agentic_investor.orchestrator.store import save_recommendation
-    from agentic_investor.orchestrator.strategy import apply_overrides, get_preset
+    from agentic_investor.orchestrator.strategy import (
+        apply_overrides,
+        get_preset,
+        load_profile,
+    )
 
     if auto and tickers:
         print("Cannot combine --auto with explicit tickers.")
@@ -77,10 +91,25 @@ def _recommend(
 
     reset_call_stats()
 
-    # Resolve StrategyProfile: preset from --risk, overrides applied on top.
-    profile = get_preset(risk)  # type: ignore[arg-type]  argparse choices restrict values
-    if allocator is not None:
-        profile = apply_overrides(profile, allocator=allocator)
+    # Resolve StrategyProfile: --profile OVERRIDES --risk if set; then CLI
+    # per-dimension flags override profile fields.
+    if profile_name is not None:
+        profile = load_profile(profile_name)
+    else:
+        profile = get_preset(risk)  # type: ignore[arg-type]
+    profile = apply_overrides(
+        profile,
+        allocator=allocator,
+        rebalance=rebalance,
+        band_abs_pct=band_abs_pct,
+        band_rel_pct=band_rel_pct,
+        band_buy_multiplier=band_buy_multiplier,
+        dd_buy_pause_pct=dd_buy_pause_pct,
+        cash_yield_annual=cash_yield,
+        max_single_pct=max_single_pct,
+        cash_floor_pct=cash_floor_pct,
+        universe_extras=[t.upper() for t in universe_extras] if universe_extras else None,
+    )
 
     if auto:
         from agentic_investor.orchestrator.picker import pick_top_n
@@ -101,8 +130,13 @@ def _recommend(
         for p in picks:
             reasons = ", ".join(p.reasons[:4]) or "(no notable signals)"
             print(f"  {p.ticker:<8}{p.score:>7.2f}   {reasons}")
-        print()
         tickers = [p.ticker for p in picks]
+        # Profile-driven always-include diversifiers (e.g. TLT+GLD for conservative).
+        added_extras = [e for e in profile.universe_extras if e not in tickers]
+        if added_extras:
+            print(f"\n  + profile extras (always include): {', '.join(added_extras)}")
+            tickers.extend(added_extras)
+        print()
 
     req = OrchestratorRequest(
         tickers=[t.upper() for t in tickers],
@@ -136,10 +170,10 @@ def _eval_report(
     rec_id: int | None,
     start: str | None,
     end: str | None,
-    rebalance: str,
-    cash_yield: float,
-    tcost_bps: float,
-    slippage_bps: float,
+    rebalance: str | None,
+    cash_yield: float | None,
+    tcost_bps: float | None,
+    slippage_bps: float | None,
     n_samples: int,
     judge: bool,
     judge_model: str | None,
@@ -147,6 +181,7 @@ def _eval_report(
     out_dir: str,
     skip: list[str] | None,
     compare_to: str | None,
+    profile_name: str | None,
 ) -> int:
     import sys
 
@@ -157,8 +192,26 @@ def _eval_report(
         write_report,
     )
     from agentic_investor.llm.client import format_call_stats, reset_call_stats
+    from agentic_investor.orchestrator.strategy import (
+        StrategyProfile,
+        apply_overrides,
+        load_profile,
+    )
 
     reset_call_stats()
+
+    # Profile-driven L3 backtest defaults. Same pattern as _backtest.
+    if profile_name is not None:
+        profile = load_profile(profile_name)
+    else:
+        profile = StrategyProfile(name="cli-defaults")
+    profile = apply_overrides(
+        profile,
+        rebalance=rebalance,
+        cash_yield_annual=cash_yield,
+        tcost_bps=tcost_bps,
+        slippage_bps=slippage_bps,
+    )
 
     resolved_judge_model = None
     if judge:
@@ -170,10 +223,10 @@ def _eval_report(
         rec_id=rec_id,
         start=start,
         end=end,
-        rebalance=rebalance,
-        cash_yield_annual=cash_yield,
-        tcost_bps=tcost_bps,
-        slippage_bps=slippage_bps,
+        rebalance=profile.rebalance,
+        cash_yield_annual=profile.cash_yield_annual,
+        tcost_bps=profile.tcost_bps,
+        slippage_bps=profile.slippage_bps,
         n_samples=n_samples,
         judge_model=resolved_judge_model,
         k=k,
@@ -308,27 +361,38 @@ def _backtest(
     end: str | None,
     benchmark: str,
     plot: str | None,
-    rebalance: str,
-    band_abs_pct: float,
-    band_rel_pct: float,
-    band_buy_multiplier: float,
-    dd_buy_pause_pct: float,
-    cash_yield: float,
-    tcost_bps: float,
-    slippage_bps: float,
+    rebalance: str | None,
+    band_abs_pct: float | None,
+    band_rel_pct: float | None,
+    band_buy_multiplier: float | None,
+    dd_buy_pause_pct: float | None,
+    cash_yield: float | None,
+    tcost_bps: float | None,
+    slippage_bps: float | None,
+    profile_name: str | None,
 ) -> None:
     from agentic_investor.eval.backtest import backtest_recommendation
     from agentic_investor.orchestrator.store import load_recommendation
+    from agentic_investor.orchestrator.strategy import (
+        StrategyProfile,
+        apply_overrides,
+        load_profile,
+    )
 
     rec = load_recommendation(rec_id)
     if rec is None:
         print(f"No recommendation with id {rec_id}. Run `agentic-investor recommend ...` first.")
         return
-    result = backtest_recommendation(
-        rec,
-        start=start,
-        end=end,
-        benchmark=benchmark,
+
+    # Profile-driven backtest defaults. If no --profile, use a bare profile
+    # with the historical hardcoded defaults so behavior stays unchanged for
+    # commands that don't opt in.
+    if profile_name is not None:
+        profile = load_profile(profile_name)
+    else:
+        profile = StrategyProfile(name="cli-defaults")
+    profile = apply_overrides(
+        profile,
         rebalance=rebalance,
         band_abs_pct=band_abs_pct,
         band_rel_pct=band_rel_pct,
@@ -337,6 +401,21 @@ def _backtest(
         cash_yield_annual=cash_yield,
         tcost_bps=tcost_bps,
         slippage_bps=slippage_bps,
+    )
+
+    result = backtest_recommendation(
+        rec,
+        start=start,
+        end=end,
+        benchmark=benchmark,
+        rebalance=profile.rebalance,
+        band_abs_pct=profile.band_abs_pct,
+        band_rel_pct=profile.band_rel_pct,
+        band_buy_multiplier=profile.band_buy_multiplier,
+        dd_buy_pause_pct=profile.dd_buy_pause_pct,
+        cash_yield_annual=profile.cash_yield_annual,
+        tcost_bps=profile.tcost_bps,
+        slippage_bps=profile.slippage_bps,
     )
 
     print(
@@ -373,14 +452,14 @@ def _backtest(
             benchmark=benchmark,
             out_path=plot,
             rec_id=rec_id,
-            rebalance=rebalance,
-            band_abs_pct=band_abs_pct,
-            band_rel_pct=band_rel_pct,
-            band_buy_multiplier=band_buy_multiplier,
-            dd_buy_pause_pct=dd_buy_pause_pct,
-            cash_yield_annual=cash_yield,
-            tcost_bps=tcost_bps,
-            slippage_bps=slippage_bps,
+            rebalance=profile.rebalance,
+            band_abs_pct=profile.band_abs_pct,
+            band_rel_pct=profile.band_rel_pct,
+            band_buy_multiplier=profile.band_buy_multiplier,
+            dd_buy_pause_pct=profile.dd_buy_pause_pct,
+            cash_yield_annual=profile.cash_yield_annual,
+            tcost_bps=profile.tcost_bps,
+            slippage_bps=profile.slippage_bps,
         )
         print(f"\n  Equity curve saved: {out}")
 
@@ -417,6 +496,24 @@ def main() -> None:
                      choices=["llm", "equal_weight", "inverse_vol"],
                      default=None,
                      help="override profile's allocator (default: preset picks it)")
+    rec.add_argument("--profile", default=None,
+                     help="preset name (conservative/moderate/aggressive) "
+                          "or path to a TOML profile file")
+    rec.add_argument("--rebalance", default=None,
+                     choices=["never", "monthly", "quarterly", "bands", "on_signal"])
+    rec.add_argument("--band-abs-pct", type=float, default=None)
+    rec.add_argument("--band-rel-pct", type=float, default=None)
+    rec.add_argument("--band-buy-multiplier", type=float, default=None,
+                     help="asymmetric widen on the buy side (>1 = stingy)")
+    rec.add_argument("--dd-buy-pause-pct", type=float, default=None,
+                     help="pause BUY trades when portfolio DD deeper than this %%")
+    rec.add_argument("--cash-yield", type=float, default=None,
+                     help="annual risk-free yield on cash (e.g. 0.045)")
+    rec.add_argument("--max-single-pct", type=float, default=None)
+    rec.add_argument("--cash-floor-pct", type=float, default=None)
+    rec.add_argument("--universe-extras", nargs="*", default=None,
+                     help="always-include tickers appended after --auto pick "
+                          "(e.g. --universe-extras TLT GLD)")
 
     ev = sub.add_parser("eval-agents", help="run L2 agent output evals vs golden set")
     ev.add_argument("--n-samples", type=int, default=3,
@@ -443,11 +540,13 @@ def main() -> None:
                     help="recommendation id for L3 backtest (skip L3 if omitted)")
     rp.add_argument("--start", default=None, help="backtest start YYYY-MM-DD")
     rp.add_argument("--end", default=None, help="backtest end YYYY-MM-DD")
+    rp.add_argument("--profile", default=None,
+                    help="preset name or TOML profile path; supplies backtest defaults")
     rp.add_argument("--rebalance",
-                    choices=["never", "monthly", "quarterly", "bands"], default="never")
-    rp.add_argument("--cash-yield", type=float, default=0.0)
-    rp.add_argument("--tcost-bps", type=float, default=0.0)
-    rp.add_argument("--slippage-bps", type=float, default=0.0)
+                    choices=["never", "monthly", "quarterly", "bands"], default=None)
+    rp.add_argument("--cash-yield", type=float, default=None)
+    rp.add_argument("--tcost-bps", type=float, default=None)
+    rp.add_argument("--slippage-bps", type=float, default=None)
     rp.add_argument("--n-samples", type=int, default=3,
                     help="samples per agent case (default 3)")
     rp.add_argument("--judge", action="store_true", help="run LLM-as-judge on rationales")
@@ -471,34 +570,44 @@ def main() -> None:
         default=None,
         help="save equity curve PNG (default: out/equity_curve.png)",
     )
+    bt.add_argument("--profile", default=None,
+                    help="preset name (conservative/moderate/aggressive) OR path to "
+                         "TOML profile file; supplies backtest defaults, CLI flags "
+                         "override individual fields")
     bt.add_argument(
         "--rebalance",
         choices=["never", "monthly", "quarterly", "bands"],
-        default="never",
-        help="rebalance mode (default: never = buy-and-hold)",
+        default=None,
+        help="rebalance mode (default: profile or 'never')",
     )
-    bt.add_argument("--band-abs-pct", type=float, default=5.0,
-                    help="drift threshold in percentage points for --rebalance bands (default 5)")
-    bt.add_argument("--band-rel-pct", type=float, default=20.0,
-                    help="relative drift threshold %% of target for bands mode (default 20)")
-    bt.add_argument("--band-buy-multiplier", type=float, default=1.0,
-                    help="widen underweight-drift thresholds (>1 = stingy buy-back; default 1)")
-    bt.add_argument("--dd-buy-pause-pct", type=float, default=0.0,
-                    help="skip BUY trades when portfolio DD deeper than this %% (default 0=off)")
-    bt.add_argument("--cash-yield", type=float, default=0.0,
-                    help="annual risk-free yield on cash, e.g. 0.045 for 4.5%% (default 0)")
-    bt.add_argument("--tcost-bps", type=float, default=0.0,
-                    help="commission in basis points per trade (default 0)")
-    bt.add_argument("--slippage-bps", type=float, default=0.0,
-                    help="slippage in basis points per fill (default 0)")
+    bt.add_argument("--band-abs-pct", type=float, default=None,
+                    help="drift threshold in percentage points for --rebalance bands")
+    bt.add_argument("--band-rel-pct", type=float, default=None,
+                    help="relative drift threshold %% of target for bands mode")
+    bt.add_argument("--band-buy-multiplier", type=float, default=None,
+                    help="widen underweight-drift thresholds (>1 = stingy buy-back)")
+    bt.add_argument("--dd-buy-pause-pct", type=float, default=None,
+                    help="skip BUY trades when portfolio DD deeper than this %%")
+    bt.add_argument("--cash-yield", type=float, default=None,
+                    help="annual risk-free yield on cash, e.g. 0.045 for 4.5%%")
+    bt.add_argument("--tcost-bps", type=float, default=None,
+                    help="commission in basis points per trade")
+    bt.add_argument("--slippage-bps", type=float, default=None,
+                    help="slippage in basis points per fill")
 
     args = parser.parse_args()
     if args.cmd == "analyze":
         _analyze(args.tickers, args.model)
     elif args.cmd == "recommend":
-        _recommend(args.tickers, args.amount, args.risk, args.target,
-                   args.auto, args.universe, args.top_n, args.exclude,
-                   args.allocator)
+        _recommend(
+            args.tickers, args.amount, args.risk, args.target,
+            args.auto, args.universe, args.top_n, args.exclude,
+            args.allocator, args.profile,
+            args.rebalance, args.band_abs_pct, args.band_rel_pct,
+            args.band_buy_multiplier, args.dd_buy_pause_pct,
+            args.cash_yield, args.max_single_pct, args.cash_floor_pct,
+            args.universe_extras,
+        )
     elif args.cmd == "eval-agents":
         _eval_agents(args.n_samples, args.model, args.cases, args.judge, args.judge_model)
     elif args.cmd == "eval-retrieval":
@@ -508,7 +617,7 @@ def main() -> None:
             args.rec_id, args.start, args.end, args.rebalance,
             args.cash_yield, args.tcost_bps, args.slippage_bps,
             args.n_samples, args.judge, args.judge_model, args.k,
-            args.out_dir, args.skip, args.compare_to,
+            args.out_dir, args.skip, args.compare_to, args.profile,
         )
     elif args.cmd == "backtest":
         _backtest(
@@ -525,6 +634,7 @@ def main() -> None:
             args.cash_yield,
             args.tcost_bps,
             args.slippage_bps,
+            args.profile,
         )
     else:
         _print_config()
