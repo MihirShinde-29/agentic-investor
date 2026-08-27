@@ -1,0 +1,8 @@
+{"id": "nvda-earnings-guidance", "ticker": "NVDA", "query": "quarterly earnings and revenue guidance", "relevant_ids": ["nvda-earn-01", "nvda-guid-02"], "notes": "Q3 beat and raised guidance"}
+{"id": "nvda-new-product", "ticker": "NVDA", "query": "new GPU product launch", "relevant_ids": ["nvda-prod-03"], "notes": "Blackwell Ultra launch"}
+{"id": "nvda-regulatory", "ticker": "NVDA", "query": "regulatory or antitrust concerns", "relevant_ids": ["nvda-legl-05"], "notes": "EU antitrust probe"}
+{"id": "nvda-analyst-rating", "ticker": "NVDA", "query": "analyst upgrade or price target change", "relevant_ids": ["nvda-ratg-04"], "notes": "Morgan Stanley PT raise"}
+{"id": "aapl-china-sales", "ticker": "AAPL", "query": "China market sales and competitive pressure", "relevant_ids": ["aapl-chna-09"], "notes": "China slowdown vs Huawei"}
+{"id": "aapl-services-growth", "ticker": "AAPL", "query": "services revenue growth", "relevant_ids": ["aapl-svcs-08", "aapl-earn-06"], "notes": "services record + Q4 print"}
+{"id": "msft-ai-partnerships", "ticker": "MSFT", "query": "AI partnerships and acquisitions", "relevant_ids": ["msft-ai-12", "msft-acqi-13"], "notes": "OpenAI extension + Neuro buyout"}
+{"id": "msft-cloud-growth", "ticker": "MSFT", "query": "Azure cloud growth and market share", "relevant_ids": ["msft-earn-11"], "notes": "Q1 30% Azure growth"}

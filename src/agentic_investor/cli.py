@@ -6,6 +6,7 @@
                                                                 run the full orchestrator
   agentic-investor backtest 1 --start 2024-01-01                backtest a recommendation vs SPY
   agentic-investor eval-agents --n-samples 3                    L2 agent eval vs golden set
+  agentic-investor eval-retrieval --k 5                         L1 RAG retrieval eval
 """
 
 import argparse
@@ -73,6 +74,41 @@ def _recommend(tickers: list[str], amount: float, risk: str, target: str) -> Non
         print("\nGuardrail violations:")
         for v in rec.violations:
             print(f"  - {v}")
+
+
+def _eval_retrieval(k: int, fixtures: str | None, cases: str | None) -> None:
+    from agentic_investor.eval.retrieval import (
+        DEFAULT_CASES,
+        DEFAULT_FIXTURES,
+        run_retrieval_eval,
+    )
+
+    report = run_retrieval_eval(
+        k=k,
+        fixtures_path=fixtures or DEFAULT_FIXTURES,
+        cases_path=cases or DEFAULT_CASES,
+    )
+
+    print(
+        f"\nRetrieval eval  (news RAG, k={report.k}, "
+        f"{report.n_cases} cases over {report.n_fixtures} fixtures)\n"
+    )
+    print(
+        f"  {'Case':<26}{'Hit@k':>7}{'Recall@k':>10}"
+        f"{'MRR':>7}{'NDCG@k':>9}   {'Retrieved (top-3)'}"
+    )
+    print("  " + "-" * 90)
+    for cr in report.per_case:
+        m = cr.metrics
+        top3 = ", ".join(cr.retrieved_ids[:3]) if cr.retrieved_ids else "-"
+        print(
+            f"  {cr.case_id:<26}{m.hit_at_k:>7.2f}{m.recall_at_k:>10.2f}"
+            f"{m.mrr:>7.2f}{m.ndcg_at_k:>9.2f}   {top3}"
+        )
+    print()
+    a = report.aggregate
+    print(f"  Aggregate  Hit@k={a.hit_at_k:.3f}  Recall@k={a.recall_at_k:.3f}"
+          f"  MRR={a.mrr:.3f}  NDCG@k={a.ndcg_at_k:.3f}")
 
 
 def _eval_agents(n_samples: int, model: str | None, cases: str | None) -> None:
@@ -212,6 +248,13 @@ def main() -> None:
     ev.add_argument("--cases", default=None,
                     help="path to jsonl cases file (default: bundled golden set)")
 
+    er = sub.add_parser("eval-retrieval", help="run L1 RAG retrieval evals on news golden set")
+    er.add_argument("--k", type=int, default=5, help="top-k for retrieval (default 5)")
+    er.add_argument("--fixtures", default=None,
+                    help="path to jsonl fixture articles (default: bundled)")
+    er.add_argument("--cases", default=None,
+                    help="path to jsonl retrieval cases (default: bundled)")
+
     bt = sub.add_parser("backtest", help="backtest a saved recommendation vs a benchmark")
     bt.add_argument("rec_id", type=int)
     bt.add_argument("--start", default=None, help="YYYY-MM-DD")
@@ -252,6 +295,8 @@ def main() -> None:
         _recommend(args.tickers, args.amount, args.risk, args.target)
     elif args.cmd == "eval-agents":
         _eval_agents(args.n_samples, args.model, args.cases)
+    elif args.cmd == "eval-retrieval":
+        _eval_retrieval(args.k, args.fixtures, args.cases)
     elif args.cmd == "backtest":
         _backtest(
             args.rec_id,
