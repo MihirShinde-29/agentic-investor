@@ -5,6 +5,7 @@
   agentic-investor recommend AAPL NVDA --amount 10000 --risk moderate
                                                                 run the full orchestrator
   agentic-investor backtest 1 --start 2024-01-01                backtest a recommendation vs SPY
+  agentic-investor eval-agents --n-samples 3                    L2 agent eval vs golden set
 """
 
 import argparse
@@ -72,6 +73,33 @@ def _recommend(tickers: list[str], amount: float, risk: str, target: str) -> Non
         print("\nGuardrail violations:")
         for v in rec.violations:
             print(f"  - {v}")
+
+
+def _eval_agents(n_samples: int, model: str | None, cases: str | None) -> None:
+    from agentic_investor.eval.agents import DEFAULT_CASES, run_agent_eval
+
+    report = run_agent_eval(
+        cases_path=cases or DEFAULT_CASES, n_samples=n_samples, model=model
+    )
+
+    print(
+        f"\nAgent eval  (technical, N={report.n_samples_per_case} samples/case, "
+        f"{report.n_cases} cases)\n"
+    )
+    print(f"  {'Case':<28}{'Schema':>8}{'Stance':>8}{'AvgConf':>9}{'ConfOK':>8}   {'Stances seen'}")
+    print("  " + "-" * 90)
+    for r in report.per_case:
+        seen = ",".join(dict.fromkeys(r.stances_seen)) or "-"
+        print(
+            f"  {r.case_id:<28}"
+            f"{r.schema_validity:>8.2f}{r.stance_pass_rate:>8.2f}"
+            f"{r.avg_confidence:>9.2f}{'YES' if r.confidence_in_range else 'no':>8}   {seen}"
+        )
+    print()
+    print(f"  Aggregate schema validity: {report.schema_validity:.2%}")
+    print(f"  Aggregate stance pass:     {report.stance_pass_rate:.2%}")
+    print(f"  Confidence-in-range rate:  {report.confidence_in_range_rate:.2%}")
+    print(f"  Fully passing cases:       {report.fully_passing_cases}/{report.n_cases}")
 
 
 def _backtest(
@@ -177,6 +205,13 @@ def main() -> None:
     )
     rec.add_argument("--target", default="12-month growth")
 
+    ev = sub.add_parser("eval-agents", help="run L2 agent output evals vs golden set")
+    ev.add_argument("--n-samples", type=int, default=3,
+                    help="samples per case (default 3)")
+    ev.add_argument("--model", default=None, help="override LLM model string")
+    ev.add_argument("--cases", default=None,
+                    help="path to jsonl cases file (default: bundled golden set)")
+
     bt = sub.add_parser("backtest", help="backtest a saved recommendation vs a benchmark")
     bt.add_argument("rec_id", type=int)
     bt.add_argument("--start", default=None, help="YYYY-MM-DD")
@@ -215,6 +250,8 @@ def main() -> None:
         _analyze(args.tickers, args.model)
     elif args.cmd == "recommend":
         _recommend(args.tickers, args.amount, args.risk, args.target)
+    elif args.cmd == "eval-agents":
+        _eval_agents(args.n_samples, args.model, args.cases)
     elif args.cmd == "backtest":
         _backtest(
             args.rec_id,
