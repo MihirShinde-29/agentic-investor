@@ -37,7 +37,9 @@ def _print_config() -> None:
 def _analyze(tickers: list[str], model: str | None) -> None:
     # Heavy imports (litellm) only when we actually analyze.
     from agentic_investor.agents.technical import analyze_ticker
+    from agentic_investor.llm.client import format_call_stats, reset_call_stats
 
+    reset_call_stats()
     for t in tickers:
         try:
             sig = analyze_ticker(t, model=model)
@@ -46,6 +48,7 @@ def _analyze(tickers: list[str], model: str | None) -> None:
             continue
         print(f"{sig.ticker}: {sig.stance} (confidence {sig.confidence:.2f})")
         print(f"  {sig.reasoning}\n")
+    print(format_call_stats())
 
 
 def _recommend(
@@ -58,6 +61,7 @@ def _recommend(
     top_n: int,
     exclude: list[str] | None,
 ) -> None:
+    from agentic_investor.llm.client import format_call_stats, reset_call_stats
     from agentic_investor.orchestrator.graph import run_orchestrator
     from agentic_investor.orchestrator.state import OrchestratorRequest
     from agentic_investor.orchestrator.store import save_recommendation
@@ -68,6 +72,8 @@ def _recommend(
     if not auto and not tickers:
         print("Provide tickers, or use --auto to let the AI pick from a universe.")
         return
+
+    reset_call_stats()
 
     if auto:
         from agentic_investor.orchestrator.picker import pick_top_n
@@ -115,6 +121,7 @@ def _recommend(
         print("\nGuardrail violations:")
         for v in rec.violations:
             print(f"  - {v}")
+    print("\n" + format_call_stats())
 
 
 def _eval_report(
@@ -141,6 +148,9 @@ def _eval_report(
         run_full_eval,
         write_report,
     )
+    from agentic_investor.llm.client import format_call_stats, reset_call_stats
+
+    reset_call_stats()
 
     resolved_judge_model = None
     if judge:
@@ -171,6 +181,8 @@ def _eval_report(
     print()
     print(f"  Wrote: {md_path}")
     print(f"  Wrote: {json_path}")
+    print()
+    print(format_call_stats())
 
     if compare_to is not None:
         baseline = load_baseline(compare_to)
@@ -229,6 +241,9 @@ def _eval_agents(
     judge_model: str | None,
 ) -> None:
     from agentic_investor.eval.agents import DEFAULT_CASES, run_agent_eval
+    from agentic_investor.llm.client import format_call_stats, reset_call_stats
+
+    reset_call_stats()
 
     resolved_judge_model = None
     if judge:
@@ -275,6 +290,8 @@ def _eval_agents(
     if report.avg_rationale_overall is not None:
         print(f"  Avg rationale overall:     {report.avg_rationale_overall:.2f}/5"
               f"  (judge model: {report.judge_model})")
+    print()
+    print(format_call_stats())
 
 
 def _backtest(
