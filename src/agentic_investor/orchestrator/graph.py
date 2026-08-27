@@ -1,15 +1,20 @@
-"""LangGraph orchestrator: fan out to agents, allocate, then validate.
+"""LangGraph orchestrator: fan out to agents, allocate (profile-driven), then validate.
 
 Three nodes:
-  gather_signals  runs both agents across all tickers in parallel via a
-                  ThreadPoolExecutor. A failed agent for one ticker is
-                  logged and skipped, not fatal.
-  allocate        summarizes the collected signals and asks an allocator LLM
-                  for an Allocation. The Allocation model validates that
-                  weights sum to 100, and instructor auto-retries on failure.
-  validate        checks risk-tier rules (max single, cash floor). Kept as a
-                  separate node so a conditional retry-back-to-allocate loop
-                  is a one-line change later.
+  gather_signals  fetches per-ticker MarketSnapshots in parallel, then runs
+                  the technical + news agents from those snapshots (also
+                  parallel). Snapshots are kept in state so non-LLM allocators
+                  can use them without re-fetching. A failed agent for one
+                  ticker is logged and skipped, not fatal.
+  allocate        routes to the allocator chosen by StrategyProfile.allocator:
+                  - "llm"          -> in-file allocator LLM call
+                  - "equal_weight" / "inverse_vol" / ...  -> allocators.py
+                  Guardrails (max_single, cash_floor) come from the profile
+                  and are enforced by the Allocation model_validator +
+                  post-hoc check_profile_rules.
+  validate        checks profile guardrails and emits violations. Kept
+                  separate so a conditional retry-back-to-allocate loop is a
+                  one-line change later.
 """
 
 import json
@@ -19,16 +24,18 @@ from concurrent.futures import ThreadPoolExecutor
 from langgraph.graph import END, START, StateGraph
 
 from agentic_investor.agents.news import NewsSignal, analyze_news
-from agentic_investor.agents.technical import TechnicalSignal, analyze_ticker
+from agentic_investor.agents.technical import TechnicalSignal, analyze_technical
 from agentic_investor.llm.client import structured_complete
+from agentic_investor.orchestrator.allocators import get_allocator
 from agentic_investor.orchestrator.state import (
-    RISK_RULES,
     Allocation,
     GraphState,
     OrchestratorRequest,
     Recommendation,
-    check_risk_rules,
+    check_profile_rules,
 )
+from agentic_investor.orchestrator.strategy import StrategyProfile, get_preset
+from agentic_investor.tools.market import MarketSnapshot, get_market_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +46,8 @@ risk tolerance, and target, produce a paper-portfolio allocation.
 
 Hard rules your output MUST satisfy:
 - All weights, including cash_pct, must sum to 100.
-- Risk caps:
-  * conservative: no single position > 20%, cash_pct >= 20.
-  * moderate:     no single position > 35%, cash_pct >= 10.
-  * aggressive:   no single position > 50%, cash_pct >= 0.
+- No single position weight may exceed the profile's max_single_pct cap.
+- cash_pct must be at least the profile's cash_floor_pct.
 - For each position, dollars = amount * weight_pct / 100; same for cash.
 
 How to reason:
@@ -67,17 +72,39 @@ def _summarize_signals(tech: list[TechnicalSignal], news: list[NewsSignal]) -> s
     return json.dumps(by_ticker, indent=2)
 
 
+def _profile_from_state(state: GraphState) -> StrategyProfile:
+    """Fall back to the risk-tier preset if no explicit profile was supplied."""
+    profile = state.get("profile")
+    if profile is not None:
+        return profile
+    return get_preset(state["request"].risk)
+
+
 def gather_signals(state: GraphState) -> dict:
+    """Fetch snapshots + run technical/news agents. Store snapshots in state so
+    non-LLM allocators can use them without re-fetching prices.
+    """
     req = state["request"]
+
+    # Fetch MarketSnapshots in parallel. Higher concurrency is fine here - no LLM calls.
+    snapshots: dict[str, MarketSnapshot] = {}
+    with ThreadPoolExecutor(max_workers=min(8, max(2, len(req.tickers)))) as pool:
+        fetches = {pool.submit(get_market_snapshot, t): t for t in req.tickers}
+        for fut, ticker in fetches.items():
+            try:
+                snapshots[ticker] = fut.result()
+            except Exception as e:  # noqa: BLE001 - one bad ticker mustn't sink the run
+                logger.warning("snapshot failed for %s: %s", ticker, e)
+
+    # Analyze in parallel. Cap concurrent LLM calls at 2 to stay gentle on
+    # free-tier rate limits + avoid instructor's mode-registration race.
     tech: list[TechnicalSignal] = []
     news: list[NewsSignal] = []
-    # Cap concurrent LLM calls at 2 to stay gentle on free-tier rate limits and
-    # avoid instructor's mode-registration race on the very first parallel call.
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {}
-        for t in req.tickers:
-            futures[pool.submit(analyze_ticker, t)] = ("tech", t)
-            futures[pool.submit(analyze_news, t)] = ("news", t)
+        for ticker, snap in snapshots.items():
+            futures[pool.submit(analyze_technical, snap)] = ("tech", ticker)
+            futures[pool.submit(analyze_news, ticker)] = ("news", ticker)
         for fut, (kind, ticker) in futures.items():
             try:
                 out = fut.result()
@@ -88,12 +115,13 @@ def gather_signals(state: GraphState) -> dict:
                 tech.append(out)
             else:
                 news.append(out)
-    return {"technical_signals": tech, "news_signals": news}
+
+    return {"technical_signals": tech, "news_signals": news, "market_snapshots": snapshots}
 
 
 def _messages(state: GraphState) -> list[dict]:
     req = state["request"]
-    max_single, cash_floor = RISK_RULES[req.risk]
+    profile = _profile_from_state(state)
     signals = _summarize_signals(
         state.get("technical_signals", []), state.get("news_signals", [])
     )
@@ -105,8 +133,9 @@ def _messages(state: GraphState) -> list[dict]:
                 f"Request:\n"
                 f"  tickers: {', '.join(req.tickers)}\n"
                 f"  amount:  ${req.amount:,.2f}\n"
-                f"  risk:    {req.risk} "
-                f"(max single {max_single:.0f}%, cash floor {cash_floor:.0f}%)\n"
+                f"  risk:    {req.risk} (profile '{profile.name}': max single "
+                f"{profile.max_single_pct:.0f}%, cash floor "
+                f"{profile.cash_floor_pct:.0f}%)\n"
                 f"  target:  {req.target}\n\n"
                 f"Signals (JSON, keyed by ticker):\n{signals}\n\n"
                 "Produce a valid Allocation."
@@ -116,11 +145,24 @@ def _messages(state: GraphState) -> list[dict]:
 
 
 def allocate(state: GraphState) -> dict:
-    return {"allocation": structured_complete(Allocation, _messages(state))}
+    """Dispatch to the allocator selected by profile.allocator."""
+    profile = _profile_from_state(state)
+    if profile.allocator == "llm":
+        return {"allocation": structured_complete(Allocation, _messages(state))}
+    allocator_fn = get_allocator(profile.allocator)
+    alloc = allocator_fn(
+        state["request"],
+        state.get("technical_signals", []),
+        state.get("news_signals", []),
+        state.get("market_snapshots", {}),
+        profile,
+    )
+    return {"allocation": alloc}
 
 
 def validate(state: GraphState) -> dict:
-    return {"violations": check_risk_rules(state["allocation"], state["request"].risk)}
+    profile = _profile_from_state(state)
+    return {"violations": check_profile_rules(state["allocation"], profile)}
 
 
 def build_graph():
@@ -145,8 +187,15 @@ def _get_graph():
     return _graph
 
 
-def run_orchestrator(request: OrchestratorRequest) -> Recommendation:
-    final = _get_graph().invoke({"request": request})
+def run_orchestrator(
+    request: OrchestratorRequest,
+    profile: StrategyProfile | None = None,
+) -> Recommendation:
+    """Run the orchestrator graph. If profile is None, uses the risk-tier preset."""
+    initial: dict = {"request": request}
+    if profile is not None:
+        initial["profile"] = profile
+    final = _get_graph().invoke(initial)
     return Recommendation(
         request=request,
         allocation=final["allocation"],

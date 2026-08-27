@@ -60,11 +60,13 @@ def _recommend(
     universe: str,
     top_n: int,
     exclude: list[str] | None,
+    allocator: str | None,
 ) -> None:
     from agentic_investor.llm.client import format_call_stats, reset_call_stats
     from agentic_investor.orchestrator.graph import run_orchestrator
     from agentic_investor.orchestrator.state import OrchestratorRequest
     from agentic_investor.orchestrator.store import save_recommendation
+    from agentic_investor.orchestrator.strategy import apply_overrides, get_preset
 
     if auto and tickers:
         print("Cannot combine --auto with explicit tickers.")
@@ -74,6 +76,11 @@ def _recommend(
         return
 
     reset_call_stats()
+
+    # Resolve StrategyProfile: preset from --risk, overrides applied on top.
+    profile = get_preset(risk)  # type: ignore[arg-type]  argparse choices restrict values
+    if allocator is not None:
+        profile = apply_overrides(profile, allocator=allocator)
 
     if auto:
         from agentic_investor.orchestrator.picker import pick_top_n
@@ -103,12 +110,13 @@ def _recommend(
         risk=risk,  # type: ignore[arg-type]  argparse choices restrict values
         target=target,
     )
-    rec = run_orchestrator(req)
+    rec = run_orchestrator(req, profile=profile)
     rec_id = save_recommendation(rec)
 
     print(
         f"Recommendation #{rec_id}  "
-        f"(risk: {req.risk}, ${req.amount:,.2f}, target: {req.target})\n"
+        f"(profile: {profile.name}, allocator: {profile.allocator}, "
+        f"${req.amount:,.2f}, target: {req.target})\n"
     )
     for p in rec.allocation.positions:
         print(f"  {p.ticker:6} {p.weight_pct:5.1f}%  ${p.dollars:>10,.2f}   {p.rationale}")
@@ -405,6 +413,10 @@ def main() -> None:
                      help="how many top-scored tickers to keep (default 5)")
     rec.add_argument("--exclude", nargs="*", default=None,
                      help="tickers to skip in --auto mode")
+    rec.add_argument("--allocator",
+                     choices=["llm", "equal_weight", "inverse_vol"],
+                     default=None,
+                     help="override profile's allocator (default: preset picks it)")
 
     ev = sub.add_parser("eval-agents", help="run L2 agent output evals vs golden set")
     ev.add_argument("--n-samples", type=int, default=3,
@@ -485,7 +497,8 @@ def main() -> None:
         _analyze(args.tickers, args.model)
     elif args.cmd == "recommend":
         _recommend(args.tickers, args.amount, args.risk, args.target,
-                   args.auto, args.universe, args.top_n, args.exclude)
+                   args.auto, args.universe, args.top_n, args.exclude,
+                   args.allocator)
     elif args.cmd == "eval-agents":
         _eval_agents(args.n_samples, args.model, args.cases, args.judge, args.judge_model)
     elif args.cmd == "eval-retrieval":

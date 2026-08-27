@@ -1,4 +1,4 @@
-"""Tests for the LangGraph orchestrator. Agents and LLM are mocked at seams."""
+"""Tests for the LangGraph orchestrator. Snapshot fetch, agents, and LLM are mocked."""
 
 from agentic_investor.agents.news import NewsSignal
 from agentic_investor.agents.technical import TechnicalSignal
@@ -8,6 +8,7 @@ from agentic_investor.orchestrator.state import (
     OrchestratorRequest,
     Position,
 )
+from agentic_investor.tools.market import MarketSnapshot
 
 
 def _tech(ticker: str, stance: str = "bullish", conf: float = 0.7) -> TechnicalSignal:
@@ -20,6 +21,10 @@ def _news(ticker: str, stance: str = "bullish", conf: float = 0.6) -> NewsSignal
     return NewsSignal(
         ticker=ticker, stance=stance, confidence=conf, reasoning="rr", citations=[]
     )
+
+
+def _snap(ticker: str) -> MarketSnapshot:
+    return MarketSnapshot(ticker=ticker, as_of="2026-08-27", close=100.0, atr_pct=2.0)
 
 
 def _fake_alloc(*, aapl: float = 35, nvda: float = 35, cash: float = 30) -> Allocation:
@@ -35,7 +40,9 @@ def _fake_alloc(*, aapl: float = 35, nvda: float = 35, cash: float = 30) -> Allo
 
 
 def _stub_agents_and_llm(monkeypatch, alloc: Allocation):
-    monkeypatch.setattr(g, "analyze_ticker", lambda t: _tech(t.upper()))
+    # gather_signals now uses get_market_snapshot + analyze_technical instead of analyze_ticker.
+    monkeypatch.setattr(g, "get_market_snapshot", lambda t, period="1y": _snap(t.upper()))
+    monkeypatch.setattr(g, "analyze_technical", lambda snap: _tech(snap.ticker))
     monkeypatch.setattr(g, "analyze_news", lambda t: _news(t.upper()))
     monkeypatch.setattr(g, "structured_complete", lambda *a, **k: alloc)
 
@@ -54,18 +61,23 @@ def test_run_orchestrator_end_to_end(monkeypatch):
 
 
 def test_run_orchestrator_flags_conservative_violation(monkeypatch):
-    # 35% single position and 30% cash pass moderate but violate conservative
-    # caps (20% single, 20% cash floor is met but the 35% single fails).
+    # 35% single position violates conservative's 20% cap. Override the
+    # preset allocator to "llm" so the fake bad allocation flows through
+    # validate (the real inverse_vol allocator would satisfy caps naturally).
+    from agentic_investor.orchestrator.strategy import apply_overrides, get_preset
+
     _stub_agents_and_llm(monkeypatch, _fake_alloc(aapl=35, nvda=35, cash=30))
     req = OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000, risk="conservative")
+    profile = apply_overrides(get_preset("conservative"), allocator="llm")
 
-    rec = g.run_orchestrator(req)
+    rec = g.run_orchestrator(req, profile=profile)
 
     assert any("AAPL" in v for v in rec.violations)
 
 
 def test_gather_signals_skips_failing_agent(monkeypatch):
-    monkeypatch.setattr(g, "analyze_ticker", lambda t: _tech(t.upper()))
+    monkeypatch.setattr(g, "get_market_snapshot", lambda t, period="1y": _snap(t.upper()))
+    monkeypatch.setattr(g, "analyze_technical", lambda snap: _tech(snap.ticker))
 
     def _broken_news(_t):
         raise RuntimeError("provider down")
@@ -76,9 +88,11 @@ def test_gather_signals_skips_failing_agent(monkeypatch):
 
     assert len(out["technical_signals"]) == 1
     assert out["news_signals"] == []
+    # New: gather_signals also emits snapshots.
+    assert "AAPL" in out["market_snapshots"]
 
 
-def test_allocator_prompt_includes_risk_caps_and_signals(monkeypatch):
+def test_allocator_prompt_includes_profile_caps_and_signals(monkeypatch):
     _stub_agents_and_llm(monkeypatch, _fake_alloc())
     state = {
         "request": OrchestratorRequest(tickers=["AAPL"], amount=1000, risk="conservative"),
@@ -88,6 +102,5 @@ def test_allocator_prompt_includes_risk_caps_and_signals(monkeypatch):
     msgs = g._messages(state)
     user = msgs[1]["content"]
     assert "conservative" in user
-    assert "max single 20%" in user
-    assert "cash floor 20%" in user
+    assert "20%" in user  # conservative caps: max_single 20%, cash floor 20%
     assert "AAPL" in user

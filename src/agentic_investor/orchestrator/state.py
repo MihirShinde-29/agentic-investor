@@ -74,6 +74,28 @@ def check_risk_rules(allocation: Allocation, risk: RiskLevel) -> list[str]:
     return violations
 
 
+def check_profile_rules(allocation: Allocation, profile) -> list[str]:
+    """Profile-aware version of check_risk_rules. Accepts a StrategyProfile.
+
+    Uses the profile's max_single_pct + cash_floor_pct rather than the fixed
+    RISK_RULES table. This is the M6+ path; check_risk_rules stays for backward
+    compatibility.
+    """
+    violations: list[str] = []
+    for p in allocation.positions:
+        if p.weight_pct > profile.max_single_pct + 0.5:
+            violations.append(
+                f"{p.ticker} weight {p.weight_pct:.1f}% exceeds "
+                f"{profile.name} cap {profile.max_single_pct:.0f}%"
+            )
+    if allocation.cash_pct + 0.5 < profile.cash_floor_pct:
+        violations.append(
+            f"cash {allocation.cash_pct:.1f}% below "
+            f"{profile.name} floor {profile.cash_floor_pct:.0f}%"
+        )
+    return violations
+
+
 class Recommendation(BaseModel):
     request: OrchestratorRequest
     allocation: Allocation
@@ -86,7 +108,9 @@ class GraphState(TypedDict, total=False):
     """Shared bag threaded through the LangGraph nodes."""
 
     request: OrchestratorRequest
+    profile: object  # StrategyProfile, kept as object to avoid circular imports
     technical_signals: list[TechnicalSignal]
     news_signals: list[NewsSignal]
+    market_snapshots: dict[str, object]  # dict[str, MarketSnapshot]
     allocation: Allocation
     violations: list[str]
