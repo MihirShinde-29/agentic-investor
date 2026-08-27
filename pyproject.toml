@@ -35,7 +35,7 @@ dev = [
 
 [tool.uv]
 # Project and uv cache live on different drives (D: vs C:), so hardlinking
-# isn't possible — copy instead and silence the warning.
+# isn't possible; copy instead and silence the warning.
 link-mode = "copy"
 
 [tool.ruff]

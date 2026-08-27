@@ -85,20 +85,23 @@ tests/
 - [x] M1: data tools + Technical Agent
 - [x] M2: News-Sentiment Agent + RAG
 - [x] M3: orchestrator + allocation
-- [ ] M4: eval harness (backtest + agent/RAG evals + LLM-judge)
+- [ ] M4: eval harness (backtest + agent/RAG evals + LLM-judge; also calibration Brier/ECE, rubric judge, NDCG/MAP, adversarial + regression suites)
 - [ ] M5: autonomous stock picking (universe scan + selector for full-auto mode)
 - [ ] M6: risk-driven strategy engine v2 (presets per risk tier, per-dimension user overrides)
 - [ ] M7: paper trading (Alpaca sandbox, live P&L, continuous AI loop scheduler)
-- [ ] M8: **live operating dashboard** (capstone — config panel, per-stock live charts with AI buy/sell markers, live reasoning feed, decision timeline, "Start AI" button)
-- [ ] M9: Langfuse + Docker + CI (+ eval-gated CI, ops metrics)
+- [ ] M8: **live operating dashboard** (capstone: config panel, per-stock live charts with AI buy/sell markers, live reasoning feed, decision timeline, "Start AI" button)
+- [ ] M9: Langfuse + Docker + CI (+ eval-gated CI, ops metrics, prompt versioning + A/B, semantic cache, model routing, prompt-injection defense)
 - [ ] M10: Macro / regime agent + regime-aware allocation
 - [ ] M11: Fundamentals + Catalyst agents (completes 4-agent original spec)
 - [ ] M12: Social sentiment agent (Reddit + Google Trends, composite score)
 - [ ] M13: A/B testing on live paper (statistical strategy comparison, blocked by M7)
+- [ ] M14: prompt & reasoning quality v2 (few-shot, CoT, self-consistency, cross-model ensembling)
+- [ ] M15: advanced RAG (cross-encoder rerank, hybrid BM25+semantic, query rewrite / HyDE)
+- [ ] M16: multi-agent debate + tool-use mid-reasoning (bull vs bear with judge)
+- [ ] M17: agent memory + outcome feedback (per-ticker episodic memory, calibration from real hits)
 
 Later (nice-to-haves, not tracked as milestones):
 - Personalization filters (ESG, industry blacklist, tax-aware)
 - Weekly digest email / webhook alerts on signal flips
 - Multi-user auth (Supabase or JWT), pgvector, React dashboard
 - Options / derivatives, real-time streaming quotes
-- Docs / ADRs, one-click cloud deploy (Fly.io / Render)
