@@ -12,11 +12,13 @@ wheels/
 # Secrets, never commit real keys
 .env
 
-# Local data / vector store / databases
+# Local data / vector store / databases / plot output
 data/
 .chroma/
+out/
 *.db
 *.sqlite3
+*.png
 
 # Caches
 .pytest_cache/

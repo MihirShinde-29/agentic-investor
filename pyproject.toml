@@ -13,6 +13,7 @@ dependencies = [
     "instructor>=1.15.4",
     "langgraph>=1.2.11",
     "litellm>=1.96.2",
+    "matplotlib>=3.11.1",
     "pandas>=3.0.5",
     "pydantic-settings>=2.15.0",
     "sentence-transformers>=6.0.0",

@@ -124,22 +124,26 @@ def alpha_beta(portfolio_returns: pd.Series, benchmark_returns: pd.Series) -> tu
     return alpha_daily * TRADING_DAYS, beta
 
 
-def backtest_recommendation(
+def run_backtest(
     rec: Recommendation,
     *,
     start: str | date | None = None,
     end: str | date | None = None,
     benchmark: str = "SPY",
-) -> BacktestResult:
-    """Fetch prices, simulate the recommended allocation vs SPY, return metrics."""
+) -> tuple[BacktestResult, pd.Series, pd.Series]:
+    """Fetch prices, simulate, and return (metrics, portfolio_value, benchmark_value).
+
+    Callers that only want the numbers use backtest_recommendation; plotting and
+    per-day inspection use this to get the raw value series.
+    """
     weights = {p.ticker: p.weight_pct / 100.0 for p in rec.allocation.positions}
     tickers = list(weights.keys()) + [benchmark]
 
     prices = fetch_prices(tickers, start=start, end=end)
     if prices.empty:
         raise ValueError("no prices returned for backtest window")
-    # Drop rows where any ticker is missing so the portfolio and benchmark
-    # share the exact same time index (fair comparison).
+    # Drop rows where any ticker is missing so portfolio and benchmark share the
+    # exact same time index (fair comparison).
     prices = prices.dropna(how="any")
 
     live_weights = {t: w for t, w in weights.items() if t in prices.columns}
@@ -155,7 +159,7 @@ def backtest_recommendation(
         benchmark_value.pct_change().dropna(),
     )
 
-    return BacktestResult(
+    result = BacktestResult(
         start=str(prices.index[0].date()),
         end=str(prices.index[-1].date()),
         n_days=len(prices),
@@ -167,3 +171,16 @@ def backtest_recommendation(
         portfolio_final_value=round(float(portfolio_value.iloc[-1]), 2),
         benchmark_final_value=round(float(benchmark_value.iloc[-1]), 2),
     )
+    return result, portfolio_value, benchmark_value
+
+
+def backtest_recommendation(
+    rec: Recommendation,
+    *,
+    start: str | date | None = None,
+    end: str | date | None = None,
+    benchmark: str = "SPY",
+) -> BacktestResult:
+    """Backtest metrics only. Use run_backtest if you also want the raw series."""
+    result, _, _ = run_backtest(rec, start=start, end=end, benchmark=benchmark)
+    return result

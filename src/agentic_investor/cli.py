@@ -74,7 +74,9 @@ def _recommend(tickers: list[str], amount: float, risk: str, target: str) -> Non
             print(f"  - {v}")
 
 
-def _backtest(rec_id: int, start: str | None, end: str | None, benchmark: str) -> None:
+def _backtest(
+    rec_id: int, start: str | None, end: str | None, benchmark: str, plot: str | None
+) -> None:
     from agentic_investor.eval.backtest import backtest_recommendation
     from agentic_investor.orchestrator.store import load_recommendation
 
@@ -106,6 +108,14 @@ def _backtest(rec_id: int, start: str | None, end: str | None, benchmark: str) -
         f"(vs {benchmark}: ${result.benchmark_final_value:,.2f})"
     )
 
+    if plot is not None:
+        from agentic_investor.eval.plots import plot_equity_curve
+
+        out = plot_equity_curve(
+            rec, start=start, end=end, benchmark=benchmark, out_path=plot, rec_id=rec_id
+        )
+        print(f"\n  Equity curve saved: {out}")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="agentic-investor")
@@ -132,6 +142,13 @@ def main() -> None:
     bt.add_argument("--start", default=None, help="YYYY-MM-DD")
     bt.add_argument("--end", default=None, help="YYYY-MM-DD")
     bt.add_argument("--benchmark", default="SPY")
+    bt.add_argument(
+        "--plot",
+        nargs="?",
+        const="out/equity_curve.png",
+        default=None,
+        help="save equity curve PNG (default: out/equity_curve.png)",
+    )
 
     args = parser.parse_args()
     if args.cmd == "analyze":
@@ -139,7 +156,7 @@ def main() -> None:
     elif args.cmd == "recommend":
         _recommend(args.tickers, args.amount, args.risk, args.target)
     elif args.cmd == "backtest":
-        _backtest(args.rec_id, args.start, args.end, args.benchmark)
+        _backtest(args.rec_id, args.start, args.end, args.benchmark, args.plot)
     else:
         _print_config()
 
