@@ -68,9 +68,34 @@ def _drop_incomplete(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna(subset=["Open", "High", "Low", "Close"])
 
 
-def fetch_ohlcv(ticker: str, period: str = "2y", interval: str = "1d") -> pd.DataFrame:
-    """Download OHLCV bars for one ticker as a clean, single-index DataFrame."""
-    df = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True)
+def fetch_ohlcv(
+    ticker: str,
+    period: str = "2y",
+    interval: str = "1d",
+    end: str | None = None,
+) -> pd.DataFrame:
+    """Download OHLCV bars for one ticker as a clean, single-index DataFrame.
+
+    When `end` is provided (point-in-time mode), fetches [end - period, end]
+    instead of [today - period, today]. Used by the --as-of picker to eliminate
+    look-ahead bias when backtesting a historical strategy.
+    """
+    if end is None:
+        df = yf.Ticker(ticker).history(
+            period=period, interval=interval, auto_adjust=True
+        )
+    else:
+        # yfinance can't combine period + end, so translate the coarse period
+        # keyword into a start-date offset from `end`.
+        end_ts = pd.Timestamp(end)
+        years = {"1y": 1, "2y": 2, "5y": 5, "10y": 10, "max": 20}.get(period, 2)
+        start_ts = end_ts - pd.DateOffset(years=years)
+        df = yf.Ticker(ticker).history(
+            start=start_ts.strftime("%Y-%m-%d"),
+            end=end_ts.strftime("%Y-%m-%d"),
+            interval=interval,
+            auto_adjust=True,
+        )
     df = _drop_incomplete(df)
     if df.empty:
         raise ValueError(f"no price data for {ticker!r} (bad symbol or no history?)")
@@ -219,9 +244,15 @@ def _return_over(close: pd.Series, days: int) -> float | None:
     return round((close.iloc[-1] / close.iloc[-1 - days] - 1) * 100, 2)
 
 
-def get_market_snapshot(ticker: str, period: str = "2y") -> MarketSnapshot:
-    """Fetch prices and reduce them to a single latest-values snapshot."""
-    df = fetch_ohlcv(ticker, period=period)
+def get_market_snapshot(
+    ticker: str, period: str = "2y", end: str | None = None
+) -> MarketSnapshot:
+    """Fetch prices and reduce them to a single latest-values snapshot.
+
+    Pass `end` to snapshot ticker state as of a historical date (point-in-time)
+    rather than today - the required move for unbiased historical backtests.
+    """
+    df = fetch_ohlcv(ticker, period=period, end=end)
     close = df["Close"]
     last_close = float(close.iloc[-1])
 

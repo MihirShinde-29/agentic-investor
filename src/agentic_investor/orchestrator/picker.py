@@ -96,16 +96,22 @@ def pick_top_n(
     exclude: set[str] | None = None,
     max_workers: int = 10,
     period: str = "1y",
+    as_of: str | None = None,
     fetch: Callable[[str], MarketSnapshot] | None = None,
 ) -> list[TickerScore]:
     """Score every ticker in parallel and return the top_n by score.
 
     `fetch` defaults to fetching a real snapshot from yfinance; tests inject a
     deterministic fake so they stay offline.
+
+    `as_of` (YYYY-MM-DD) fetches prices only up to that date - eliminates the
+    look-ahead bias when picking tickers for a historical backtest window.
     """
     exclude = exclude or set()
     candidates = [t for t in tickers if t not in exclude]
-    real_fetch = fetch or (lambda t: get_market_snapshot(t, period=period))
+    real_fetch = fetch or (
+        lambda t: get_market_snapshot(t, period=period, end=as_of)
+    )
 
     def _fetch_one(t: str) -> tuple[str, MarketSnapshot | None]:
         try:
