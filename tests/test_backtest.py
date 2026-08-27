@@ -217,6 +217,105 @@ def test_backtest_recommendation_end_to_end(monkeypatch):
     assert result.n_trades == 2  # one buy per ticker
 
 
+def test_compare_strategies_produces_baseline_plus_three_presets(monkeypatch):
+    from agentic_investor.eval.backtest import compare_strategies
+
+    n = 100
+    prices = pd.DataFrame(
+        {"AAPL": np.linspace(100, 200, n), "NVDA": np.linspace(100, 200, n),
+         "SPY": np.linspace(100, 150, n)},
+        index=_dates(n),
+    )
+    monkeypatch.setattr(backtest, "fetch_prices", lambda *a, **k: prices)
+
+    comp = compare_strategies(_rec(), rec_id=1)
+    assert comp.rec_id == 1
+    assert len(comp.entries) == 4
+    labels = [e.label for e in comp.entries]
+    assert "baseline (no friction, buy-and-hold)" in labels
+    assert any("conservative" in lab for lab in labels)
+    assert any("moderate" in lab for lab in labels)
+    assert any("aggressive" in lab for lab in labels)
+    # Preset entries carry their profile name; baseline does not.
+    assert comp.entries[0].profile_name is None
+    for e in comp.entries[1:]:
+        assert e.profile_name in {"conservative", "moderate", "aggressive"}
+
+
+def test_render_comparison_markdown_includes_every_row(monkeypatch):
+    from agentic_investor.eval.backtest import (
+        compare_strategies,
+        render_comparison_markdown,
+    )
+
+    n = 60
+    prices = pd.DataFrame(
+        {"AAPL": np.linspace(100, 150, n), "NVDA": np.linspace(100, 150, n),
+         "SPY": np.linspace(100, 130, n)},
+        index=_dates(n),
+    )
+    monkeypatch.setattr(backtest, "fetch_prices", lambda *a, **k: prices)
+
+    md = render_comparison_markdown(compare_strategies(_rec(), rec_id=42))
+    assert "# Strategy comparison for Recommendation #42" in md
+    assert "baseline (no friction, buy-and-hold)" in md
+    assert "conservative preset" in md
+    assert "moderate preset" in md
+    assert "aggressive preset" in md
+    assert "**SPY** (benchmark)" in md
+
+
+def test_compare_allocators_regenerates_rec_per_preset(monkeypatch):
+    from agentic_investor.eval import backtest as bt_mod
+    from agentic_investor.eval.backtest import compare_allocators
+    from agentic_investor.orchestrator import graph as graph_mod
+    from agentic_investor.orchestrator.state import OrchestratorRequest
+
+    n = 80
+    prices = pd.DataFrame(
+        {"AAPL": np.linspace(100, 180, n), "NVDA": np.linspace(100, 180, n),
+         "TLT": np.linspace(100, 105, n), "GLD": np.linspace(100, 110, n),
+         "SPY": np.linspace(100, 140, n)},
+        index=_dates(n),
+    )
+    monkeypatch.setattr(bt_mod, "fetch_prices", lambda *a, **k: prices)
+
+    calls: list[dict] = []
+
+    def fake_run_orchestrator(request, profile=None):
+        calls.append({
+            "risk": request.risk,
+            "tickers": list(request.tickers),
+            "profile_name": (profile.name if profile else None),
+        })
+        return _rec(amount=request.amount)
+
+    monkeypatch.setattr(graph_mod, "run_orchestrator", fake_run_orchestrator)
+    # backtest.compare_allocators does `from agentic_investor.orchestrator.graph
+    # import run_orchestrator` inside the function - patch that resolved name
+    # by patching the module attribute where it will be looked up.
+    monkeypatch.setattr(
+        "agentic_investor.orchestrator.graph.run_orchestrator",
+        fake_run_orchestrator,
+    )
+
+    req = OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000)
+    comp = compare_allocators(req)
+
+    assert len(comp.entries) == 4  # baseline + 3 presets
+    # baseline call is the default (moderate) with no profile.
+    assert calls[0]["profile_name"] is None
+    # Preset calls in order: conservative (adds TLT+GLD), moderate, aggressive.
+    assert calls[1]["risk"] == "conservative"
+    assert "TLT" in calls[1]["tickers"] and "GLD" in calls[1]["tickers"]
+    assert calls[2]["risk"] == "moderate"
+    assert calls[3]["risk"] == "aggressive"
+    # Labels expose the allocator so a reader knows why rows differ.
+    assert "inverse_vol" in comp.entries[1].label
+    assert "llm" in comp.entries[2].label
+    assert "llm" in comp.entries[3].label
+
+
 def test_multi_window_backtest_runs_each_window(monkeypatch):
     n = 50
     prices = pd.DataFrame(

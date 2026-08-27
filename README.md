@@ -61,6 +61,18 @@ cp .env.example .env         # fill in keys you have (optional; runs on mocks ot
 uv run agentic-investor      # verify the scaffold
 uv run pytest
 uv run ruff check .
+
+# Compare 3 presets against a single saved recommendation (cheap, no LLM calls):
+uv run agentic-investor compare-strategies 1 --start 2024-01-01 --end 2026-08-01
+
+# Full-strategy comparison: regenerate a fresh rec under each preset
+# (each preset picks its own allocator), then backtest them:
+uv run agentic-investor compare-allocators --tickers NVDA,TSLA,AAPL --amount 10000 \
+    --start 2024-01-01 --end 2026-08-01
+
+# Or let the M5 picker choose tickers from a universe:
+uv run agentic-investor compare-allocators --auto --universe sp500_top50 --top-n 8 \
+    --amount 10000 --start 2024-01-01 --end 2026-08-01
 ```
 
 ## Layout

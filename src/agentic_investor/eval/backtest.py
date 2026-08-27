@@ -402,3 +402,220 @@ def multi_window_backtest(
         backtest_recommendation(rec, start=s, end=e, benchmark=benchmark, **kwargs)
         for s, e in windows
     ]
+
+
+class StrategyComparisonEntry(BaseModel):
+    label: str
+    profile_name: str | None = None
+    portfolio: BacktestMetrics
+    alpha_annual_pct: float
+    beta: float
+    n_trades: int
+    total_costs: float
+    portfolio_final_value: float
+
+
+class StrategyComparison(BaseModel):
+    rec_id: int | None = None
+    start: str
+    end: str
+    n_days: int
+    benchmark: str
+    init_cash: float
+    entries: list[StrategyComparisonEntry]
+    benchmark_metrics: BacktestMetrics
+    benchmark_final_value: float
+
+
+def compare_strategies(
+    rec: Recommendation,
+    *,
+    start: str | date | None = None,
+    end: str | date | None = None,
+    benchmark: str = "SPY",
+    rec_id: int | None = None,
+) -> StrategyComparison:
+    """Backtest a recommendation under baseline + all 3 preset strategies.
+
+    Holds allocation constant (already fixed by the saved Recommendation) and
+    varies only the rebalance/friction/cash-yield settings that come from each
+    profile. Note: allocator field on profile does NOT change results here -
+    for allocator comparison, generate fresh recs with each --profile.
+    """
+    from agentic_investor.orchestrator.strategy import get_preset
+
+    configs: list[tuple[str, object]] = [
+        ("baseline (no friction, buy-and-hold)", None),
+        ("conservative preset", get_preset("conservative")),
+        ("moderate preset", get_preset("moderate")),
+        ("aggressive preset", get_preset("aggressive")),
+    ]
+
+    entries: list[StrategyComparisonEntry] = []
+    last: BacktestResult | None = None
+    for label, p in configs:
+        if p is None:
+            r = backtest_recommendation(rec, start=start, end=end, benchmark=benchmark)
+        else:
+            r = backtest_recommendation(
+                rec, start=start, end=end, benchmark=benchmark,
+                rebalance=p.rebalance,
+                band_abs_pct=p.band_abs_pct,
+                band_rel_pct=p.band_rel_pct,
+                band_buy_multiplier=p.band_buy_multiplier,
+                dd_buy_pause_pct=p.dd_buy_pause_pct,
+                cash_yield_annual=p.cash_yield_annual,
+                tcost_bps=p.tcost_bps,
+                slippage_bps=p.slippage_bps,
+            )
+        entries.append(
+            StrategyComparisonEntry(
+                label=label,
+                profile_name=(p.name if p is not None else None),
+                portfolio=r.portfolio,
+                alpha_annual_pct=r.alpha_annual_pct,
+                beta=r.beta,
+                n_trades=r.n_trades,
+                total_costs=r.total_costs,
+                portfolio_final_value=r.portfolio_final_value,
+            )
+        )
+        last = r
+
+    assert last is not None  # noqa: S101 - loop always runs at least once
+    return StrategyComparison(
+        rec_id=rec_id,
+        start=last.start,
+        end=last.end,
+        n_days=last.n_days,
+        benchmark=benchmark,
+        init_cash=last.init_cash,
+        entries=entries,
+        benchmark_metrics=last.benchmark,
+        benchmark_final_value=last.benchmark_final_value,
+    )
+
+
+def compare_allocators(
+    request,
+    *,
+    start: str | date | None = None,
+    end: str | date | None = None,
+    benchmark: str = "SPY",
+    include_baseline: bool = True,
+) -> StrategyComparison:
+    """FULL-strategy comparison: regenerate a fresh Recommendation under each
+    preset (each preset uses its own allocator), then backtest each.
+
+    Distinct from compare_strategies (which holds allocation constant and
+    varies only rebalance/friction). This one triggers 3 orchestrator runs -
+    3x the LLM calls - so it's the more expensive comparison.
+
+    Each preset's universe_extras are added to the tickers before generating
+    that preset's rec (e.g. conservative gets TLT + GLD).
+    """
+    from agentic_investor.orchestrator.graph import run_orchestrator
+    from agentic_investor.orchestrator.state import OrchestratorRequest
+    from agentic_investor.orchestrator.strategy import get_preset
+
+    entries: list[StrategyComparisonEntry] = []
+    last: BacktestResult | None = None
+
+    if include_baseline:
+        rec_baseline = run_orchestrator(request)
+        r = backtest_recommendation(rec_baseline, start=start, end=end, benchmark=benchmark)
+        entries.append(
+            StrategyComparisonEntry(
+                label="baseline (default preset, no friction)",
+                profile_name=None,
+                portfolio=r.portfolio,
+                alpha_annual_pct=r.alpha_annual_pct,
+                beta=r.beta,
+                n_trades=r.n_trades,
+                total_costs=r.total_costs,
+                portfolio_final_value=r.portfolio_final_value,
+            )
+        )
+        last = r
+
+    for preset_name in ("conservative", "moderate", "aggressive"):
+        p = get_preset(preset_name)
+        req_with_extras = OrchestratorRequest(
+            tickers=list(dict.fromkeys([*request.tickers, *p.universe_extras])),
+            amount=request.amount,
+            risk=preset_name,
+            target=request.target,
+        )
+        rec = run_orchestrator(req_with_extras, profile=p)
+        r = backtest_recommendation(
+            rec, start=start, end=end, benchmark=benchmark,
+            rebalance=p.rebalance,
+            band_abs_pct=p.band_abs_pct,
+            band_rel_pct=p.band_rel_pct,
+            band_buy_multiplier=p.band_buy_multiplier,
+            dd_buy_pause_pct=p.dd_buy_pause_pct,
+            cash_yield_annual=p.cash_yield_annual,
+            tcost_bps=p.tcost_bps,
+            slippage_bps=p.slippage_bps,
+        )
+        # Label carries the allocator name so readers see WHY rows differ.
+        label = f"{preset_name} preset ({p.allocator})"
+        entries.append(
+            StrategyComparisonEntry(
+                label=label,
+                profile_name=p.name,
+                portfolio=r.portfolio,
+                alpha_annual_pct=r.alpha_annual_pct,
+                beta=r.beta,
+                n_trades=r.n_trades,
+                total_costs=r.total_costs,
+                portfolio_final_value=r.portfolio_final_value,
+            )
+        )
+        last = r
+
+    assert last is not None  # noqa: S101
+    return StrategyComparison(
+        rec_id=None,
+        start=last.start,
+        end=last.end,
+        n_days=last.n_days,
+        benchmark=benchmark,
+        init_cash=last.init_cash,
+        entries=entries,
+        benchmark_metrics=last.benchmark,
+        benchmark_final_value=last.benchmark_final_value,
+    )
+
+
+def render_comparison_markdown(comparison: StrategyComparison) -> str:
+    """Human-readable markdown table for a StrategyComparison."""
+    lines: list[str] = []
+    tag = f" for Recommendation #{comparison.rec_id}" if comparison.rec_id else ""
+    lines.append(f"# Strategy comparison{tag}")
+    lines.append("")
+    lines.append(
+        f"Window: {comparison.start} to {comparison.end} "
+        f"({comparison.n_days} bars). Init cash: ${comparison.init_cash:,.0f}. "
+        f"Benchmark: {comparison.benchmark}."
+    )
+    lines.append("")
+    lines.append(
+        "| Strategy | Return% | CAGR% | Sharpe | MaxDD% | Alpha% | Beta | Trades | Cost$ |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for e in comparison.entries:
+        p = e.portfolio
+        lines.append(
+            f"| {e.label} | {p.total_return_pct:+.1f} | {p.cagr_pct:+.1f} | "
+            f"{p.sharpe:.2f} | {p.max_drawdown_pct:.1f} | "
+            f"{e.alpha_annual_pct:+.2f} | {e.beta:.2f} | "
+            f"{e.n_trades} | ${e.total_costs:.2f} |"
+        )
+    b = comparison.benchmark_metrics
+    lines.append(
+        f"| **{comparison.benchmark}** (benchmark) | "
+        f"{b.total_return_pct:+.1f} | {b.cagr_pct:+.1f} | {b.sharpe:.2f} | "
+        f"{b.max_drawdown_pct:.1f} | 0.00 | 1.00 | - | - |"
+    )
+    return "\n".join(lines)

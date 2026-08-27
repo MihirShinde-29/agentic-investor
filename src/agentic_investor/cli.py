@@ -7,6 +7,9 @@
   agentic-investor recommend --auto --universe dow30 --amount 10000
                                                                 AI picks tickers itself
   agentic-investor backtest 1 --start 2024-01-01                backtest a recommendation vs SPY
+  agentic-investor compare-strategies 1 --start 2024-01-01      same rec, all 3 presets side-by-side
+  agentic-investor compare-allocators --tickers NVDA,TSLA --amount 10000
+                                                                fresh rec per preset
   agentic-investor eval-agents --n-samples 3                    L2 agent eval vs golden set
   agentic-investor eval-retrieval --k 5                         L1 RAG retrieval eval
   agentic-investor eval-report --rec-id 1 --judge               aggregate to REPORT.md
@@ -464,6 +467,150 @@ def _backtest(
         print(f"\n  Equity curve saved: {out}")
 
 
+def _render_comparison_table(comparison) -> None:
+    """Print a fixed-width comparison table to stdout."""
+    print(
+        f"Window: {comparison.start} to {comparison.end} "
+        f"({comparison.n_days} bars). Init cash: ${comparison.init_cash:,.0f}.\n"
+    )
+    hdr = (
+        f"{'Strategy':<44}{'Return%':>10}{'CAGR%':>8}{'Sharpe':>8}"
+        f"{'MaxDD%':>9}{'Alpha%':>9}{'Beta':>7}{'Trades':>8}{'Cost$':>10}"
+    )
+    print(hdr)
+    print("-" * len(hdr))
+    for e in comparison.entries:
+        p = e.portfolio
+        print(
+            f"{e.label:<44}{p.total_return_pct:>10.1f}{p.cagr_pct:>8.1f}"
+            f"{p.sharpe:>8.2f}{p.max_drawdown_pct:>9.1f}"
+            f"{e.alpha_annual_pct:>+9.2f}{e.beta:>7.2f}"
+            f"{e.n_trades:>8d}{e.total_costs:>10.2f}"
+        )
+    b = comparison.benchmark_metrics
+    bench_label = f"{comparison.benchmark} (benchmark)"
+    print(
+        f"{bench_label:<44}{b.total_return_pct:>10.1f}{b.cagr_pct:>8.1f}"
+        f"{b.sharpe:>8.2f}{b.max_drawdown_pct:>9.1f}"
+        f"{'-':>9}{'1.00':>7}{'-':>8}{'-':>10}"
+    )
+
+
+def _compare_strategies(
+    rec_id: int,
+    start: str | None,
+    end: str | None,
+    benchmark: str,
+    out: str | None,
+) -> None:
+    from agentic_investor.eval.backtest import (
+        compare_strategies,
+        render_comparison_markdown,
+    )
+    from agentic_investor.orchestrator.store import load_recommendation
+
+    rec = load_recommendation(rec_id)
+    if rec is None:
+        print(f"No recommendation with id {rec_id}.")
+        return
+
+    comparison = compare_strategies(
+        rec, start=start, end=end, benchmark=benchmark, rec_id=rec_id
+    )
+    print(f"\nStrategy comparison for Recommendation #{rec_id}")
+    print("(same allocation, varies rebalance + friction only)\n")
+    _render_comparison_table(comparison)
+
+    if out is not None:
+        from pathlib import Path
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(render_comparison_markdown(comparison), encoding="utf-8")
+        print(f"\nSaved markdown: {out}")
+
+
+def _compare_allocators(
+    tickers: list[str],
+    amount: float,
+    target: str,
+    start: str | None,
+    end: str | None,
+    benchmark: str,
+    out: str | None,
+    no_baseline: bool,
+    auto: bool,
+    universe: str,
+    top_n: int,
+    exclude: list[str] | None,
+    as_of: str | None,
+) -> None:
+    from agentic_investor.eval.backtest import (
+        compare_allocators,
+        render_comparison_markdown,
+    )
+    from agentic_investor.llm.client import format_call_stats, reset_call_stats
+    from agentic_investor.orchestrator.state import OrchestratorRequest
+
+    if auto and tickers:
+        print("Cannot combine --auto with explicit --tickers.")
+        return
+    if not auto and not tickers:
+        print("Provide --tickers or use --auto with --universe.")
+        return
+
+    reset_call_stats()
+
+    if auto:
+        from agentic_investor.orchestrator.picker import pick_top_n
+        from agentic_investor.universes import get_universe
+
+        # Point-in-time: if the caller specified --start but not --as-of,
+        # default as_of=start so the picker can't see the future window.
+        effective_as_of = as_of or start
+        pool = get_universe(universe)
+        excludes = {t.upper() for t in (exclude or [])}
+        picks = pick_top_n(
+            pool, top_n=top_n, exclude=excludes, as_of=effective_as_of
+        )
+        if not picks:
+            print(f"No tickers passed the picker from universe '{universe}'.")
+            return
+        as_of_tag = f" as-of {effective_as_of}" if effective_as_of else ""
+        print(
+            f"\nAuto picker{as_of_tag}: {len(picks)} of "
+            f"{len(pool) - len(excludes & set(pool))} scanned tickers "
+            f"(universe '{universe}')\n"
+        )
+        print(f"  {'Ticker':<8}{'Score':>7}   Reasons")
+        print("  " + "-" * 80)
+        for p in picks:
+            reasons = ", ".join(p.reasons[:4]) or "(no notable signals)"
+            print(f"  {p.ticker:<8}{p.score:>7.2f}   {reasons}")
+        tickers = [p.ticker for p in picks]
+        print()
+
+    request = OrchestratorRequest(
+        tickers=tickers, amount=amount, risk="moderate", target=target
+    )
+    comparison = compare_allocators(
+        request,
+        start=start,
+        end=end,
+        benchmark=benchmark,
+        include_baseline=not no_baseline,
+    )
+    print("\nFull-strategy comparison (each preset regenerates a fresh rec)\n")
+    _render_comparison_table(comparison)
+
+    if out is not None:
+        from pathlib import Path
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(render_comparison_markdown(comparison), encoding="utf-8")
+        print(f"\nSaved markdown: {out}")
+
+    print()
+    print(format_call_stats())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="agentic-investor")
     sub = parser.add_subparsers(dest="cmd")
@@ -595,6 +742,48 @@ def main() -> None:
     bt.add_argument("--slippage-bps", type=float, default=None,
                     help="slippage in basis points per fill")
 
+    cs = sub.add_parser(
+        "compare-strategies",
+        help="backtest one recommendation under baseline + 3 presets "
+             "(same allocation, varies rebalance/friction)",
+    )
+    cs.add_argument("rec_id", type=int)
+    cs.add_argument("--start", default=None, help="YYYY-MM-DD")
+    cs.add_argument("--end", default=None, help="YYYY-MM-DD")
+    cs.add_argument("--benchmark", default="SPY")
+    cs.add_argument("--out", default=None,
+                    help="also save the comparison table as markdown to this path")
+
+    ca = sub.add_parser(
+        "compare-allocators",
+        help="regenerate a fresh recommendation under each preset "
+             "(varies allocator too), then backtest each; costs 3x LLM calls",
+    )
+    ca.add_argument("--tickers", default=None,
+                    help="comma-separated tickers (e.g. NVDA,TSLA,AAPL); "
+                         "omit and use --auto to let the picker choose")
+    ca.add_argument("--amount", type=float, required=True)
+    ca.add_argument("--target", default="12-month growth")
+    ca.add_argument("--start", default=None, help="YYYY-MM-DD")
+    ca.add_argument("--end", default=None, help="YYYY-MM-DD")
+    ca.add_argument("--benchmark", default="SPY")
+    ca.add_argument("--out", default=None,
+                    help="also save the comparison table as markdown to this path")
+    ca.add_argument("--no-baseline", action="store_true",
+                    help="skip the default-preset baseline row (3 runs instead of 4)")
+    ca.add_argument("--auto", action="store_true",
+                    help="let the M5 picker choose tickers from --universe "
+                         "(same list passed to every preset)")
+    ca.add_argument("--universe", default="mega_tech",
+                    help="universe key for --auto (dow30 / mega_tech / sectors)")
+    ca.add_argument("--top-n", type=int, default=8,
+                    help="how many tickers to pick when --auto is set")
+    ca.add_argument("--exclude", nargs="*", default=None,
+                    help="tickers to skip during --auto scan")
+    ca.add_argument("--as-of", default=None,
+                    help="YYYY-MM-DD; picker uses prices only up to this date "
+                         "(defaults to --start if omitted, eliminating look-ahead)")
+
     args = parser.parse_args()
     if args.cmd == "analyze":
         _analyze(args.tickers, args.model)
@@ -635,6 +824,20 @@ def main() -> None:
             args.tcost_bps,
             args.slippage_bps,
             args.profile,
+        )
+    elif args.cmd == "compare-strategies":
+        _compare_strategies(
+            args.rec_id, args.start, args.end, args.benchmark, args.out
+        )
+    elif args.cmd == "compare-allocators":
+        tickers = (
+            [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+            if args.tickers else []
+        )
+        _compare_allocators(
+            tickers, args.amount, args.target,
+            args.start, args.end, args.benchmark, args.out, args.no_baseline,
+            args.auto, args.universe, args.top_n, args.exclude, args.as_of,
         )
     else:
         _print_config()
