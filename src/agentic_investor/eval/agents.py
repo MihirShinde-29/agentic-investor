@@ -20,9 +20,12 @@ from agentic_investor.agents.technical import (
     TechnicalSignal,
     analyze_technical,
 )
+from agentic_investor.eval.judge import RationaleVerdict, grade_technical_rationale
 from agentic_investor.tools.market import MarketSnapshot
 
 DEFAULT_CASES = Path(__file__).parent / "datasets" / "agent_cases.jsonl"
+
+Judge = Callable[[MarketSnapshot, TechnicalSignal], RationaleVerdict]
 
 
 class AgentCase(BaseModel):
@@ -43,6 +46,8 @@ class CaseResult(BaseModel):
     confidence_in_range: bool
     stances_seen: list[Stance] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    rationale_verdicts: list[RationaleVerdict] = Field(default_factory=list)
+    avg_rationale_overall: float | None = None
 
 
 class AgentEvalReport(BaseModel):
@@ -53,6 +58,8 @@ class AgentEvalReport(BaseModel):
     confidence_in_range_rate: float
     fully_passing_cases: int  # cases with 100% schema + 100% stance + confidence in range
     per_case: list[CaseResult]
+    avg_rationale_overall: float | None = None
+    judge_model: str | None = None
 
 
 def load_cases(path: str | Path = DEFAULT_CASES) -> list[AgentCase]:
@@ -64,10 +71,12 @@ def _run_one_case(
     case: AgentCase,
     n_samples: int,
     analyze: Callable[[MarketSnapshot], TechnicalSignal],
+    judge: Judge | None = None,
 ) -> CaseResult:
     stances: list[Stance] = []
     confidences: list[float] = []
     errors: list[str] = []
+    verdicts: list[RationaleVerdict] = []
     valid = 0
 
     for _ in range(n_samples):
@@ -80,10 +89,17 @@ def _run_one_case(
         stances.append(signal.stance)
         confidences.append(signal.confidence)
 
+        if judge is not None:
+            try:
+                verdicts.append(judge(case.snapshot, signal))
+            except Exception as e:  # noqa: BLE001 - judge failure shouldn't fail the case
+                errors.append(f"judge: {str(e)[:150]}")
+
     acceptable = set(case.acceptable_stances)
     stance_hits = sum(1 for s in stances if s in acceptable)
     avg_conf = mean(confidences) if confidences else 0.0
     conf_ok = case.min_confidence <= avg_conf <= case.max_confidence if confidences else False
+    avg_overall = mean(v.overall for v in verdicts) if verdicts else None
 
     return CaseResult(
         case_id=case.id,
@@ -94,6 +110,8 @@ def _run_one_case(
         confidence_in_range=conf_ok,
         stances_seen=stances,
         errors=errors,
+        rationale_verdicts=verdicts,
+        avg_rationale_overall=round(avg_overall, 2) if avg_overall is not None else None,
     )
 
 
@@ -102,19 +120,25 @@ def run_agent_eval(
     cases_path: str | Path = DEFAULT_CASES,
     n_samples: int = 3,
     model: str | None = None,
+    judge_model: str | None = None,
     analyze: Callable[[MarketSnapshot], TechnicalSignal] | None = None,
+    judge: Judge | None = None,
 ) -> AgentEvalReport:
     """Run every case N times through the technical agent; return a scorecard.
 
-    `analyze` defaults to the real agent (`analyze_technical` bound to model);
-    tests can inject a deterministic fake to keep the suite offline.
+    `analyze` defaults to the real agent (`analyze_technical` bound to model).
+    `judge` (or `judge_model` for the default judge) grades rationale quality
+    via LLM-as-judge. Tests inject deterministic fakes to keep the suite offline.
     """
     cases = load_cases(cases_path)
     if analyze is None:
         def analyze(snap: MarketSnapshot) -> TechnicalSignal:
             return analyze_technical(snap, model=model)
+    if judge is None and judge_model is not None:
+        def judge(snap: MarketSnapshot, sig: TechnicalSignal) -> RationaleVerdict:
+            return grade_technical_rationale(snap, sig, model=judge_model)
 
-    per_case = [_run_one_case(c, n_samples, analyze) for c in cases]
+    per_case = [_run_one_case(c, n_samples, analyze, judge) for c in cases]
 
     total_calls = sum(r.n_samples for r in per_case)
     total_valid = sum(r.schema_validity * r.n_samples for r in per_case)
@@ -126,6 +150,8 @@ def run_agent_eval(
         for r in per_case
         if r.schema_validity == 1.0 and r.stance_pass_rate == 1.0 and r.confidence_in_range
     )
+    all_overalls = [v.overall for r in per_case for v in r.rationale_verdicts]
+    avg_rationale = round(mean(all_overalls), 2) if all_overalls else None
 
     return AgentEvalReport(
         n_cases=len(cases),
@@ -135,4 +161,6 @@ def run_agent_eval(
         confidence_in_range_rate=round(conf_ok_cases / len(per_case), 3) if per_case else 0.0,
         fully_passing_cases=fully_passing,
         per_case=per_case,
+        avg_rationale_overall=avg_rationale,
+        judge_model=judge_model,
     )

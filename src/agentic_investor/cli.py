@@ -111,31 +111,60 @@ def _eval_retrieval(k: int, fixtures: str | None, cases: str | None) -> None:
           f"  MRR={a.mrr:.3f}  NDCG@k={a.ndcg_at_k:.3f}")
 
 
-def _eval_agents(n_samples: int, model: str | None, cases: str | None) -> None:
+def _eval_agents(
+    n_samples: int,
+    model: str | None,
+    cases: str | None,
+    judge: bool,
+    judge_model: str | None,
+) -> None:
     from agentic_investor.eval.agents import DEFAULT_CASES, run_agent_eval
 
+    resolved_judge_model = None
+    if judge:
+        resolved_judge_model = judge_model or model
+        if resolved_judge_model is None:
+            # Both are None -> use configured default via the LLM client.
+            from agentic_investor.config import get_settings
+            resolved_judge_model = get_settings().llm_model
+
     report = run_agent_eval(
-        cases_path=cases or DEFAULT_CASES, n_samples=n_samples, model=model
+        cases_path=cases or DEFAULT_CASES,
+        n_samples=n_samples,
+        model=model,
+        judge_model=resolved_judge_model,
     )
 
     print(
         f"\nAgent eval  (technical, N={report.n_samples_per_case} samples/case, "
         f"{report.n_cases} cases)\n"
     )
-    print(f"  {'Case':<28}{'Schema':>8}{'Stance':>8}{'AvgConf':>9}{'ConfOK':>8}   {'Stances seen'}")
-    print("  " + "-" * 90)
+    hdr = f"  {'Case':<28}{'Schema':>8}{'Stance':>8}{'AvgConf':>9}{'ConfOK':>8}"
+    if report.avg_rationale_overall is not None:
+        hdr += f"{'Rationale':>11}"
+    hdr += f"   {'Stances seen'}"
+    print(hdr)
+    print("  " + "-" * 100)
     for r in report.per_case:
         seen = ",".join(dict.fromkeys(r.stances_seen)) or "-"
-        print(
+        row = (
             f"  {r.case_id:<28}"
             f"{r.schema_validity:>8.2f}{r.stance_pass_rate:>8.2f}"
-            f"{r.avg_confidence:>9.2f}{'YES' if r.confidence_in_range else 'no':>8}   {seen}"
+            f"{r.avg_confidence:>9.2f}{'YES' if r.confidence_in_range else 'no':>8}"
         )
+        if report.avg_rationale_overall is not None:
+            rat = f"{r.avg_rationale_overall:.2f}/5" if r.avg_rationale_overall else "-"
+            row += f"{rat:>11}"
+        row += f"   {seen}"
+        print(row)
     print()
     print(f"  Aggregate schema validity: {report.schema_validity:.2%}")
     print(f"  Aggregate stance pass:     {report.stance_pass_rate:.2%}")
     print(f"  Confidence-in-range rate:  {report.confidence_in_range_rate:.2%}")
     print(f"  Fully passing cases:       {report.fully_passing_cases}/{report.n_cases}")
+    if report.avg_rationale_overall is not None:
+        print(f"  Avg rationale overall:     {report.avg_rationale_overall:.2f}/5"
+              f"  (judge model: {report.judge_model})")
 
 
 def _backtest(
@@ -247,6 +276,11 @@ def main() -> None:
     ev.add_argument("--model", default=None, help="override LLM model string")
     ev.add_argument("--cases", default=None,
                     help="path to jsonl cases file (default: bundled golden set)")
+    ev.add_argument("--judge", action="store_true",
+                    help="also grade rationale quality via LLM-as-judge")
+    ev.add_argument("--judge-model", default=None,
+                    help="model for judge (default: same as agent; use a stronger model "
+                         "like gpt-4o to avoid self-preference bias)")
 
     er = sub.add_parser("eval-retrieval", help="run L1 RAG retrieval evals on news golden set")
     er.add_argument("--k", type=int, default=5, help="top-k for retrieval (default 5)")
@@ -294,7 +328,7 @@ def main() -> None:
     elif args.cmd == "recommend":
         _recommend(args.tickers, args.amount, args.risk, args.target)
     elif args.cmd == "eval-agents":
-        _eval_agents(args.n_samples, args.model, args.cases)
+        _eval_agents(args.n_samples, args.model, args.cases, args.judge, args.judge_model)
     elif args.cmd == "eval-retrieval":
         _eval_retrieval(args.k, args.fixtures, args.cases)
     elif args.cmd == "backtest":

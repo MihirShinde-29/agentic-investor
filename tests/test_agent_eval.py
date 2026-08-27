@@ -7,6 +7,7 @@ from agentic_investor.eval.agents import (
     load_cases,
     run_agent_eval,
 )
+from agentic_investor.eval.judge import RationaleVerdict
 from agentic_investor.tools.market import MarketSnapshot
 
 
@@ -97,3 +98,53 @@ def test_run_agent_eval_end_to_end_with_fake():
     assert report.schema_validity == 1.0
     assert 0.0 < report.stance_pass_rate <= 1.0
     assert 0 <= report.fully_passing_cases <= report.n_cases
+    # No judge -> no rationale aggregate.
+    assert report.avg_rationale_overall is None
+
+
+def _make_judge(overall: int = 4):
+    def judge(snap, sig):
+        return RationaleVerdict(
+            groundedness=overall,
+            coherence=overall,
+            completeness=overall,
+            accuracy=overall,
+            overall=overall,
+            reasoning="test verdict",
+        )
+    return judge
+
+
+def test_run_one_case_with_judge_grades_rationale():
+    case = _case(["bullish"])
+    analyze = _make_analyzer("bullish", 0.7)
+    judge = _make_judge(overall=4)
+    result = _run_one_case(case, n_samples=3, analyze=analyze, judge=judge)
+
+    assert len(result.rationale_verdicts) == 3
+    assert result.avg_rationale_overall == 4.0
+    assert all(v.overall == 4 for v in result.rationale_verdicts)
+
+
+def test_run_agent_eval_aggregates_rationale_scores():
+    analyze = _make_analyzer("bullish", 0.7)
+    judge = _make_judge(overall=5)
+    report = run_agent_eval(n_samples=2, analyze=analyze, judge=judge)
+
+    assert report.avg_rationale_overall == 5.0
+
+
+def test_judge_failure_does_not_crash_case():
+    case = _case(["bullish"])
+    analyze = _make_analyzer("bullish", 0.7)
+
+    def broken_judge(snap, sig):
+        raise RuntimeError("judge exploded")
+
+    result = _run_one_case(case, n_samples=2, analyze=analyze, judge=broken_judge)
+    assert len(result.rationale_verdicts) == 0
+    assert result.avg_rationale_overall is None
+    assert any("judge:" in e for e in result.errors)
+    # But agent output was still captured.
+    assert result.schema_validity == 1.0
+    assert result.stance_pass_rate == 1.0
