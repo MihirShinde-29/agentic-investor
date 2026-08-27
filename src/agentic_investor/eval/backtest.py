@@ -82,6 +82,7 @@ def _is_rebalance_day(
     target_weights: dict[str, float],
     band_abs_pct: float,
     band_rel_pct: float,
+    band_buy_multiplier: float,
 ) -> bool:
     # Day 0 always rebalances to establish the initial allocation.
     if prev_date is None:
@@ -93,12 +94,20 @@ def _is_rebalance_day(
     if mode == "quarterly":
         return date_.quarter != prev_date.quarter or date_.year != prev_date.year
     if mode == "bands":
-        # Trigger if ANY position drifts more than either threshold (pp or relative).
+        # Asymmetric bands: tight on the SELL (overweight) side, widened on the
+        # BUY (underweight) side by band_buy_multiplier. Prevents catching
+        # falling knives when a position dropped below target.
+        buy_mult = max(1.0, band_buy_multiplier)
         for t, target in target_weights.items():
-            current = current_weights.get(t, 0.0)
-            abs_drift_pp = abs(current - target) * 100
-            rel_drift_pct = (abs_drift_pp / (target * 100) * 100) if target > 0 else 0.0
-            if abs_drift_pp > band_abs_pct or rel_drift_pct > band_rel_pct:
+            signed_drift_pp = (current_weights.get(t, 0.0) - target) * 100
+            if signed_drift_pp > 0:  # overweight -> tight (trim) thresholds
+                abs_thr, rel_thr = band_abs_pct, band_rel_pct
+                drift_pp = signed_drift_pp
+            else:  # underweight -> widened (add) thresholds
+                abs_thr, rel_thr = band_abs_pct * buy_mult, band_rel_pct * buy_mult
+                drift_pp = -signed_drift_pp
+            rel_drift_pct = (drift_pp / (target * 100) * 100) if target > 0 else 0.0
+            if drift_pp > abs_thr or rel_drift_pct > rel_thr:
                 return True
         return False
     raise ValueError(f"unknown rebalance mode {mode!r}")
@@ -113,8 +122,13 @@ def _execute_rebalance(
     date_: pd.Timestamp,
     tcost_bps: float,
     slippage_bps: float,
+    allow_buys: bool = True,
 ) -> float:
-    """Rebalance in place to target weights. Returns new cash."""
+    """Rebalance in place to target weights. Returns new cash.
+
+    allow_buys=False skips BUY-side trades (used when the portfolio is in a
+    deep drawdown; take profits but do not add to falling positions).
+    """
     equity_value = sum(shares.get(t, 0.0) * prices_today[t] for t in target_weights)
     total_value = cash + equity_value
 
@@ -126,6 +140,8 @@ def _execute_rebalance(
             continue
 
         side = "BUY" if delta_dollars > 0 else "SELL"
+        if side == "BUY" and not allow_buys:
+            continue  # drawdown circuit breaker: no adding to falling positions
         # Slippage worsens the fill for us: buys fill above spot, sells below.
         slip_factor = 1 + slippage_bps / 10_000 if side == "BUY" else 1 - slippage_bps / 10_000
         fill_price = float(prices_today[t]) * slip_factor
@@ -158,6 +174,8 @@ def simulate_portfolio(
     rebalance: str = "never",
     band_abs_pct: float = 5.0,
     band_rel_pct: float = 20.0,
+    band_buy_multiplier: float = 1.0,
+    dd_buy_pause_pct: float = 0.0,
     cash_yield_annual: float = 0.0,
     tcost_bps: float = 0.0,
     slippage_bps: float = 0.0,
@@ -167,6 +185,10 @@ def simulate_portfolio(
     weights are fractions in [0, 1]; their sum plus cash_weight = 1.
     rebalance modes: 'never' (buy-and-hold), 'monthly', 'quarterly', 'bands'.
     Cash grows daily at (1 + cash_yield_annual)**(1/252) - 1.
+    band_buy_multiplier > 1.0 widens the underweight-drift threshold so we
+    delay buying back into a falling position (avoid catching falling knives).
+    dd_buy_pause_pct > 0 skips all BUY-side trades when the portfolio is in a
+    drawdown deeper than that percent from its running peak.
     """
     if sum(weights.values()) > 1.0 + 1e-9:
         raise ValueError(f"weights sum to more than 1 ({sum(weights.values()):.4f})")
@@ -182,12 +204,16 @@ def simulate_portfolio(
     trades: list[dict] = []
     values: list[float] = []
     prev_date: pd.Timestamp | None = None
+    running_max = init_cash
 
     for date_, row in prices.iterrows():
         cash *= 1 + daily_cash_rate
 
         equity_val_before = sum(shares[t] * row[t] for t in tickers)
         total_before = cash + equity_val_before
+        running_max = max(running_max, total_before)
+        current_dd_pct = (total_before / running_max - 1) * 100 if running_max > 0 else 0.0
+        in_deep_dd = dd_buy_pause_pct > 0 and current_dd_pct < -dd_buy_pause_pct
         current_weights = (
             {t: (shares[t] * row[t]) / total_before for t in tickers}
             if total_before > 0
@@ -196,10 +222,11 @@ def simulate_portfolio(
 
         if _is_rebalance_day(
             date_, prev_date, rebalance, current_weights, target_weights,
-            band_abs_pct, band_rel_pct,
+            band_abs_pct, band_rel_pct, band_buy_multiplier,
         ):
             cash = _execute_rebalance(
-                shares, cash, target_weights, row, trades, date_, tcost_bps, slippage_bps
+                shares, cash, target_weights, row, trades, date_, tcost_bps, slippage_bps,
+                allow_buys=not in_deep_dd,
             )
 
         values.append(cash + sum(shares[t] * row[t] for t in tickers))
@@ -259,6 +286,8 @@ def run_backtest(
     rebalance: str = "never",
     band_abs_pct: float = 5.0,
     band_rel_pct: float = 20.0,
+    band_buy_multiplier: float = 1.0,
+    dd_buy_pause_pct: float = 0.0,
     cash_yield_annual: float = 0.0,
     tcost_bps: float = 0.0,
     slippage_bps: float = 0.0,
@@ -283,6 +312,8 @@ def run_backtest(
         rebalance=rebalance,
         band_abs_pct=band_abs_pct,
         band_rel_pct=band_rel_pct,
+        band_buy_multiplier=band_buy_multiplier,
+        dd_buy_pause_pct=dd_buy_pause_pct,
         cash_yield_annual=cash_yield_annual,
         tcost_bps=tcost_bps,
         slippage_bps=slippage_bps,
@@ -336,6 +367,8 @@ def backtest_recommendation(
     rebalance: str = "never",
     band_abs_pct: float = 5.0,
     band_rel_pct: float = 20.0,
+    band_buy_multiplier: float = 1.0,
+    dd_buy_pause_pct: float = 0.0,
     cash_yield_annual: float = 0.0,
     tcost_bps: float = 0.0,
     slippage_bps: float = 0.0,
@@ -349,6 +382,8 @@ def backtest_recommendation(
         rebalance=rebalance,
         band_abs_pct=band_abs_pct,
         band_rel_pct=band_rel_pct,
+        band_buy_multiplier=band_buy_multiplier,
+        dd_buy_pause_pct=dd_buy_pause_pct,
         cash_yield_annual=cash_yield_annual,
         tcost_bps=tcost_bps,
         slippage_bps=slippage_bps,

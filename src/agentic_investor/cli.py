@@ -83,6 +83,8 @@ def _backtest(
     rebalance: str,
     band_abs_pct: float,
     band_rel_pct: float,
+    band_buy_multiplier: float,
+    dd_buy_pause_pct: float,
     cash_yield: float,
     tcost_bps: float,
     slippage_bps: float,
@@ -102,6 +104,8 @@ def _backtest(
         rebalance=rebalance,
         band_abs_pct=band_abs_pct,
         band_rel_pct=band_rel_pct,
+        band_buy_multiplier=band_buy_multiplier,
+        dd_buy_pause_pct=dd_buy_pause_pct,
         cash_yield_annual=cash_yield,
         tcost_bps=tcost_bps,
         slippage_bps=slippage_bps,
@@ -144,6 +148,8 @@ def _backtest(
             rebalance=rebalance,
             band_abs_pct=band_abs_pct,
             band_rel_pct=band_rel_pct,
+            band_buy_multiplier=band_buy_multiplier,
+            dd_buy_pause_pct=dd_buy_pause_pct,
             cash_yield_annual=cash_yield,
             tcost_bps=tcost_bps,
             slippage_bps=slippage_bps,
@@ -193,6 +199,10 @@ def main() -> None:
                     help="drift threshold in percentage points for --rebalance bands (default 5)")
     bt.add_argument("--band-rel-pct", type=float, default=20.0,
                     help="relative drift threshold %% of target for bands mode (default 20)")
+    bt.add_argument("--band-buy-multiplier", type=float, default=1.0,
+                    help="widen underweight-drift thresholds (>1 = stingy buy-back; default 1)")
+    bt.add_argument("--dd-buy-pause-pct", type=float, default=0.0,
+                    help="skip BUY trades when portfolio DD deeper than this %% (default 0=off)")
     bt.add_argument("--cash-yield", type=float, default=0.0,
                     help="annual risk-free yield on cash, e.g. 0.045 for 4.5%% (default 0)")
     bt.add_argument("--tcost-bps", type=float, default=0.0,
@@ -215,6 +225,8 @@ def main() -> None:
             args.rebalance,
             args.band_abs_pct,
             args.band_rel_pct,
+            args.band_buy_multiplier,
+            args.dd_buy_pause_pct,
             args.cash_yield,
             args.tcost_bps,
             args.slippage_bps,
