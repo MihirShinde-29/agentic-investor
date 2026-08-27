@@ -7,6 +7,7 @@
   agentic-investor backtest 1 --start 2024-01-01                backtest a recommendation vs SPY
   agentic-investor eval-agents --n-samples 3                    L2 agent eval vs golden set
   agentic-investor eval-retrieval --k 5                         L1 RAG retrieval eval
+  agentic-investor eval-report --rec-id 1 --judge               aggregate to REPORT.md
 """
 
 import argparse
@@ -74,6 +75,54 @@ def _recommend(tickers: list[str], amount: float, risk: str, target: str) -> Non
         print("\nGuardrail violations:")
         for v in rec.violations:
             print(f"  - {v}")
+
+
+def _eval_report(
+    rec_id: int | None,
+    start: str | None,
+    end: str | None,
+    rebalance: str,
+    cash_yield: float,
+    tcost_bps: float,
+    slippage_bps: float,
+    n_samples: int,
+    judge: bool,
+    judge_model: str | None,
+    k: int,
+    out_dir: str,
+    skip: list[str] | None,
+) -> None:
+    from agentic_investor.eval.report import run_full_eval, write_report
+
+    resolved_judge_model = None
+    if judge:
+        from agentic_investor.config import get_settings
+        resolved_judge_model = judge_model or get_settings().llm_model
+
+    skip_set = set(s.upper() for s in (skip or []))
+    report = run_full_eval(
+        rec_id=rec_id,
+        start=start,
+        end=end,
+        rebalance=rebalance,
+        cash_yield_annual=cash_yield,
+        tcost_bps=tcost_bps,
+        slippage_bps=slippage_bps,
+        n_samples=n_samples,
+        judge_model=resolved_judge_model,
+        k=k,
+        skip=skip_set,
+    )
+    md_path, json_path = write_report(report, out_dir=out_dir)
+
+    print(f"\nEval report  ({report.generated_at})\n")
+    print(f"  {'Layer':<20}{'Status':<12}{'Summary'}")
+    print("  " + "-" * 100)
+    for v in report.verdicts:
+        print(f"  {v.layer:<20}{v.status:<12}{v.summary}")
+    print()
+    print(f"  Wrote: {md_path}")
+    print(f"  Wrote: {json_path}")
 
 
 def _eval_retrieval(k: int, fixtures: str | None, cases: str | None) -> None:
@@ -289,6 +338,26 @@ def main() -> None:
     er.add_argument("--cases", default=None,
                     help="path to jsonl retrieval cases (default: bundled)")
 
+    rp = sub.add_parser("eval-report",
+                        help="run L1+L2+L3, write REPORT.md + scorecard.json")
+    rp.add_argument("--rec-id", type=int, default=None,
+                    help="recommendation id for L3 backtest (skip L3 if omitted)")
+    rp.add_argument("--start", default=None, help="backtest start YYYY-MM-DD")
+    rp.add_argument("--end", default=None, help="backtest end YYYY-MM-DD")
+    rp.add_argument("--rebalance",
+                    choices=["never", "monthly", "quarterly", "bands"], default="never")
+    rp.add_argument("--cash-yield", type=float, default=0.0)
+    rp.add_argument("--tcost-bps", type=float, default=0.0)
+    rp.add_argument("--slippage-bps", type=float, default=0.0)
+    rp.add_argument("--n-samples", type=int, default=3,
+                    help="samples per agent case (default 3)")
+    rp.add_argument("--judge", action="store_true", help="run LLM-as-judge on rationales")
+    rp.add_argument("--judge-model", default=None, help="model for judge")
+    rp.add_argument("--k", type=int, default=5, help="top-k for retrieval")
+    rp.add_argument("--out-dir", default="out/eval", help="output directory")
+    rp.add_argument("--skip", nargs="*", default=None, choices=["L1", "L2", "L3"],
+                    help="skip named layers, e.g. --skip L3")
+
     bt = sub.add_parser("backtest", help="backtest a saved recommendation vs a benchmark")
     bt.add_argument("rec_id", type=int)
     bt.add_argument("--start", default=None, help="YYYY-MM-DD")
@@ -331,6 +400,13 @@ def main() -> None:
         _eval_agents(args.n_samples, args.model, args.cases, args.judge, args.judge_model)
     elif args.cmd == "eval-retrieval":
         _eval_retrieval(args.k, args.fixtures, args.cases)
+    elif args.cmd == "eval-report":
+        _eval_report(
+            args.rec_id, args.start, args.end, args.rebalance,
+            args.cash_yield, args.tcost_bps, args.slippage_bps,
+            args.n_samples, args.judge, args.judge_model, args.k,
+            args.out_dir, args.skip,
+        )
     elif args.cmd == "backtest":
         _backtest(
             args.rec_id,
