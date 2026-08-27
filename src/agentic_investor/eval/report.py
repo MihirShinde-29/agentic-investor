@@ -227,6 +227,11 @@ def render_markdown(report: EvalReport) -> str:
                 f"- Rationale (LLM-judge): {a.avg_rationale_overall:.2f}/5"
                 f" (judge model: `{a.judge_model}`)"
             )
+        if a.brier_score is not None:
+            lines.append(
+                f"- Calibration (proxy vs golden acceptable_stances): "
+                f"Brier={a.brier_score:.4f}, ECE={a.ece:.4f}"
+            )
         lines.append("")
 
     if report.backtest is not None and report.backtest_config is not None:
@@ -283,6 +288,61 @@ def render_markdown(report: EvalReport) -> str:
     lines.append("")
 
     return "\n".join(lines)
+
+
+DEFAULT_TOLERANCES = {"ndcg": 0.02, "stance": 0.05, "rationale": 0.2, "brier": 0.05}
+
+
+class RegressionResult(BaseModel):
+    passed: bool
+    regressions: list[str] = Field(default_factory=list)
+
+
+def load_baseline(path: str | Path) -> EvalReport:
+    return EvalReport.model_validate_json(Path(path).read_text())
+
+
+def compare_scorecards(
+    current: EvalReport,
+    baseline: EvalReport,
+    tolerances: dict[str, float] | None = None,
+) -> RegressionResult:
+    """Flag metrics that dropped more than the per-metric tolerance vs baseline."""
+    tol = {**DEFAULT_TOLERANCES, **(tolerances or {})}
+    regressions: list[str] = []
+
+    if current.retrieval and baseline.retrieval:
+        cur, base = current.retrieval.aggregate.ndcg_at_k, baseline.retrieval.aggregate.ndcg_at_k
+        if cur - base < -tol["ndcg"]:
+            regressions.append(
+                f"L1 NDCG@k: {cur:.3f} vs baseline {base:.3f} "
+                f"(delta {cur - base:+.3f}, tolerance -{tol['ndcg']})"
+            )
+
+    if current.agents and baseline.agents:
+        cur, base = current.agents.stance_pass_rate, baseline.agents.stance_pass_rate
+        if cur - base < -tol["stance"]:
+            regressions.append(
+                f"L2 stance_pass: {cur:.3f} vs baseline {base:.3f} "
+                f"(delta {cur - base:+.3f}, tolerance -{tol['stance']})"
+            )
+        cur_r = current.agents.avg_rationale_overall
+        base_r = baseline.agents.avg_rationale_overall
+        if cur_r is not None and base_r is not None and cur_r - base_r < -tol["rationale"]:
+            regressions.append(
+                f"L2 rationale: {cur_r:.2f} vs baseline {base_r:.2f} "
+                f"(delta {cur_r - base_r:+.2f}, tolerance -{tol['rationale']})"
+            )
+        cur_b = current.agents.brier_score
+        base_b = baseline.agents.brier_score
+        # Brier is a LOSS: higher = worse, so regression is INCREASE beyond tolerance.
+        if cur_b is not None and base_b is not None and cur_b - base_b > tol["brier"]:
+            regressions.append(
+                f"L2 brier: {cur_b:.4f} vs baseline {base_b:.4f} "
+                f"(delta {cur_b - base_b:+.4f}, tolerance +{tol['brier']})"
+            )
+
+    return RegressionResult(passed=len(regressions) == 0, regressions=regressions)
 
 
 def write_report(report: EvalReport, out_dir: str | Path = "out/eval") -> tuple[Path, Path]:

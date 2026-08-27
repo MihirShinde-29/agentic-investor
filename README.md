@@ -85,7 +85,7 @@ tests/
 - [x] M1: data tools + Technical Agent
 - [x] M2: News-Sentiment Agent + RAG
 - [x] M3: orchestrator + allocation
-- [ ] M4: eval harness (backtest + agent/RAG evals + LLM-judge; also calibration Brier/ECE, rubric judge, NDCG/MAP, adversarial + regression suites)
+- [x] M4: eval harness (backtest + agent/RAG evals + LLM-judge; also calibration Brier/ECE, rubric judge, NDCG/MAP, adversarial + regression suites)
 - [ ] M5: autonomous stock picking (universe scan + selector for full-auto mode)
 - [ ] M6: risk-driven strategy engine v2 (presets per risk tier, per-dimension user overrides)
 - [ ] M7: paper trading (Alpaca sandbox, live P&L, continuous AI loop scheduler)

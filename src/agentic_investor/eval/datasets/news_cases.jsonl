@@ -6,3 +6,5 @@
 {"id": "aapl-services-growth", "ticker": "AAPL", "query": "services revenue growth", "relevant_ids": ["aapl-svcs-08", "aapl-earn-06"], "notes": "services record + Q4 print"}
 {"id": "msft-ai-partnerships", "ticker": "MSFT", "query": "AI partnerships and acquisitions", "relevant_ids": ["msft-ai-12", "msft-acqi-13"], "notes": "OpenAI extension + Neuro buyout"}
 {"id": "msft-cloud-growth", "ticker": "MSFT", "query": "Azure cloud growth and market share", "relevant_ids": ["msft-earn-11"], "notes": "Q1 30% Azure growth"}
+{"id": "adv-nvda-current-earnings", "ticker": "NVDA", "query": "most recent earnings and guidance", "relevant_ids": ["nvda-earn-01", "nvda-guid-02"], "notes": "ADVERSARIAL: near-duplicate Q2 fixture (nvda-earn-q2-16) exists; query lacks explicit Q3 so retriever without recency ranking may confuse them"}
+{"id": "adv-msft-latest-cloud", "ticker": "MSFT", "query": "latest quarterly cloud and Azure growth", "relevant_ids": ["msft-earn-11"], "notes": "ADVERSARIAL: historical cloud article (msft-cloud-old-17) is topically similar; retriever without time filter may surface it"}

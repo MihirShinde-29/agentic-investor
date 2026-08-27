@@ -134,6 +134,40 @@ def test_run_agent_eval_aggregates_rationale_scores():
     assert report.avg_rationale_overall == 5.0
 
 
+def test_calibration_perfect_confidence_gives_zero_brier():
+    from agentic_investor.eval.agents import _compute_calibration
+    # All confident + all correct
+    samples = [(1.0, True), (1.0, True), (1.0, True)]
+    brier, ece = _compute_calibration(samples)
+    assert brier == 0.0
+    assert ece == 0.0
+
+
+def test_calibration_worst_case_confident_and_wrong():
+    from agentic_investor.eval.agents import _compute_calibration
+    samples = [(1.0, False), (1.0, False)]
+    brier, _ = _compute_calibration(samples)
+    assert brier == 1.0  # squared distance from 0
+
+
+def test_calibration_partial():
+    from agentic_investor.eval.agents import _compute_calibration
+    # 0.5 confidence, half right -> Brier = 0.25 (each sample contributes 0.25).
+    samples = [(0.5, True), (0.5, False)]
+    brier, _ = _compute_calibration(samples)
+    assert brier == 0.25
+
+
+def test_run_agent_eval_computes_calibration():
+    analyze = _make_analyzer("bullish", 0.9)
+    report = run_agent_eval(n_samples=2, analyze=analyze)
+    # Confident (0.9) predictions; hits depend on golden cases' acceptable_stances.
+    assert report.brier_score is not None
+    assert report.ece is not None
+    assert 0.0 <= report.brier_score <= 1.0
+    assert 0.0 <= report.ece <= 1.0
+
+
 def test_judge_failure_does_not_crash_case():
     case = _case(["bullish"])
     analyze = _make_analyzer("bullish", 0.7)

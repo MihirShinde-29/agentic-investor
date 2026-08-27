@@ -45,6 +45,7 @@ class CaseResult(BaseModel):
     avg_confidence: float
     confidence_in_range: bool
     stances_seen: list[Stance] = Field(default_factory=list)
+    confidences_seen: list[float] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     rationale_verdicts: list[RationaleVerdict] = Field(default_factory=list)
     avg_rationale_overall: float | None = None
@@ -60,6 +61,30 @@ class AgentEvalReport(BaseModel):
     per_case: list[CaseResult]
     avg_rationale_overall: float | None = None
     judge_model: str | None = None
+    # Calibration (limited proxy until M7 outcomes exist: uses stance-in-acceptable as truth).
+    brier_score: float | None = None
+    ece: float | None = None
+
+
+def _compute_calibration(samples: list[tuple[float, bool]]) -> tuple[float, float]:
+    """Return (Brier score, ECE) from (confidence, was_correct) samples.
+
+    Empty input returns (0.0, 0.0). ECE uses 10 uniform bins in [0, 1].
+    """
+    if not samples:
+        return 0.0, 0.0
+    brier = sum((c - (1.0 if h else 0.0)) ** 2 for c, h in samples) / len(samples)
+    ece = 0.0
+    for i in range(10):
+        lo, hi = i * 0.1, (i + 1) * 0.1
+        # Include the top edge only in the last bucket to cover conf == 1.0.
+        bucket = [(c, h) for c, h in samples if lo <= c < hi or (i == 9 and c == 1.0)]
+        if not bucket:
+            continue
+        avg_conf = sum(c for c, _ in bucket) / len(bucket)
+        avg_acc = sum(1.0 if h else 0.0 for _, h in bucket) / len(bucket)
+        ece += (len(bucket) / len(samples)) * abs(avg_conf - avg_acc)
+    return brier, ece
 
 
 def load_cases(path: str | Path = DEFAULT_CASES) -> list[AgentCase]:
@@ -109,6 +134,7 @@ def _run_one_case(
         avg_confidence=round(avg_conf, 3),
         confidence_in_range=conf_ok,
         stances_seen=stances,
+        confidences_seen=[round(c, 4) for c in confidences],
         errors=errors,
         rationale_verdicts=verdicts,
         avg_rationale_overall=round(avg_overall, 2) if avg_overall is not None else None,
@@ -153,6 +179,15 @@ def run_agent_eval(
     all_overalls = [v.overall for r in per_case for v in r.rationale_verdicts]
     avg_rationale = round(mean(all_overalls), 2) if all_overalls else None
 
+    # Calibration proxy: was each returned stance in the case's acceptable set?
+    # Uses per-sample confidence + per-sample stance from CaseResult.
+    calib_samples: list[tuple[float, bool]] = []
+    for case, result in zip(cases, per_case, strict=True):
+        acceptable = set(case.acceptable_stances)
+        for stance, conf in zip(result.stances_seen, result.confidences_seen, strict=True):
+            calib_samples.append((conf, stance in acceptable))
+    brier, ece = _compute_calibration(calib_samples)
+
     return AgentEvalReport(
         n_cases=len(cases),
         n_samples_per_case=n_samples,
@@ -163,4 +198,6 @@ def run_agent_eval(
         per_case=per_case,
         avg_rationale_overall=avg_rationale,
         judge_model=judge_model,
+        brier_score=round(brier, 4) if calib_samples else None,
+        ece=round(ece, 4) if calib_samples else None,
     )

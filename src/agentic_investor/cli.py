@@ -91,8 +91,16 @@ def _eval_report(
     k: int,
     out_dir: str,
     skip: list[str] | None,
-) -> None:
-    from agentic_investor.eval.report import run_full_eval, write_report
+    compare_to: str | None,
+) -> int:
+    import sys
+
+    from agentic_investor.eval.report import (
+        compare_scorecards,
+        load_baseline,
+        run_full_eval,
+        write_report,
+    )
 
     resolved_judge_model = None
     if judge:
@@ -123,6 +131,19 @@ def _eval_report(
     print()
     print(f"  Wrote: {md_path}")
     print(f"  Wrote: {json_path}")
+
+    if compare_to is not None:
+        baseline = load_baseline(compare_to)
+        result = compare_scorecards(report, baseline)
+        print()
+        if result.passed:
+            print(f"  Regression check vs {compare_to}: PASSED (no metric dropped past tolerance)")
+        else:
+            print(f"  Regression check vs {compare_to}: FAILED")
+            for r in result.regressions:
+                print(f"    - {r}")
+            sys.exit(1)
+    return 0
 
 
 def _eval_retrieval(k: int, fixtures: str | None, cases: str | None) -> None:
@@ -357,6 +378,8 @@ def main() -> None:
     rp.add_argument("--out-dir", default="out/eval", help="output directory")
     rp.add_argument("--skip", nargs="*", default=None, choices=["L1", "L2", "L3"],
                     help="skip named layers, e.g. --skip L3")
+    rp.add_argument("--compare-to", default=None,
+                    help="path to a baseline scorecard.json; exit 1 on regression")
 
     bt = sub.add_parser("backtest", help="backtest a saved recommendation vs a benchmark")
     bt.add_argument("rec_id", type=int)
@@ -405,7 +428,7 @@ def main() -> None:
             args.rec_id, args.start, args.end, args.rebalance,
             args.cash_yield, args.tcost_bps, args.slippage_bps,
             args.n_samples, args.judge, args.judge_model, args.k,
-            args.out_dir, args.skip,
+            args.out_dir, args.skip, args.compare_to,
         )
     elif args.cmd == "backtest":
         _backtest(

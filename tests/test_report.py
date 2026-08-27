@@ -10,6 +10,7 @@ from agentic_investor.eval.report import (
     _verdict_backtest,
     _verdict_retrieval,
     assemble_report,
+    compare_scorecards,
     render_markdown,
     write_report,
 )
@@ -134,6 +135,44 @@ def test_render_markdown_contains_all_sections():
     assert "L3 - Backtest" in md
     assert "Caveats" in md
     assert "Reproduce" in md
+
+
+# Regression suite
+
+def test_compare_scorecards_passes_when_metrics_hold():
+    baseline = assemble_report(
+        retrieval=_retrieval_report(0.9), agents=_agent_report(0.9, 1.0, 4.5)
+    )
+    current = assemble_report(
+        retrieval=_retrieval_report(0.89), agents=_agent_report(0.87, 1.0, 4.4)
+    )
+    result = compare_scorecards(current, baseline)
+    assert result.passed is True
+    assert result.regressions == []
+
+
+def test_compare_scorecards_flags_ndcg_regression():
+    baseline = assemble_report(retrieval=_retrieval_report(0.9), agents=_agent_report())
+    current = assemble_report(retrieval=_retrieval_report(0.5), agents=_agent_report())
+    result = compare_scorecards(current, baseline)
+    assert result.passed is False
+    assert any("NDCG" in r for r in result.regressions)
+
+
+def test_compare_scorecards_flags_stance_regression():
+    baseline = assemble_report(agents=_agent_report(0.9, 1.0, 4.5))
+    current = assemble_report(agents=_agent_report(0.5, 1.0, 4.5))
+    result = compare_scorecards(current, baseline)
+    assert result.passed is False
+    assert any("stance" in r for r in result.regressions)
+
+
+def test_compare_scorecards_flags_rationale_regression():
+    baseline = assemble_report(agents=_agent_report(0.9, 1.0, 4.8))
+    current = assemble_report(agents=_agent_report(0.9, 1.0, 3.5))
+    result = compare_scorecards(current, baseline)
+    assert result.passed is False
+    assert any("rationale" in r for r in result.regressions)
 
 
 def test_write_report_creates_both_files(tmp_path):
