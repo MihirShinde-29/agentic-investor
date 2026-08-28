@@ -404,6 +404,7 @@ def run_tick(
     price_fetcher: Callable[[str], float] | None = None,
     now: datetime | None = None,
     session=None,  # SessionRecorder | None - optional live logging
+    trigger: str | None = None,
 ) -> TickResult:
     """One iteration of the loop. Callable independently for cron-style ops."""
     from agentic_investor.llm.client import get_call_stats
@@ -446,7 +447,9 @@ def run_tick(
         or state.last_rec_id is None
         or batch_ctx
     ):
-        reason = (
+        # Prefer the explicit trigger from the event loop; fall back to
+        # inference from batch_ctx / date only for direct-call test paths.
+        reason = trigger or (
             "news-batch" if batch_ctx
             else ("new-day" if state.last_rec_date != today else "first-tick")
         )
@@ -934,8 +937,13 @@ def run_event_loop(
                     )
                     if session:
                         session.log("decision_moment", {"reason": reason})
+                elif interval_due and not reason:
+                    reason = "interval"
                 try:
-                    result = run_tick(cfg, state, broker, now=now, session=session)
+                    result = run_tick(
+                        cfg, state, broker, now=now, session=session,
+                        trigger=reason,
+                    )
                     state.ticks_run += 1
                     last_interval_tick = now
                     _log_tick(result)
