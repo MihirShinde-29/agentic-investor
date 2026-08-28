@@ -65,6 +65,15 @@ def _connect(url: str) -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS loop_state (
+            account_key TEXT PRIMARY KEY,
+            saved_at TEXT NOT NULL,
+            state_json TEXT NOT NULL
+        )
+        """
+    )
     return conn
 
 
@@ -124,6 +133,42 @@ def list_orders(
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def save_loop_state(
+    state_dict: dict, *, account_key: str = "default", url: str | None = None
+) -> None:
+    """Upsert the loop's mutable state so it survives restart.
+
+    account_key lets us distinguish concurrent loops in future (M13 A/B); for
+    now everyone uses 'default'.
+    """
+    with _connect(_resolve_url(url)) as conn:
+        conn.execute(
+            """
+            INSERT INTO loop_state (account_key, saved_at, state_json)
+            VALUES (?, ?, ?)
+            ON CONFLICT(account_key) DO UPDATE SET
+                saved_at=excluded.saved_at,
+                state_json=excluded.state_json
+            """,
+            (account_key, datetime.now(UTC).isoformat(), json.dumps(state_dict)),
+        )
+        conn.commit()
+
+
+def load_loop_state(
+    *, account_key: str = "default", url: str | None = None
+) -> dict | None:
+    """Return the last-saved loop state dict, or None if none exists."""
+    with _connect(_resolve_url(url)) as conn:
+        row = conn.execute(
+            "SELECT state_json FROM loop_state WHERE account_key = ?",
+            (account_key,),
+        ).fetchone()
+    if row is None:
+        return None
+    return json.loads(row[0])
 
 
 def record_snapshot(

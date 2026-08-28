@@ -121,6 +121,44 @@ class LoopState:
     # used by the technical-change trigger to detect stance transitions.
     last_stances: dict[str, str] = field(default_factory=dict)
 
+    def to_dict(self) -> dict:
+        """Serialize for SQLite persistence."""
+        return {
+            "last_rec_id": self.last_rec_id,
+            "last_rec_date": self.last_rec_date,
+            "ticks_run": self.ticks_run,
+            "orders_submitted": self.orders_submitted,
+            "started_at": self.started_at,
+            "pending_news_context": self.pending_news_context,
+            "frozen_picker_tickers": self.frozen_picker_tickers,
+            "baseline_prices": dict(self.baseline_prices),
+            "last_regen_at": (
+                self.last_regen_at.isoformat() if self.last_regen_at else None
+            ),
+            "last_stances": dict(self.last_stances),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> LoopState:
+        """Rebuild from persisted state. Missing keys get defaults."""
+        last_regen_at = d.get("last_regen_at")
+        if isinstance(last_regen_at, str):
+            last_regen_at = datetime.fromisoformat(last_regen_at)
+            if last_regen_at.tzinfo is None:
+                last_regen_at = last_regen_at.replace(tzinfo=UTC)
+        return cls(
+            last_rec_id=d.get("last_rec_id"),
+            last_rec_date=d.get("last_rec_date"),
+            ticks_run=int(d.get("ticks_run") or 0),
+            orders_submitted=int(d.get("orders_submitted") or 0),
+            started_at=d.get("started_at") or datetime.now(UTC).isoformat(),
+            pending_news_context=d.get("pending_news_context"),
+            frozen_picker_tickers=d.get("frozen_picker_tickers"),
+            baseline_prices=dict(d.get("baseline_prices") or {}),
+            last_regen_at=last_regen_at,
+            last_stances=dict(d.get("last_stances") or {}),
+        )
+
 
 def _price_move_trigger(
     baseline_prices: dict[str, float],
@@ -412,6 +450,11 @@ def run_tick(
                 # poll and re-fires until an actual regen happens (runaway
                 # cost observed 2026-08-28 13:36 ET).
                 state.last_regen_at = now
+                try:
+                    from agentic_investor.tools.paper_store import save_loop_state
+                    save_loop_state(state.to_dict())
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("save_loop_state failed on skip: %s", e)
                 if session:
                     session.log("opinion_drift_skip", {
                         "reason": reason,
@@ -451,6 +494,15 @@ def run_tick(
             s.ticker.upper(): s.stance for s in rec.technical_signals
         }
         regenerated = True
+        # Session persistence: save state after every regen so a crash /
+        # network hiccup / manual restart doesn't lose our anchor (rec_id,
+        # frozen_picker, baseline_prices). Prevents whipsaw across restarts
+        # (observed 2026-08-28 13:50 -> 14:10 MSFT rebuild after crash).
+        try:
+            from agentic_investor.tools.paper_store import save_loop_state
+            save_loop_state(state.to_dict())
+        except Exception as e:  # noqa: BLE001 - persistence must not crash the loop
+            logger.warning("save_loop_state failed: %s", e)
         if session:
             session.log("regen_done", {
                 "rec_id": rec_id,
@@ -572,8 +624,24 @@ def run_event_loop(
         should_fire,
     )
     from agentic_investor.tools.news_stream import NewsStreamer
+    from agentic_investor.tools.paper_store import load_loop_state
 
-    state = LoopState()
+    # Restart survival: if a prior state was persisted for this account,
+    # rehydrate. If last_rec_date is TODAY we skip the first-tick regen
+    # (state is fresh from earlier session). Different day = new-day regen.
+    persisted = load_loop_state()
+    state = LoopState.from_dict(persisted) if persisted else LoopState()
+    if persisted:
+        logger.info(
+            "restored loop state: last_rec_id=%s last_rec_date=%s ticks=%d",
+            state.last_rec_id, state.last_rec_date, state.ticks_run,
+        )
+        if session:
+            session.log("state_restored", {
+                "last_rec_id": state.last_rec_id,
+                "last_rec_date": state.last_rec_date,
+                "ticks_run": state.ticks_run,
+            })
     decision_state = DecisionState()
     event_q: _q.Queue = _q.Queue()
 
@@ -783,7 +851,14 @@ def run_loop(
     session=None,
 ) -> LoopState:
     """The continuous outer loop. Handles market hours + ticks + shutdown."""
-    state = LoopState()
+    from agentic_investor.tools.paper_store import load_loop_state
+    persisted = load_loop_state()
+    state = LoopState.from_dict(persisted) if persisted else LoopState()
+    if persisted and session:
+        session.log("state_restored", {
+            "last_rec_id": state.last_rec_id,
+            "last_rec_date": state.last_rec_date,
+        })
     logger.info("paper-loop starting: %s", cfg)
     try:
         while True:

@@ -286,6 +286,37 @@ def test_technical_stance_no_change_returns_false():
     assert changes == {}
 
 
+def test_loop_state_round_trips_through_dict():
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    state = LoopState(
+        last_rec_id=42,
+        last_rec_date="2026-08-28",
+        ticks_run=7,
+        orders_submitted=3,
+        frozen_picker_tickers=["NVDA", "MSFT"],
+        baseline_prices={"NVDA": 200.5, "MSFT": 515.0},
+        last_regen_at=_dt.now(_UTC),
+        last_stances={"NVDA": "bullish", "MSFT": "neutral"},
+    )
+    d = state.to_dict()
+    rehydrated = LoopState.from_dict(d)
+    assert rehydrated.last_rec_id == 42
+    assert rehydrated.last_rec_date == "2026-08-28"
+    assert rehydrated.ticks_run == 7
+    assert rehydrated.frozen_picker_tickers == ["NVDA", "MSFT"]
+    assert rehydrated.baseline_prices == {"NVDA": 200.5, "MSFT": 515.0}
+    assert rehydrated.last_stances == {"NVDA": "bullish", "MSFT": "neutral"}
+    assert rehydrated.last_regen_at == state.last_regen_at
+
+
+def test_loop_state_from_empty_dict_returns_defaults():
+    state = LoopState.from_dict({})
+    assert state.last_rec_id is None
+    assert state.ticks_run == 0
+    assert state.baseline_prices == {}
+
+
 def test_drift_true_when_position_no_longer_in_target():
     rec = _rec()
     # Portfolio still holds 30% TSLA which isn't in target - big drift.
