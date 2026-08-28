@@ -41,71 +41,45 @@ class LoopConfig:
     profile_name: str = "moderate"
     amount: float = 10_000.0
 
-    # Ticker selection: either explicit list OR auto-pick from a universe.
+    # Ticker selection
     tickers: list[str] = field(default_factory=list)
     auto: bool = False
     universe: str = "dow30"
     top_n: int = 8
 
-    # Cadence + risk
-    interval_seconds: int = 30 * 60  # 30 min default
-    band_abs_pct: float = 5.0  # only rebalance when a position drifts this many pp
+    # Tick cadence
+    interval_seconds: int = 30 * 60
+    band_abs_pct: float = 5.0
     min_trade_dollars: float = 50.0
-    # Opinion-drift filter: if a fresh regen produced target weights that all
-    # differ from the previous rec's weights by less than this threshold,
-    # the LLM's opinion barely moved - skip the whole rebalance. Prevents
-    # churn from LLM output variance (25% -> 24% -> 25% is noise, not signal).
-    opinion_drift_threshold_pct: float = 3.0
-    # Price-move trigger: fires a decision moment when any held ticker
-    # moves more than this % from its baseline (last-regen price). Catches
-    # significant intraday moves that don't have a news catalyst.
+
+    # Triggers
     price_move_threshold_pct: float = 2.0
-    # Force-regen ceiling: even without news or price moves, force a fresh
-    # LLM rec every N seconds so a quiet day still gets periodic re-evaluation.
-    # Set to 0 to disable.
     force_regen_seconds: int = 30 * 60
-    # Technical-signal change trigger: if any held ticker's technical stance
-    # (bearish/neutral/bullish) changed since last rec, force a regen even
-    # without news. DISABLED by default because the technical agent is
-    # LLM-based (temperature 0.2) and stance flips are dominated by output
-    # variance, not real market changes. Re-enable once the technical agent
-    # is deterministic (temp=0) OR the stance derives from raw indicators.
+    # Disabled: LLM-based technical stance is too noisy to trigger regens.
+    # Re-enable once stance derives from deterministic indicators.
     enable_technical_change_trigger: bool = False
-    # Aggregate-turnover safety cap: if a fresh regen would rebalance more
-    # than this % of the portfolio in total (sum of |per-ticker deltas|),
-    # skip - the LLM's opinion swung too far to trust. Catches full-portfolio
-    # flips like the 2026-08-28 12:16 event (40pp turnover, LLM variance).
-    # DEPRECATED - kept for backward compat; new filter uses avg + max deltas.
-    max_aggregate_turnover_pct: float = 25.0
-    # Filter v2 (0i + 0h): scale-invariant + context-aware skip logic.
-    # avg_drift = sum(|per-position deltas|) / n_tickers - flags portfolio-
-    # wide churn independent of ticker count. Default 5pp.
+
+    # Opinion-drift filter (LLM variance skip logic)
+    opinion_drift_threshold_pct: float = 3.0
     max_avg_drift_pct: float = 5.0
-    # max_single_delta - flags dramatic single-position moves. Only skips
-    # when the moving ticker is NOT in news_batch AND confidence < 0.7
-    # (otherwise the move is justified). Default 15pp.
     max_single_delta_pct: float = 15.0
-    # Temporal cooldown on trade reversals: any proposed trade on the
-    # opposite side of a recent trade for the same ticker is vetoed for
-    # cooldown_seconds unless the ticker appears in the current news batch
-    # (fresh material signal justifies reversal). Prevents whipsaws like
-    # 2026-08-28 rec #67 -> rec #68 NVDA sell-then-rebuy in 14 min.
-    cooldown_seconds: int = 900  # 15 min
-    # 0r Buy discipline: veto BUY orders on tickers that recently moved
-    # against us (adverse-move veto) or on positions already deep underwater
-    # (halt-buys drawdown). LLM keeps SELL/HOLD authority; only BUYs gated.
-    adverse_move_threshold_pct: float = 1.0  # veto BUY if down > 1% recently
-    halt_buys_drawdown_pct: float = 5.0  # veto BUY if position down > 5% from entry
-    # 0g Momentum-aware TRIM + force loss-cut:
-    small_drawdown_hold_pct: float = 3.0  # skip trim on small drawdown if bouncing
-    force_loss_cut_pct: float = 8.0  # force full SELL if position down > 8% from entry
+    # Superseded by max_avg_drift + max_single_delta; retained for back-compat.
+    max_aggregate_turnover_pct: float = 25.0
+
+    # Discipline layer (vetoes at the rebalancer boundary)
+    cooldown_seconds: int = 900              # 0q temporal cooldown
+    adverse_move_threshold_pct: float = 1.0  # 0r don't buy falling knives
+    halt_buys_drawdown_pct: float = 5.0      # 0r don't average down on losers
+    small_drawdown_hold_pct: float = 3.0     # 0g don't sell into bounces
+    force_loss_cut_pct: float = 8.0          # 0g auto-exit deep losers
+
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
 
     # Ops toggles
     dry_run: bool = False
-    once: bool = False  # run one tick then exit (for testing)
-    force_open: bool = False  # skip market-hours check (dev/testing only)
+    once: bool = False
+    force_open: bool = False
 
 
 @dataclass
@@ -121,32 +95,27 @@ class TickResult:
 
 @dataclass
 class LoopState:
+    """Mutable per-loop runtime state. Persisted to SQLite on every regen."""
+
     last_rec_id: int | None = None
-    last_rec_date: str | None = None  # "YYYY-MM-DD" of last regeneration
+    last_rec_date: str | None = None  # YYYY-MM-DD; enables cross-day regen
     ticks_run: int = 0
     orders_submitted: int = 0
     started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
-    # Event-driven mode: set by the event loop when a news batch fires.
+
     # Consumed by run_tick to force a fresh rec that sees the batch context.
     pending_news_context: str | None = None
-    # Sticky picker output: cached after the first regen so subsequent
-    # news-triggered regens don't re-shuffle the ticker set. Prevents the
-    # portfolio churn we observed live on 2026-08-28 where every regen ran
-    # the picker again and produced slightly different top-N.
+    # Sticky picker output - prevents portfolio churn from re-scoring the
+    # universe on every regen. Reset across days.
     frozen_picker_tickers: list[str] | None = None
-    # Baseline prices captured at the last regen; price-move trigger checks
-    # current price vs baseline. Reset on every regen.
+    # Reference prices for the price-move trigger + adverse-move veto.
     baseline_prices: dict[str, float] = field(default_factory=dict)
-    # Last regen timestamp (any trigger). Force-regen fires when now -
-    # last_regen_at exceeds cfg.force_regen_seconds.
+    # Force-regen timing: fires when (now - last_regen_at) > force_regen_seconds.
     last_regen_at: datetime | None = None
-    # Per-ticker technical stance from the last rec's TechnicalSignal list,
-    # used by the technical-change trigger to detect stance transitions.
+    # Last-rec stances, used by the (currently disabled) technical-change trigger.
     last_stances: dict[str, str] = field(default_factory=dict)
-    # (ticker -> (side, iso_timestamp)) most-recent submitted trade per ticker.
-    # Used by compute_trade_plan's temporal cooldown to veto reversals within
-    # cooldown_seconds (default 15 min), unless news specifically mentions
-    # that ticker in the current batch.
+    # {ticker: (side, iso_ts)} - most-recent trade per ticker, used by the
+    # temporal-cooldown veto in compute_trade_plan.
     recent_trades: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -486,21 +455,16 @@ def run_tick(
         logger.info("tick %s: regenerating recommendation (%s)", tick_at, reason)
         if session:
             session.log("regen_start", {"reason": reason, "has_news_batch": bool(batch_ctx)})
-        # Sticky picker: on the first regen the picker runs, we cache its
-        # output; every regen after reuses those tickers so news-triggered
-        # regens don't churn the portfolio. Cache resets across days.
+        # Frozen picker: cached after first regen of the day so news-triggered
+        # regens don't reshuffle the ticker set. Watchlist promotion adds
+        # news-mentioned candidates to the LLM's consideration set.
         is_new_day = state.last_rec_date != today
         pre_picked = None if is_new_day else state.frozen_picker_tickers
-        # Watchlist promotion: on news-triggered regen, expand the ticker
-        # set to include any non-held candidate mentioned in the batch so
-        # the LLM can propose adding it. Batch context is already in the
-        # prompt; this lets the allocator actually WEIGHT the new name.
         if batch_ctx and pre_picked is not None:
             batch_tickers = _extract_tickers_from_batch_ctx(batch_ctx)
             pre_picked = list(dict.fromkeys([*pre_picked, *batch_tickers]))
-        # Prompt anchoring: load previous rec (if any) so allocator prompts
-        # in delta form. Only on non-first-day regens; first tick of day
-        # gets no anchor (blank-slate is right for daily model output).
+
+        # Delta-form prompt anchor (non-first-day only).
         prev_rec_for_prompt = None
         if not is_new_day and state.last_rec_id is not None:
             from agentic_investor.orchestrator.store import (
@@ -511,19 +475,14 @@ def run_tick(
             cfg, news_batch_context=batch_ctx, pre_picked_tickers=pre_picked,
             previous_rec=prev_rec_for_prompt,
         )
-        # Opinion-drift filter: on non-first-tick regens, compare new rec's
-        # target weights to the PREVIOUS rec's. Skip the rebalance in TWO
-        # cases: (a) all per-position deltas < threshold (opinion barely
-        # moved, treat as LLM noise), or (b) aggregate turnover exceeds
-        # max_aggregate_turnover_pct (opinion swung too far, likely LLM
-        # variance not real signal).
+
+        # Opinion-drift filter: compare new rec to previous; skip on LLM
+        # noise (barely-moved) or over-swing (avg-drift / max-delta).
         if not is_new_day and state.last_rec_id is not None:
             from agentic_investor.orchestrator.store import (
                 load_recommendation as _load,
             )
             prev_rec = _load(state.last_rec_id)
-            # Parse news batch tickers + build confidence lookup for the
-            # context-aware max-delta check.
             batch_tickers_for_filter: set[str] = set()
             if batch_ctx:
                 for line in batch_ctx.split("\n"):
@@ -551,22 +510,16 @@ def run_tick(
                     stats.get("max_delta_ticker", "?"),
                 )
                 state.pending_news_context = None
-                # Update last_regen_at even on skip - we DID fire an LLM call
-                # and decided to keep the current rec. Without this the
-                # force-regen check keeps returning True on every subsequent
-                # poll and re-fires until an actual regen happens (runaway
-                # cost observed 2026-08-28 13:36 ET).
+                # last_regen_at MUST update on skip too - otherwise force-regen
+                # returns True on every poll and re-fires the LLM in a loop.
                 state.last_regen_at = now
                 try:
                     from agentic_investor.tools.paper_store import save_loop_state
                     save_loop_state(state.to_dict())
                 except Exception as e:  # noqa: BLE001
                     logger.warning("save_loop_state failed on skip: %s", e)
-                # 0f Attribution: log the would-be allocation with actual
-                # positions + equity so we can later simulate what would
-                # have happened if we had traded. Fetch positions inline
-                # since acct/positions aren't fetched until after the skip
-                # check in the normal path.
+                # Attribution: record the would-be allocation for later
+                # counterfactual analysis (false-positive rate measurement).
                 try:
                     from agentic_investor.tools.paper_store import record_filter_skip
                     skip_acct = broker.get_account()
@@ -628,14 +581,10 @@ def run_tick(
             s.ticker.upper(): s.stance for s in rec.technical_signals
         }
         regenerated = True
-        # Session persistence: save state after every regen so a crash /
-        # network hiccup / manual restart doesn't lose our anchor (rec_id,
-        # frozen_picker, baseline_prices). Prevents whipsaw across restarts
-        # (observed 2026-08-28 13:50 -> 14:10 MSFT rebuild after crash).
         try:
             from agentic_investor.tools.paper_store import save_loop_state
             save_loop_state(state.to_dict())
-        except Exception as e:  # noqa: BLE001 - persistence must not crash the loop
+        except Exception as e:  # noqa: BLE001 - persistence must not crash loop
             logger.warning("save_loop_state failed: %s", e)
         if session:
             session.log("regen_done", {
@@ -689,16 +638,15 @@ def run_tick(
             recent_typed[tk] = (side_v, ts_dt)
         except Exception:  # noqa: BLE001
             continue
+    # Parse batch context lines "- [HOT] NVDA age=1m ..." for ticker set.
     batch_tickers_for_cooldown: set[str] = set()
     if batch_ctx:
         for line in batch_ctx.split("\n"):
-            # lines look like "- [HOT] NVDA age=1m ..." - grab the third token
             parts = line.strip().split()
             if len(parts) >= 3 and parts[0] == "-":
                 batch_tickers_for_cooldown.add(parts[2].strip(":").upper())
-    # 0r Buy discipline: compute recent price moves + collect avg entry prices
-    # so the rebalancer can veto BUY orders on falling knives + losing
-    # positions being averaged down.
+
+    # Discipline layer inputs: recent price moves + avg entry prices per ticker.
     ticker_recent_moves: dict[str, float] = {}
     avg_entry_prices: dict[str, float] = {p.ticker.upper(): float(p.avg_entry_price)
                                           for p in positions if p.avg_entry_price}

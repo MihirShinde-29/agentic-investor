@@ -39,11 +39,8 @@ class Position(BaseModel):
     weight_pct: float = Field(ge=0.0, le=100.0)
     dollars: float = Field(ge=0.0)
     rationale: str
-    # LLM's stated conviction for this weight (0.0-1.0). Required as of M7+
-    # so confidence-adaptive bands work consistently (was optional; live
-    # observation 2026-08-28 rec #58 showed the LLM silently omitting it,
-    # disabling the adaptive-band feature). Defaults to 0.5 (neutral) on
-    # missing values for legacy recs loaded from store.
+    # LLM conviction for this weight; drives confidence-adaptive rebalance
+    # bands. Default 0.5 keeps legacy recs (loaded from store) sane.
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
@@ -56,14 +53,14 @@ class Allocation(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _fold_cash_pseudo_position(cls, data):
-        # gpt-4o-mini occasionally emits a Position with ticker "cash" AND a
-        # cash_pct field, double-counting cash. Roll any such pseudo-positions
-        # into cash_pct/cash_dollars so the real validators see a clean input.
+        # LLMs occasionally emit a Position with ticker "cash" AND a cash_pct
+        # field, double-counting. Fold pseudo-cash into cash_pct/cash_dollars.
         if not isinstance(data, dict):
             return data
         positions = data.get("positions") or []
         if not positions:
             return data
+
         def _field(p, name):
             return p.get(name) if isinstance(p, dict) else getattr(p, name, None)
 
@@ -81,9 +78,7 @@ class Allocation(BaseModel):
         if pseudo_cash_pct or pseudo_cash_dollars:
             existing_cash_pct = float(data.get("cash_pct") or 0.0)
             existing_cash_dollars = float(data.get("cash_dollars") or 0.0)
-            # If BOTH fields are set the LLM duplicated cash - take the max
-            # (the more conservative interpretation). If only one is set, sum
-            # is trivially correct.
+            # Both set = LLM double-counted; take max. Else sum.
             merged_cash_pct = (
                 max(existing_cash_pct, pseudo_cash_pct)
                 if existing_cash_pct and pseudo_cash_pct
@@ -104,14 +99,15 @@ class Allocation(BaseModel):
 
     @model_validator(mode="after")
     def _weights_sum_to_100(self):
+        """Renormalize small LLM arithmetic errors; reject if wildly off.
+
+        gpt-4o-mini reliably outputs sums like 105-115 with 8+ tickers;
+        instructor retries eat cost without helping. Preserving ratios keeps
+        relative conviction intact - only absolute scale shifts.
+        """
         total = sum(p.weight_pct for p in self.positions) + self.cash_pct
-        # Perfect / near-perfect: no repair needed.
         if 99.5 <= total <= 100.5:
             return self
-        # LLM arithmetic error inside a reasonable band: silently renormalize.
-        # gpt-4o-mini reliably outputs sums like 105 or 110 with 8-10 tickers;
-        # instructor retries eat cost without helping. Preserving ratios keeps
-        # the LLM's relative conviction intact - only the absolute scale moves.
         if 90.0 <= total <= 115.0:
             factor = 100.0 / total
             for p in self.positions:
@@ -119,7 +115,6 @@ class Allocation(BaseModel):
                 p.dollars = round(p.dollars * factor, 2)
             self.cash_pct = round(self.cash_pct * factor, 2)
             self.cash_dollars = round(self.cash_dollars * factor, 2)
-            # Absorb sub-percent residual into cash_pct so the total hits 100.
             residual = 100.0 - (sum(p.weight_pct for p in self.positions) + self.cash_pct)
             self.cash_pct = round(self.cash_pct + residual, 2)
             return self
