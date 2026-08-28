@@ -38,8 +38,22 @@ def compute_trade_plan(
     *,
     prices: dict[str, float],  # ticker -> latest price for qty sizing
     min_trade_dollars: float = 25.0,
+    recent_trades: dict[str, tuple[str, datetime]] | None = None,
+    cooldown_seconds: int = 900,
+    now: datetime | None = None,
+    news_batch_tickers: set[str] | None = None,
 ) -> list[TradePlan]:
-    """Diff target-weight allocation against current positions."""
+    """Diff target-weight allocation against current positions.
+
+    recent_trades: dict[ticker, (side, timestamp)] of the last trade for each
+    ticker. When set, any proposed trade on the OPPOSITE side within
+    cooldown_seconds is vetoed to prevent whipsaws (buy-then-sell-same-ticker
+    within 15 min). Exception: if the ticker appears in news_batch_tickers,
+    the cooldown is bypassed (fresh material signal justifies the reversal).
+    """
+    now = now or datetime.now(UTC)
+    recent_trades = recent_trades or {}
+    news_batch_tickers = news_batch_tickers or set()
     target_dollars = {
         p.ticker: total_equity * (p.weight_pct / 100.0) for p in rec.allocation.positions
     }
@@ -60,6 +74,15 @@ def compute_trade_plan(
         if qty <= 0:
             continue
         side = "buy" if delta > 0 else "sell"
+        # Temporal cooldown: if we recently traded this ticker in the opposite
+        # direction, veto the reversal unless news specifically justifies it.
+        recent = recent_trades.get(t.upper())
+        if recent is not None:
+            recent_side, recent_ts = recent
+            age = (now - recent_ts).total_seconds()
+            if (recent_side != side and age < cooldown_seconds
+                    and t.upper() not in news_batch_tickers):
+                continue  # cooldown veto
         plans.append(
             TradePlan(
                 ticker=t,

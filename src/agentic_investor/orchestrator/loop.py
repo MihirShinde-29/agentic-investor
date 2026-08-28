@@ -76,6 +76,12 @@ class LoopConfig:
     # skip - the LLM's opinion swung too far to trust. Catches full-portfolio
     # flips like the 2026-08-28 12:16 event (40pp turnover, LLM variance).
     max_aggregate_turnover_pct: float = 25.0
+    # Temporal cooldown on trade reversals: any proposed trade on the
+    # opposite side of a recent trade for the same ticker is vetoed for
+    # cooldown_seconds unless the ticker appears in the current news batch
+    # (fresh material signal justifies reversal). Prevents whipsaws like
+    # 2026-08-28 rec #67 -> rec #68 NVDA sell-then-rebuy in 14 min.
+    cooldown_seconds: int = 900  # 15 min
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
 
@@ -120,6 +126,11 @@ class LoopState:
     # Per-ticker technical stance from the last rec's TechnicalSignal list,
     # used by the technical-change trigger to detect stance transitions.
     last_stances: dict[str, str] = field(default_factory=dict)
+    # (ticker -> (side, iso_timestamp)) most-recent submitted trade per ticker.
+    # Used by compute_trade_plan's temporal cooldown to veto reversals within
+    # cooldown_seconds (default 15 min), unless news specifically mentions
+    # that ticker in the current batch.
+    recent_trades: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Serialize for SQLite persistence."""
@@ -136,6 +147,7 @@ class LoopState:
                 self.last_regen_at.isoformat() if self.last_regen_at else None
             ),
             "last_stances": dict(self.last_stances),
+            "recent_trades": dict(self.recent_trades),
         }
 
     @classmethod
@@ -157,6 +169,10 @@ class LoopState:
             baseline_prices=dict(d.get("baseline_prices") or {}),
             last_regen_at=last_regen_at,
             last_stances=dict(d.get("last_stances") or {}),
+            recent_trades={
+                k: (v[0], v[1]) if isinstance(v, list | tuple) else v
+                for k, v in (d.get("recent_trades") or {}).items()
+            },
         )
 
 
@@ -543,9 +559,32 @@ def run_tick(
         except Exception as e:  # noqa: BLE001
             logger.warning("price fetch failed for %s: %s", t, e)
 
+    # Deserialize state.recent_trades timestamps + prep news_batch tickers
+    # for cooldown-bypass logic in compute_trade_plan.
+    recent_typed: dict[str, tuple[str, datetime]] = {}
+    for tk, entry in state.recent_trades.items():
+        try:
+            side_v, ts_v = entry
+            ts_dt = datetime.fromisoformat(ts_v) if isinstance(ts_v, str) else ts_v
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=UTC)
+            recent_typed[tk] = (side_v, ts_dt)
+        except Exception:  # noqa: BLE001
+            continue
+    batch_tickers_for_cooldown: set[str] = set()
+    if batch_ctx:
+        for line in batch_ctx.split("\n"):
+            # lines look like "- [HOT] NVDA age=1m ..." - grab the third token
+            parts = line.strip().split()
+            if len(parts) >= 3 and parts[0] == "-":
+                batch_tickers_for_cooldown.add(parts[2].strip(":").upper())
     plans = compute_trade_plan(
         rec, positions_dollars, acct.equity,
         prices=prices, min_trade_dollars=cfg.min_trade_dollars,
+        recent_trades=recent_typed,
+        cooldown_seconds=getattr(cfg, "cooldown_seconds", 900),
+        now=now,
+        news_batch_tickers=batch_tickers_for_cooldown,
     )
 
     if cfg.dry_run or not plans:
@@ -571,6 +610,8 @@ def run_tick(
     )
     for o in submitted:
         record_order(o, source="loop", rec_id=state.last_rec_id)
+        # Record for temporal cooldown lookup on next tick.
+        state.recent_trades[o.ticker.upper()] = (o.side, now.isoformat())
         if session:
             session.log("order_submitted", {
                 "ticker": o.ticker, "side": o.side, "qty": o.qty,

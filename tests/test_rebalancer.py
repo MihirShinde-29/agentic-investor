@@ -123,6 +123,89 @@ class _FakeBroker:
         )
 
 
+def test_cooldown_vetoes_reversal_within_window():
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    # Recent trade: SOLD AAPL 10 min ago
+    recent = {"AAPL": ("sell", now - timedelta(minutes=10))}
+    # Current portfolio: AAPL 0, NVDA 0 (target 40% each)
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 0, "NVDA": 0},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=1.0,
+        recent_trades=recent,
+        cooldown_seconds=900,  # 15 min
+        now=now,
+    )
+    # AAPL BUY should be vetoed (opposite of recent SELL, still in cooldown).
+    # NVDA BUY should go through (no recent trade).
+    tickers = [p.ticker for p in plans]
+    assert "AAPL" not in tickers
+    assert "NVDA" in tickers
+
+
+def test_cooldown_allows_same_side_repeat():
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    recent = {"AAPL": ("buy", now - timedelta(minutes=10))}
+    # Position lags target, want to BUY more AAPL - same side, allowed.
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 1000},  # short of $4000 target
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=1.0,
+        recent_trades=recent,
+        cooldown_seconds=900,
+        now=now,
+    )
+    aapl = next((p for p in plans if p.ticker == "AAPL"), None)
+    assert aapl is not None
+    assert aapl.side == "buy"
+
+
+def test_cooldown_bypass_when_ticker_in_news_batch():
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    recent = {"AAPL": ("sell", now - timedelta(minutes=10))}
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 0, "NVDA": 0},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=1.0,
+        recent_trades=recent,
+        cooldown_seconds=900,
+        now=now,
+        news_batch_tickers={"AAPL"},  # news for AAPL - bypass cooldown
+    )
+    # AAPL BUY allowed because AAPL is in news batch (fresh signal justifies).
+    assert any(p.ticker == "AAPL" and p.side == "buy" for p in plans)
+
+
+def test_cooldown_expired_allows_reversal():
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    recent = {"AAPL": ("sell", now - timedelta(minutes=20))}  # past 15min cooldown
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 0, "NVDA": 0},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=1.0,
+        recent_trades=recent,
+        cooldown_seconds=900,  # 15 min
+        now=now,
+    )
+    assert any(p.ticker == "AAPL" for p in plans)
+
+
 def test_execute_only_attaches_stops_to_buy_side():
     plans = compute_trade_plan(
         _rec(),
