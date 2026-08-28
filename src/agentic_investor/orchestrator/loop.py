@@ -44,7 +44,7 @@ class LoopConfig:
     # Ticker selection: either explicit list OR auto-pick from a universe.
     tickers: list[str] = field(default_factory=list)
     auto: bool = False
-    universe: str = "mega_tech"
+    universe: str = "dow30"
     top_n: int = 8
 
     # Cadence + risk

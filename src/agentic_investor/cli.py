@@ -1122,7 +1122,7 @@ def main() -> None:
     ca.add_argument("--auto", action="store_true",
                     help="let the M5 picker choose tickers from --universe "
                          "(same list passed to every preset)")
-    ca.add_argument("--universe", default="mega_tech",
+    ca.add_argument("--universe", default="dow30",
                     help="universe key for --auto (dow30 / mega_tech / sectors)")
     ca.add_argument("--top-n", type=int, default=8,
                     help="how many tickers to pick when --auto is set")
@@ -1172,7 +1172,7 @@ def main() -> None:
     pt.add_argument("--tickers", default=None,
                     help="comma-separated tickers; omit if using --auto")
     pt.add_argument("--auto", action="store_true")
-    pt.add_argument("--universe", default="mega_tech")
+    pt.add_argument("--universe", default="dow30")
     pt.add_argument("--top-n", type=int, default=8)
     pt.add_argument("--band-abs-pct", type=float, default=5.0)
     pt.add_argument("--min-trade-dollars", type=float, default=50.0)
@@ -1188,7 +1188,7 @@ def main() -> None:
     pl.add_argument("--tickers", default=None,
                     help="comma-separated tickers; omit if using --auto")
     pl.add_argument("--auto", action="store_true")
-    pl.add_argument("--universe", default="mega_tech")
+    pl.add_argument("--universe", default="dow30")
     pl.add_argument("--top-n", type=int, default=8)
     pl.add_argument("--interval", default="30m",
                     help="tick cadence; accepts 30m / 1h / 45s (default 30m)")
