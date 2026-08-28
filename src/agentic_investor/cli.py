@@ -765,6 +765,19 @@ def _paper_attribution(sessions_dir: str, out_path: str) -> None:
     print("\nOpen to see per-session metrics, filter behavior, honesty notes.")
 
 
+def _paper_calibration(horizon_minutes: int, out_dir: str) -> None:
+    from agentic_investor.ops.calibration import build_calibration_report
+
+    print(f"\nBuilding calibration report (horizon={horizon_minutes}m)...")
+    md, png, csv_path = build_calibration_report(
+        horizon_minutes=horizon_minutes, out_dir=out_dir,
+    )
+    print("\nWrote:")
+    print(f"  {md}")
+    print(f"  {png}")
+    print(f"  {csv_path}")
+
+
 def _paper_report(session_dir: str | None) -> None:
     from pathlib import Path
 
@@ -1232,6 +1245,14 @@ def main() -> None:
     pr2.add_argument("--session", default=None,
                      help="path to a session dir; omit for most-recent session")
 
+    pc = sub.add_parser("paper-calibration",
+                        help="LLM confidence calibration curve across all "
+                             "filled orders (does 0.8 confidence win 80%%?)")
+    pc.add_argument("--horizon-minutes", type=int, default=60,
+                    help="minutes after fill to measure outcome (default 60)")
+    pc.add_argument("--out-dir", default="out/calibration",
+                    help="output directory for PNG+MD+CSV")
+
     pt2 = sub.add_parser("paper-test-event",
                          help="synthetic decision moment: inject fake news, "
                               "run one full tick, verify event-driven wiring")
@@ -1328,6 +1349,8 @@ def main() -> None:
         _paper_attribution(args.sessions_dir, args.out)
     elif args.cmd == "paper-report":
         _paper_report(args.session)
+    elif args.cmd == "paper-calibration":
+        _paper_calibration(args.horizon_minutes, args.out_dir)
     elif args.cmd == "paper-test-event":
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
         _paper_test_event(
