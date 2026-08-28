@@ -419,10 +419,10 @@ def run_tick(
         save_rec = _save
 
     if price_fetcher is None:
-        from agentic_investor.tools.market import fetch_ohlcv
+        from agentic_investor.tools.paper_broker import get_latest_price
 
         def price_fetcher(t: str) -> float:  # type: ignore[misc]
-            return float(fetch_ohlcv(t, period="1y")["Close"].iloc[-1])
+            return get_latest_price(t)
 
     def _log_tick_cost() -> None:
         if not session:
@@ -824,13 +824,11 @@ def run_event_loop(
             price_fire = False
             if not fire and state.baseline_prices:
                 try:
-                    from agentic_investor.tools.market import fetch_ohlcv
+                    from agentic_investor.tools.paper_broker import get_latest_price
                     cur_prices = {}
                     for t in state.baseline_prices:
                         try:
-                            cur_prices[t] = float(
-                                fetch_ohlcv(t, period="1y")["Close"].iloc[-1]
-                            )
+                            cur_prices[t] = get_latest_price(t)
                         except Exception:  # noqa: BLE001
                             pass
                     hit, moves = _price_move_trigger(

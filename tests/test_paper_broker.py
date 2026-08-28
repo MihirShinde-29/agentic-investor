@@ -129,6 +129,30 @@ def test_side_validation_rejects_garbage():
         b.submit_market_order("AAPL", "long", 10)
 
 
+def test_get_latest_price_falls_back_to_yfinance_when_alpaca_fails(monkeypatch):
+    """When Alpaca credentials are missing or the API errors, fall back to yfinance."""
+    # Stub yfinance-side fetch to a known value.
+    import pandas as pd
+
+    from agentic_investor.tools import paper_broker as pb
+
+    class _FakeDF:
+        def __getitem__(self, k):
+            return type("S", (), {"iloc": [123.45]})()
+
+    monkeypatch.setattr(
+        "agentic_investor.tools.market.fetch_ohlcv",
+        lambda *a, **k: pd.DataFrame({"Close": [123.45]}),
+    )
+    # Force Alpaca path to fail by wiping settings.
+    monkeypatch.setattr(pb, "get_settings", lambda: type("S", (), {
+        "alpaca_api_key": None, "alpaca_api_secret": None,
+    })())
+
+    price = pb.get_latest_price("AAPL")
+    assert price == 123.45
+
+
 def test_alpaca_order_conversion_strips_enum_prefix():
     raw = _fake_order(status="OrderStatus.FILLED", side="OrderSide.SELL")
     o = _alpaca_order_to_domain(raw)

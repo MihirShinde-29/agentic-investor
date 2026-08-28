@@ -245,29 +245,36 @@ class AlpacaPaperBroker:
         self._client.cancel_order_by_id(order_id)
 
     def _latest_trade_price(self, ticker: str) -> float:
-        # Use the market-data client for the last trade. Falls back to a
-        # yfinance quote if the market-data client isn't authorized (some
-        # free plans don't include real-time data).
-        try:
-            from alpaca.data.historical import StockHistoricalDataClient
-            from alpaca.data.requests import StockLatestTradeRequest
+        return get_latest_price(ticker)
 
-            s = get_settings()
-            data = StockHistoricalDataClient(
-                api_key=s.alpaca_api_key, secret_key=s.alpaca_api_secret
-            )
-            resp = data.get_stock_latest_trade(
-                StockLatestTradeRequest(symbol_or_symbols=ticker.upper())
-            )
-            return float(resp[ticker.upper()].price)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "alpaca latest-trade unavailable for %s (%s); using yfinance", ticker, e
-            )
-            from agentic_investor.tools.market import fetch_ohlcv
 
-            df = fetch_ohlcv(ticker.upper(), period="1y")
-            return float(df["Close"].iloc[-1])
+def get_latest_price(ticker: str) -> float:
+    """Latest trade price with Alpaca-first / yfinance-fallback.
+
+    Alpaca free tier serves real-time IEX data (fine for our dow30 universe).
+    yfinance is the fallback for any Alpaca hiccup (network, symbol
+    unavailable, quota).
+    """
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockLatestTradeRequest
+
+        s = get_settings()
+        if not s.alpaca_api_key or not s.alpaca_api_secret:
+            raise RuntimeError("no alpaca credentials")
+        data = StockHistoricalDataClient(
+            api_key=s.alpaca_api_key, secret_key=s.alpaca_api_secret
+        )
+        resp = data.get_stock_latest_trade(
+            StockLatestTradeRequest(symbol_or_symbols=ticker.upper())
+        )
+        return float(resp[ticker.upper()].price)
+    except Exception as e:  # noqa: BLE001 - fall back on any failure
+        logger.warning("alpaca latest-trade fallback for %s: %s", ticker, e)
+        from agentic_investor.tools.market import fetch_ohlcv
+
+        df = fetch_ohlcv(ticker.upper(), period="1y")
+        return float(df["Close"].iloc[-1])
 
 
 def _alpaca_order_to_domain(o) -> PaperOrder:
