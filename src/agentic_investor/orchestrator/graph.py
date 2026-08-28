@@ -143,11 +143,7 @@ def _messages(state: GraphState) -> list[dict]:
         if batch_ctx
         else ""
     )
-    # Prompt anchoring: if there's a previous allocation, show it explicitly
-    # and ask for delta-form thinking. Reduces the LLM's tendency to re-
-    # conceive the portfolio from scratch on every regen (source of today's
-    # whipsaw pattern where 5-15pp per-position shifts came from LLM noise
-    # rather than real signal change).
+    # Delta-form anchoring: reduces LLM baseline churn from blank-slate regens.
     prev_alloc = state.get("previous_allocation")
     if prev_alloc is not None:
         prev_lines = [

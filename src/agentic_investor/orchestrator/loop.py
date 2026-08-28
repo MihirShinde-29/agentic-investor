@@ -63,8 +63,6 @@ class LoopConfig:
     opinion_drift_threshold_pct: float = 3.0
     max_avg_drift_pct: float = 5.0
     max_single_delta_pct: float = 15.0
-    # Superseded by max_avg_drift + max_single_delta; retained for back-compat.
-    max_aggregate_turnover_pct: float = 25.0
 
     # Discipline layer (vetoes at the rebalancer boundary)
     cooldown_seconds: int = 900              # 0q temporal cooldown
@@ -483,12 +481,9 @@ def run_tick(
                 load_recommendation as _load,
             )
             prev_rec = _load(state.last_rec_id)
-            batch_tickers_for_filter: set[str] = set()
-            if batch_ctx:
-                for line in batch_ctx.split("\n"):
-                    parts = line.strip().split()
-                    if len(parts) >= 3 and parts[0] == "-":
-                        batch_tickers_for_filter.add(parts[2].strip(":").upper())
+            batch_tickers_for_filter = set(
+                _extract_tickers_from_batch_ctx(batch_ctx)
+            ) if batch_ctx else set()
             confidence_lookup = {
                 p.ticker.upper(): (p.confidence or 0.5)
                 for p in rec.allocation.positions
@@ -638,13 +633,9 @@ def run_tick(
             recent_typed[tk] = (side_v, ts_dt)
         except Exception:  # noqa: BLE001
             continue
-    # Parse batch context lines "- [HOT] NVDA age=1m ..." for ticker set.
-    batch_tickers_for_cooldown: set[str] = set()
-    if batch_ctx:
-        for line in batch_ctx.split("\n"):
-            parts = line.strip().split()
-            if len(parts) >= 3 and parts[0] == "-":
-                batch_tickers_for_cooldown.add(parts[2].strip(":").upper())
+    batch_tickers_for_cooldown = set(
+        _extract_tickers_from_batch_ctx(batch_ctx)
+    ) if batch_ctx else set()
 
     # Discipline layer inputs: recent price moves + avg entry prices per ticker.
     ticker_recent_moves: dict[str, float] = {}

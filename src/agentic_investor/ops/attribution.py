@@ -132,9 +132,7 @@ def _summarize_session(session_dir: Path) -> SessionMetrics:
 
 
 def _render_would_be_section() -> list[str]:
-    """0f attribution: sample of recorded filter skips with would-be
-    allocations for later counterfactual simulation.
-    """
+    """Filter-skip attribution rows for counterfactual analysis."""
     from agentic_investor.tools.paper_store import list_filter_skips
 
     lines: list[str] = ["", "## Filter-skip attribution log", ""]

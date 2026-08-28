@@ -74,12 +74,8 @@ def _connect(url: str) -> sqlite3.Connection:
         )
         """
     )
-    # 0f: attribution log for filter skips. Every time the loop skips a
-    # rebalance (opinion-drift barely-moved, aggregate-too-large, max-delta-
-    # unjustified, etc.), we save the would-be allocation so we can later
-    # simulate what would have happened if we had traded. Enables the
-    # false-positive rate measurement that closes the "we don't know if
-    # skipping was right" gap in our filter design.
+    # Attribution log: every filter skip records the would-be allocation so
+    # we can later simulate the counterfactual and measure false-positive rate.
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS filter_skips (
@@ -172,11 +168,7 @@ def record_filter_skip(
     prev_rec_id: int | None = None,
     url: str | None = None,
 ) -> int:
-    """Record a filter skip event with the would-be allocation.
-
-    Later we simulate the would-be allocation's P&L over N minutes and
-    compare to actual outcome to measure the filter's false-positive rate.
-    """
+    """Record a filter skip + its would-be allocation for counterfactual eval."""
     stats = stats or {}
     with _connect(_resolve_url(url)) as conn:
         cur = conn.execute(
@@ -220,10 +212,10 @@ def list_filter_skips(*, limit: int = 100, url: str | None = None) -> list[dict]
 def save_loop_state(
     state_dict: dict, *, account_key: str = "default", url: str | None = None
 ) -> None:
-    """Upsert the loop's mutable state so it survives restart.
+    """Upsert LoopState so it survives crashes / restarts.
 
-    account_key lets us distinguish concurrent loops in future (M13 A/B); for
-    now everyone uses 'default'.
+    account_key will distinguish concurrent loops for M13 A/B testing;
+    for now everyone uses 'default'.
     """
     with _connect(_resolve_url(url)) as conn:
         conn.execute(
