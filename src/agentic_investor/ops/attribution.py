@@ -131,6 +131,42 @@ def _summarize_session(session_dir: Path) -> SessionMetrics:
     return m
 
 
+def _render_would_be_section() -> list[str]:
+    """0f attribution: sample of recorded filter skips with would-be
+    allocations for later counterfactual simulation.
+    """
+    from agentic_investor.tools.paper_store import list_filter_skips
+
+    lines: list[str] = ["", "## Filter-skip attribution log", ""]
+    skips = list_filter_skips(limit=20)
+    if not skips:
+        lines.append("_no filter skips recorded yet_")
+        return lines
+    lines.append(
+        f"**{len(skips)} recent skips logged with would-be allocations.**  "
+    )
+    lines.append(
+        "Each row is a rebalance we SKIPPED. would_be_allocation_json holds "
+        "the LLM's proposed target weights; actual_positions_json holds what "
+        "we kept. Compare P&L over the next N minutes to measure filter "
+        "false-positive rate."
+    )
+    lines.append("")
+    lines.append(
+        "| Time | Reason | Trigger | avg drift | max delta | ticker |"
+    )
+    lines.append("|---|---|---|---:|---:|---|")
+    for s in skips[:10]:
+        avg = s.get("avg_drift_pp") or 0
+        mx = s.get("max_delta_pp") or 0
+        lines.append(
+            f"| {s['skipped_at'][11:19]} | {s['skip_reason']} | "
+            f"{s.get('trigger_reason','?')} | {avg:.2f}pp | {mx:.2f}pp | "
+            f"{s.get('max_delta_ticker','-')} |"
+        )
+    return lines
+
+
 def _render_report(session_metrics: list[SessionMetrics]) -> str:
     lines: list[str] = ["# Rolling Attribution Report", ""]
     if not session_metrics:
@@ -214,6 +250,7 @@ def _render_report(session_metrics: list[SessionMetrics]) -> str:
         "2% price move, 30min force regen were picked by intuition from today's "
         "observed failures. Backtest optimization is a M13-adjacent milestone."
     )
+    lines.extend(_render_would_be_section())
     return "\n".join(lines)
 
 

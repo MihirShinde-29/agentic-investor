@@ -562,6 +562,31 @@ def run_tick(
                     save_loop_state(state.to_dict())
                 except Exception as e:  # noqa: BLE001
                     logger.warning("save_loop_state failed on skip: %s", e)
+                # 0f Attribution: log the would-be allocation with actual
+                # positions + equity so we can later simulate what would
+                # have happened if we had traded. Fetch positions inline
+                # since acct/positions aren't fetched until after the skip
+                # check in the normal path.
+                try:
+                    from agentic_investor.tools.paper_store import record_filter_skip
+                    skip_acct = broker.get_account()
+                    skip_positions = broker.get_positions()
+                    record_filter_skip(
+                        skip_reason=skip_reason,
+                        trigger_reason=reason,
+                        would_be_allocation=rec.allocation.model_dump(),
+                        actual_positions=[
+                            {"ticker": p.ticker, "qty": p.qty,
+                             "market_value": p.market_value}
+                            for p in skip_positions
+                        ],
+                        equity_at_skip=skip_acct.equity,
+                        stats=stats,
+                        deltas={t: round(d, 2) for t, d in deltas.items()},
+                        prev_rec_id=state.last_rec_id,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("record_filter_skip failed: %s", e)
                 if session:
                     session.log("opinion_drift_skip", {
                         "reason": reason,

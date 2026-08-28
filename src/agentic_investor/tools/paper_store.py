@@ -74,6 +74,31 @@ def _connect(url: str) -> sqlite3.Connection:
         )
         """
     )
+    # 0f: attribution log for filter skips. Every time the loop skips a
+    # rebalance (opinion-drift barely-moved, aggregate-too-large, max-delta-
+    # unjustified, etc.), we save the would-be allocation so we can later
+    # simulate what would have happened if we had traded. Enables the
+    # false-positive rate measurement that closes the "we don't know if
+    # skipping was right" gap in our filter design.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS filter_skips (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            skipped_at TEXT NOT NULL,
+            skip_reason TEXT NOT NULL,
+            trigger_reason TEXT,
+            avg_drift_pp REAL,
+            max_delta_pp REAL,
+            max_delta_ticker TEXT,
+            n_tickers INTEGER,
+            prev_rec_id INTEGER,
+            would_be_allocation_json TEXT NOT NULL,
+            actual_positions_json TEXT NOT NULL,
+            equity_at_skip REAL,
+            deltas_json TEXT
+        )
+        """
+    )
     return conn
 
 
@@ -130,6 +155,63 @@ def list_orders(
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM paper_orders ORDER BY submitted_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def record_filter_skip(
+    *,
+    skip_reason: str,
+    trigger_reason: str | None,
+    would_be_allocation: dict,
+    actual_positions: list[dict],
+    equity_at_skip: float,
+    stats: dict | None = None,
+    deltas: dict | None = None,
+    prev_rec_id: int | None = None,
+    url: str | None = None,
+) -> int:
+    """Record a filter skip event with the would-be allocation.
+
+    Later we simulate the would-be allocation's P&L over N minutes and
+    compare to actual outcome to measure the filter's false-positive rate.
+    """
+    stats = stats or {}
+    with _connect(_resolve_url(url)) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO filter_skips (
+                skipped_at, skip_reason, trigger_reason,
+                avg_drift_pp, max_delta_pp, max_delta_ticker, n_tickers,
+                prev_rec_id, would_be_allocation_json, actual_positions_json,
+                equity_at_skip, deltas_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(UTC).isoformat(),
+                skip_reason,
+                trigger_reason,
+                stats.get("avg_drift"),
+                stats.get("max_delta"),
+                stats.get("max_delta_ticker"),
+                stats.get("n_tickers"),
+                prev_rec_id,
+                json.dumps(would_be_allocation, default=str),
+                json.dumps(actual_positions, default=str),
+                float(equity_at_skip),
+                json.dumps(deltas or {}, default=str),
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def list_filter_skips(*, limit: int = 100, url: str | None = None) -> list[dict]:
+    with _connect(_resolve_url(url)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM filter_skips ORDER BY skipped_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
