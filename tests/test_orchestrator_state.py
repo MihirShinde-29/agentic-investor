@@ -15,6 +15,21 @@ def _pos(ticker: str, weight: float, dollars: float = 0.0) -> Position:
     return Position(ticker=ticker, weight_pct=weight, dollars=dollars, rationale="x")
 
 
+def test_position_defaults_confidence_to_neutral():
+    p = Position(ticker="AAPL", weight_pct=40, dollars=4000, rationale="x")
+    assert p.confidence == 0.5
+
+
+def test_position_accepts_explicit_confidence():
+    p = Position(ticker="NVDA", weight_pct=25, dollars=2500, rationale="x", confidence=0.85)
+    assert p.confidence == 0.85
+
+
+def test_position_rejects_confidence_outside_range():
+    with pytest.raises(ValidationError):
+        Position(ticker="AAPL", weight_pct=40, dollars=4000, rationale="x", confidence=1.5)
+
+
 def test_allocation_accepts_weights_summing_to_100():
     a = Allocation(
         positions=[_pos("AAPL", 40), _pos("NVDA", 40)],

@@ -49,6 +49,8 @@ Hard rules your output MUST satisfy:
 - No single position weight may exceed the profile's max_single_pct cap.
 - cash_pct must be at least the profile's cash_floor_pct.
 - For each position, dollars = amount * weight_pct / 100; same for cash.
+- Every position MUST include a `confidence` field in [0.0, 1.0].
+  Do NOT omit it. Missing confidence disables downstream risk controls.
 
 How to reason:
 - Bigger weight where technical and news agents agree with higher confidence.

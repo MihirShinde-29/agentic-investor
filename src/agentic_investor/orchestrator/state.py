@@ -39,10 +39,12 @@ class Position(BaseModel):
     weight_pct: float = Field(ge=0.0, le=100.0)
     dollars: float = Field(ge=0.0)
     rationale: str
-    # LLM's stated conviction for this weight (0.0-1.0). Optional so pre-M7
-    # allocations without confidence still validate. Rebalance bands scale
-    # inversely with confidence: high conviction -> tighter band -> act more.
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    # LLM's stated conviction for this weight (0.0-1.0). Required as of M7+
+    # so confidence-adaptive bands work consistently (was optional; live
+    # observation 2026-08-28 rec #58 showed the LLM silently omitting it,
+    # disabling the adaptive-band feature). Defaults to 0.5 (neutral) on
+    # missing values for legacy recs loaded from store.
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class Allocation(BaseModel):
