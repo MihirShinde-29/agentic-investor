@@ -243,6 +243,7 @@ def _generate_recommendation(
     as_of: str | None = None,
     news_batch_context: str | None = None,
     pre_picked_tickers: list[str] | None = None,
+    previous_rec: Recommendation | None = None,
 ) -> tuple[Recommendation, list[str]]:
     """Run the orchestrator once for today's decision. Uses the M6 profile.
 
@@ -284,7 +285,12 @@ def _generate_recommendation(
     req = OrchestratorRequest(
         tickers=final_tickers, amount=cfg.amount, risk=risk,
     )
-    rec = run_orchestrator(req, profile=profile, news_batch_context=news_batch_context)
+    prev_alloc = previous_rec.allocation if previous_rec is not None else None
+    rec = run_orchestrator(
+        req, profile=profile,
+        news_batch_context=news_batch_context,
+        previous_allocation=prev_alloc,
+    )
     return rec, final_tickers
 
 
@@ -358,8 +364,18 @@ def run_tick(
         if batch_ctx and pre_picked is not None:
             batch_tickers = _extract_tickers_from_batch_ctx(batch_ctx)
             pre_picked = list(dict.fromkeys([*pre_picked, *batch_tickers]))
+        # Prompt anchoring: load previous rec (if any) so allocator prompts
+        # in delta form. Only on non-first-day regens; first tick of day
+        # gets no anchor (blank-slate is right for daily model output).
+        prev_rec_for_prompt = None
+        if not is_new_day and state.last_rec_id is not None:
+            from agentic_investor.orchestrator.store import (
+                load_recommendation as _load_for_anchor,
+            )
+            prev_rec_for_prompt = _load_for_anchor(state.last_rec_id)
         rec, tickers_used = _generate_recommendation(
             cfg, news_batch_context=batch_ctx, pre_picked_tickers=pre_picked,
+            previous_rec=prev_rec_for_prompt,
         )
         # Opinion-drift filter: on non-first-tick regens, compare new rec's
         # target weights to the PREVIOUS rec's. Skip the rebalance in TWO

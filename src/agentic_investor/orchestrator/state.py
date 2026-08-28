@@ -189,3 +189,7 @@ class GraphState(TypedDict, total=False):
     # rendered as a text block; None or empty when the daily orchestrator runs
     # without event context.
     news_batch_context: str
+    # Previous rec's allocation, threaded in so the allocator can anchor on
+    # existing weights and propose delta-form changes instead of re-conceiving
+    # the portfolio from a blank slate. Prevents baseline churn / whipsaw.
+    previous_allocation: Allocation

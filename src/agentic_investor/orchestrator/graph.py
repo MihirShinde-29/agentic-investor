@@ -143,6 +143,29 @@ def _messages(state: GraphState) -> list[dict]:
         if batch_ctx
         else ""
     )
+    # Prompt anchoring: if there's a previous allocation, show it explicitly
+    # and ask for delta-form thinking. Reduces the LLM's tendency to re-
+    # conceive the portfolio from scratch on every regen (source of today's
+    # whipsaw pattern where 5-15pp per-position shifts came from LLM noise
+    # rather than real signal change).
+    prev_alloc = state.get("previous_allocation")
+    if prev_alloc is not None:
+        prev_lines = [
+            f"  {p.ticker}: {p.weight_pct:.1f}%" for p in prev_alloc.positions
+        ]
+        prev_lines.append(f"  cash: {prev_alloc.cash_pct:.1f}%")
+        prev_block = (
+            "\nCurrent allocation (your previous decision):\n"
+            + "\n".join(prev_lines)
+            + "\n\nPropose CHANGES from this baseline. If a ticker's thesis is "
+            "unchanged since last decision, keep its weight identical (do not "
+            "round or adjust by 1-2pp on noise). Only shift weights when the "
+            "signals justify the move. Weight changes > 10pp should be reserved "
+            "for material catalysts (earnings, breaking news specific to that "
+            "ticker) and cited explicitly in the rationale.\n"
+        )
+    else:
+        prev_block = ""
     return [
         {"role": "system", "content": ALLOCATOR_SYSTEM},
         {
@@ -156,6 +179,7 @@ def _messages(state: GraphState) -> list[dict]:
                 f"{profile.cash_floor_pct:.0f}%)\n"
                 f"  target:  {req.target}\n\n"
                 f"Signals (JSON, keyed by ticker):\n{signals}\n"
+                f"{prev_block}"
                 f"{batch_block}\n"
                 "Produce a valid Allocation."
             ),
@@ -211,18 +235,26 @@ def run_orchestrator(
     profile: StrategyProfile | None = None,
     *,
     news_batch_context: str | None = None,
+    previous_allocation: "Allocation | None" = None,
 ) -> Recommendation:
     """Run the orchestrator graph. If profile is None, uses the risk-tier preset.
 
     news_batch_context is an optional text block from the event-driven loop
     (HOT/COOKED news events with reaction_pct); when set, it flows into the
     allocator prompt so the LLM can weight breaking news in its decision.
+
+    previous_allocation is an optional prior rec's allocation; when set, the
+    allocator prompt is anchored to it and asked to propose delta-form changes
+    rather than re-conceiving the portfolio from scratch. Prevents baseline
+    LLM-variance churn (whipsaw pattern observed 2026-08-28 live session).
     """
     initial: dict = {"request": request}
     if profile is not None:
         initial["profile"] = profile
     if news_batch_context:
         initial["news_batch_context"] = news_batch_context
+    if previous_allocation is not None:
+        initial["previous_allocation"] = previous_allocation
     final = _get_graph().invoke(initial)
     return Recommendation(
         request=request,

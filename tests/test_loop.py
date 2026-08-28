@@ -27,7 +27,8 @@ from agentic_investor.tools.paper_broker import (
 )
 
 
-def _fake_generate(cfg, as_of=None, news_batch_context=None, pre_picked_tickers=None):
+def _fake_generate(cfg, as_of=None, news_batch_context=None,
+                   pre_picked_tickers=None, previous_rec=None):
     return _rec(cfg.amount), list(cfg.tickers) or ["AAPL", "NVDA"]
 
 
