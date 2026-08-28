@@ -96,6 +96,9 @@ class LoopConfig:
     # (halt-buys drawdown). LLM keeps SELL/HOLD authority; only BUYs gated.
     adverse_move_threshold_pct: float = 1.0  # veto BUY if down > 1% recently
     halt_buys_drawdown_pct: float = 5.0  # veto BUY if position down > 5% from entry
+    # 0g Momentum-aware TRIM + force loss-cut:
+    small_drawdown_hold_pct: float = 3.0  # skip trim on small drawdown if bouncing
+    force_loss_cut_pct: float = 8.0  # force full SELL if position down > 8% from entry
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
 
@@ -690,6 +693,8 @@ def run_tick(
         adverse_move_threshold_pct=cfg.adverse_move_threshold_pct,
         avg_entry_prices=avg_entry_prices,
         halt_buys_drawdown_pct=cfg.halt_buys_drawdown_pct,
+        small_drawdown_hold_pct=cfg.small_drawdown_hold_pct,
+        force_loss_cut_pct=cfg.force_loss_cut_pct,
     )
 
     if cfg.dry_run or not plans:

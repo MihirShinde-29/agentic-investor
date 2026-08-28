@@ -47,6 +47,9 @@ def compute_trade_plan(
     adverse_move_threshold_pct: float = 1.0,
     avg_entry_prices: dict[str, float] | None = None,
     halt_buys_drawdown_pct: float = 5.0,
+    # 0g Momentum-aware trim + loss-cut override:
+    small_drawdown_hold_pct: float = 3.0,
+    force_loss_cut_pct: float = 8.0,
 ) -> list[TradePlan]:
     """Diff target-weight allocation against current positions.
 
@@ -63,6 +66,16 @@ def compute_trade_plan(
     avg_entry_prices: dict[ticker, avg_entry_price] from broker. When a
     BUY is proposed for a position already down more than
     halt_buys_drawdown_pct from entry, veto - don't average down on losers.
+
+    0g Momentum-aware trim + loss-cut:
+    - If a proposed SELL is for a position in SMALL drawdown (unrealized
+      pnl between -small_drawdown_hold_pct and 0), the trim is skipped
+      IF the ticker's recent price move is positive (bouncing). Prevents
+      "sell near intraday low" pattern observed 2026-08-28.
+    - Any position down MORE than force_loss_cut_pct from entry gets a
+      forced SELL to zero regardless of what the LLM decided. Capital
+      preservation override for the "hold losers" disposition-effect
+      pattern.
     """
     now = now or datetime.now(UTC)
     recent_trades = recent_trades or {}
@@ -108,6 +121,16 @@ def compute_trade_plan(
                 loss_pct = (price / avg_entry - 1) * 100
                 if loss_pct <= -halt_buys_drawdown_pct:
                     continue  # don't average down on losers
+        # 0g Momentum-aware trim: don't sell into a bounce on a small drawdown.
+        elif side == "sell":
+            avg_entry = avg_entry_prices.get(t.upper())
+            if avg_entry and avg_entry > 0:
+                unrealized_pct = (price / avg_entry - 1) * 100
+                if -small_drawdown_hold_pct < unrealized_pct < 0:
+                    # small drawdown - check for bounce before trimming
+                    move = ticker_recent_moves.get(t.upper())
+                    if move is not None and move > 0:
+                        continue  # bouncing - don't sell the bottom
         plans.append(
             TradePlan(
                 ticker=t,
@@ -119,6 +142,38 @@ def compute_trade_plan(
                 reason=f"drift {(tgt_d - cur_d) / max(total_equity, 1) * 100:+.2f}pp",
             )
         )
+    # 0g Force loss-cut: any held position down more than force_loss_cut_pct
+    # from entry gets a forced full SELL regardless of what the LLM decided.
+    # Overrides existing plans (a small trim becomes a full exit).
+    planned_by_ticker = {p.ticker.upper(): idx for idx, p in enumerate(plans)}
+    for ticker_upper, cur_val in current_positions.items():
+        if cur_val <= 0:
+            continue
+        entry = avg_entry_prices.get(ticker_upper.upper())
+        if not entry or entry <= 0:
+            continue
+        cur_price = prices.get(ticker_upper.upper())
+        if not cur_price:
+            continue
+        loss_pct = (cur_price / entry - 1) * 100
+        if loss_pct <= -force_loss_cut_pct:
+            qty = round(cur_val / cur_price, 4)
+            if qty <= 0:
+                continue
+            forced_plan = TradePlan(
+                ticker=ticker_upper.upper(),
+                side="sell",
+                dollars=round(cur_val, 2),
+                qty=qty,
+                target_pct=0.0,
+                current_pct=(round(cur_val / total_equity * 100, 2)
+                             if total_equity else 0.0),
+                reason=f"force loss-cut ({loss_pct:.1f}% from entry)",
+            )
+            if ticker_upper.upper() in planned_by_ticker:
+                plans[planned_by_ticker[ticker_upper.upper()]] = forced_plan
+            else:
+                plans.append(forced_plan)
     return plans
 
 

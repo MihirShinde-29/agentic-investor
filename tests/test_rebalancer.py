@@ -245,7 +245,10 @@ def test_halt_buys_drawdown_prevents_averaging_down():
     # AAPL target is 40% = $4000 -> actually we already have $4600, so
     # rebalance would be SELL (not BUY). Set target higher to force BUY.
     from agentic_investor.orchestrator.state import (
-        Allocation, OrchestratorRequest, Position, Recommendation,
+        Allocation,
+        OrchestratorRequest,
+        Position,
+        Recommendation,
     )
     rec = Recommendation(
         request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
@@ -269,7 +272,10 @@ def test_halt_buys_drawdown_prevents_averaging_down():
 
 def test_halt_buys_allows_buy_when_position_is_up():
     from agentic_investor.orchestrator.state import (
-        Allocation, OrchestratorRequest, Position, Recommendation,
+        Allocation,
+        OrchestratorRequest,
+        Position,
+        Recommendation,
     )
     rec = Recommendation(
         request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
@@ -288,6 +294,124 @@ def test_halt_buys_allows_buy_when_position_is_up():
         halt_buys_drawdown_pct=5.0,
     )
     assert any(p.ticker == "AAPL" and p.side == "buy" for p in plans)
+
+
+def test_small_drawdown_hold_skips_trim_when_bouncing():
+    from agentic_investor.orchestrator.state import (
+        Allocation,
+        OrchestratorRequest,
+        Position,
+        Recommendation,
+    )
+    # AAPL avg entry $100, current $98 (-2% small drawdown, within hold zone).
+    # LLM wants to trim (target 30% but hold 40%).
+    rec = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(ticker="AAPL", weight_pct=30, dollars=3000, rationale="x")],
+            cash_pct=70, cash_dollars=7000, portfolio_rationale="x",
+        ),
+    )
+    plans = compute_trade_plan(
+        rec,
+        current_positions={"AAPL": 4000},
+        total_equity=10_000,
+        prices={"AAPL": 98},
+        min_trade_dollars=1.0,
+        avg_entry_prices={"AAPL": 100.0},
+        ticker_recent_moves={"AAPL": +0.5},  # bouncing
+        small_drawdown_hold_pct=3.0,
+    )
+    # Trim should be SKIPPED - small drawdown + bouncing
+    assert not any(p.ticker == "AAPL" and p.side == "sell" for p in plans)
+
+
+def test_small_drawdown_hold_allows_trim_when_not_bouncing():
+    from agentic_investor.orchestrator.state import (
+        Allocation,
+        OrchestratorRequest,
+        Position,
+        Recommendation,
+    )
+    rec = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(ticker="AAPL", weight_pct=30, dollars=3000, rationale="x")],
+            cash_pct=70, cash_dollars=7000, portfolio_rationale="x",
+        ),
+    )
+    plans = compute_trade_plan(
+        rec,
+        current_positions={"AAPL": 4000},
+        total_equity=10_000,
+        prices={"AAPL": 98},
+        min_trade_dollars=1.0,
+        avg_entry_prices={"AAPL": 100.0},
+        ticker_recent_moves={"AAPL": -0.5},  # still declining
+        small_drawdown_hold_pct=3.0,
+    )
+    assert any(p.ticker == "AAPL" and p.side == "sell" for p in plans)
+
+
+def test_force_loss_cut_overrides_llm_decision():
+    from agentic_investor.orchestrator.state import (
+        Allocation,
+        OrchestratorRequest,
+        Position,
+        Recommendation,
+    )
+    # LLM says hold NVDA at 25%. Current NVDA is down 12% from entry.
+    # Force loss-cut (threshold 8%) should override with full SELL.
+    rec = Recommendation(
+        request=OrchestratorRequest(tickers=["NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(ticker="NVDA", weight_pct=25, dollars=2500, rationale="x")],
+            cash_pct=75, cash_dollars=7500, portfolio_rationale="x",
+        ),
+    )
+    plans = compute_trade_plan(
+        rec,
+        current_positions={"NVDA": 2500},  # at target so no drift-based plan
+        total_equity=10_000,
+        prices={"NVDA": 88},  # avg entry 100 → -12%
+        min_trade_dollars=1.0,
+        avg_entry_prices={"NVDA": 100.0},
+        force_loss_cut_pct=8.0,
+    )
+    nvda_plan = next((p for p in plans if p.ticker == "NVDA"), None)
+    assert nvda_plan is not None
+    assert nvda_plan.side == "sell"
+    assert "force loss-cut" in nvda_plan.reason
+
+
+def test_force_loss_cut_replaces_partial_trim_with_full_exit():
+    from agentic_investor.orchestrator.state import (
+        Allocation,
+        OrchestratorRequest,
+        Position,
+        Recommendation,
+    )
+    # LLM wants to trim to 15% but position is down 12% - force full exit.
+    rec = Recommendation(
+        request=OrchestratorRequest(tickers=["NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(ticker="NVDA", weight_pct=15, dollars=1500, rationale="x")],
+            cash_pct=85, cash_dollars=8500, portfolio_rationale="x",
+        ),
+    )
+    plans = compute_trade_plan(
+        rec,
+        current_positions={"NVDA": 2500},
+        total_equity=10_000,
+        prices={"NVDA": 88},
+        min_trade_dollars=1.0,
+        avg_entry_prices={"NVDA": 100.0},
+        force_loss_cut_pct=8.0,
+    )
+    nvda_plan = next(p for p in plans if p.ticker == "NVDA")
+    assert nvda_plan.side == "sell"
+    assert nvda_plan.dollars == 2500  # full exit, not partial
+    assert "force loss-cut" in nvda_plan.reason
 
 
 def test_execute_only_attaches_stops_to_buy_side():
