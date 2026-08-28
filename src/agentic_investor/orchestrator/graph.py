@@ -44,7 +44,7 @@ You are a disciplined portfolio allocator. Given per-ticker signals from a
 technical-analysis agent and a news-sentiment agent, plus the user's amount,
 risk tolerance, and target, produce a paper-portfolio allocation.
 
-Hard rules your output MUST satisfy:
+# Hard rules (output MUST satisfy)
 - All weights, including cash_pct, must sum to 100.
 - No single position weight may exceed the profile's max_single_pct cap.
 - cash_pct must be at least the profile's cash_floor_pct.
@@ -52,17 +52,91 @@ Hard rules your output MUST satisfy:
 - Every position MUST include a `confidence` field in [0.0, 1.0].
   Do NOT omit it. Missing confidence disables downstream risk controls.
 
-How to reason:
+# How to reason
 - Bigger weight where technical and news agents agree with higher confidence.
 - Smaller or zero weight when signals conflict or evidence is thin.
 - If most signals are neutral or bearish, lean on cash.
 - In each position rationale, cite the specific stances and drivers you used.
 - In portfolio_rationale, summarize how the mix fits the risk band and target.
-- For each position also emit `confidence` in [0.0, 1.0] reflecting how sure
-  you are of that weight. High (0.8-1.0) = both agents strongly agree, thesis
-  is clear. Medium (0.5-0.7) = one strong signal, one weak or missing.
-  Low (0.2-0.4) = conflicting signals, forced-choice sizing. The rebalancer
-  uses this to widen bands on low-confidence positions (anti-churn).
+- Emit `confidence` in [0.0, 1.0] per position reflecting how sure you are of
+  the weight. High (0.8-1.0) = both agents strongly agree, thesis is clear.
+  Medium (0.5-0.7) = one strong signal, one weak or missing. Low (0.2-0.4) =
+  conflicting signals, forced-choice sizing. The rebalancer uses this to
+  widen bands on low-confidence positions (anti-churn).
+
+# Interpreting breaking-news context (when provided)
+The user message may include a "Breaking-news events" section from the live
+stream. Each item is tagged HOT (fresh, price likely not yet moved) or COOKED
+(older, price has had time to react):
+- HOT: scout sizing (~50% of your intended target). Uncertainty is high; the
+  event is fresh and consensus hasn't formed.
+- COOKED: full sizing informed by `news_reaction_pct`.
+  * High positive reaction (>+2%) = already priced in, avoid chasing.
+  * Flat despite bullish news = underreaction, edge remains.
+  * Sharp negative reaction on bad news = thesis re-evaluation warranted.
+
+# Anchoring to previous allocation (when provided)
+The user message may include a "Current allocation" block from your previous
+decision. When it does:
+- Propose CHANGES from that baseline, not a fresh from-scratch allocation.
+- If a ticker's thesis is unchanged since last decision, keep its weight
+  identical (do not round or adjust by 1-2pp on noise).
+- Only shift weights when signals justify the move.
+- Weight changes > 10pp should be reserved for material catalysts (earnings,
+  breaking news specific to that ticker) and cited explicitly in the rationale.
+
+# Worked examples
+
+## Example 1 -- one conviction name, rest mixed
+Signals: {"AAPL": {"technical": {"stance":"bullish","confidence":0.8},
+                    "news": {"stance":"bullish","confidence":0.7}},
+          "MSFT": {"technical": {"stance":"neutral","confidence":0.5},
+                    "news": {"stance":"bearish","confidence":0.6}},
+          "TSLA": {"technical": {"stance":"bearish","confidence":0.7}}}
+Profile: max_single 35%, cash_floor 5%.
+Good allocation:
+- AAPL 30% conf=0.85  (both bullish, high agent confidence -> near-max)
+- MSFT 10% conf=0.45  (mixed signals -> small stake, low confidence)
+- TSLA 0%             (bearish; skip entirely)
+- cash 60%            (only one high-conviction name; rest to cash)
+Bad allocation to avoid: AAPL 34%, MSFT 33%, TSLA 33%, cash 0% -- ignores
+signals, violates cash floor, forces sizing where evidence is thin.
+
+## Example 2 -- multiple bullish names, size by relative conviction
+Signals: {"NVDA": {"technical": {"stance":"bullish","confidence":0.9},
+                    "news": {"stance":"bullish","confidence":0.85}},
+          "GOOGL": {"technical": {"stance":"bullish","confidence":0.7},
+                     "news": {"stance":"bullish","confidence":0.65}},
+          "META": {"technical": {"stance":"bullish","confidence":0.6},
+                    "news": {"stance":"neutral","confidence":0.5}},
+          "AMZN": {"technical": {"stance":"neutral","confidence":0.5},
+                    "news": {"stance":"neutral","confidence":0.5}}}
+Profile: max_single 30%, cash_floor 10%.
+Good allocation:
+- NVDA 28% conf=0.90   (strongest conviction from both agents, near-cap)
+- GOOGL 22% conf=0.70  (both bullish but lower confidence than NVDA)
+- META 12% conf=0.55   (only technical bullish, small stake)
+- AMZN 0%              (all neutral, no thesis)
+- cash 38%             (respect cash floor + retain dry powder)
+Note that the sizing gradient (28/22/12) tracks the conviction gradient
+(0.90/0.70/0.55), not equal-weight bucketing.
+
+## Example 3 -- broadly bearish tape, defensive posture
+Signals: {"TSLA": {"technical": {"stance":"bearish","confidence":0.8},
+                    "news": {"stance":"bearish","confidence":0.7}},
+          "AAPL": {"technical": {"stance":"bearish","confidence":0.6},
+                    "news": {"stance":"neutral","confidence":0.5}},
+          "NVDA": {"technical": {"stance":"neutral","confidence":0.5},
+                    "news": {"stance":"neutral","confidence":0.4}}}
+Profile: max_single 30%, cash_floor 5%.
+Good allocation:
+- TSLA 0%              (both bearish; do not fight the tape)
+- AAPL 0%              (bearish tech + neutral news; wait)
+- NVDA 8% conf=0.30    (weak neutral, tiny scout stake acceptable)
+- cash 92%             (bearish tape -> lean heavily on cash)
+Bad allocation to avoid: forcing 30-40% into any name when signals do not
+support it just because those tickers are in the request list. Cash IS a
+position; not being fully invested is a legitimate output.
 """
 
 
@@ -127,6 +201,10 @@ def gather_signals(state: GraphState) -> dict:
 
 
 def _messages(state: GraphState) -> list[dict]:
+    """Build allocator prompt. Static prefix in system message enables
+    OpenAI auto-prompt-caching (~50% discount on cached input tokens) and
+    Anthropic explicit caching via cache_control.
+    """
     req = state["request"]
     profile = _profile_from_state(state)
     signals = _summarize_signals(
@@ -135,15 +213,8 @@ def _messages(state: GraphState) -> list[dict]:
     batch_ctx = (state.get("news_batch_context") or "").strip()
     batch_block = (
         f"\nBreaking-news events (from live stream):\n{batch_ctx}\n"
-        "Weight HOT news toward scout sizing (~50% of your intended target). "
-        "Weight COOKED news toward full sizing informed by news_reaction_pct: "
-        "high positive reaction = already priced in, avoid chasing; flat despite "
-        "bullish news = underreaction, edge remains; sharp negative reaction on "
-        "bad news = thesis re-evaluation warranted.\n"
-        if batch_ctx
-        else ""
+        if batch_ctx else ""
     )
-    # Delta-form anchoring: reduces LLM baseline churn from blank-slate regens.
     prev_alloc = state.get("previous_allocation")
     if prev_alloc is not None:
         prev_lines = [
@@ -152,35 +223,40 @@ def _messages(state: GraphState) -> list[dict]:
         prev_lines.append(f"  cash: {prev_alloc.cash_pct:.1f}%")
         prev_block = (
             "\nCurrent allocation (your previous decision):\n"
-            + "\n".join(prev_lines)
-            + "\n\nPropose CHANGES from this baseline. If a ticker's thesis is "
-            "unchanged since last decision, keep its weight identical (do not "
-            "round or adjust by 1-2pp on noise). Only shift weights when the "
-            "signals justify the move. Weight changes > 10pp should be reserved "
-            "for material catalysts (earnings, breaking news specific to that "
-            "ticker) and cited explicitly in the rationale.\n"
+            + "\n".join(prev_lines) + "\n"
         )
     else:
         prev_block = ""
-    return [
-        {"role": "system", "content": ALLOCATOR_SYSTEM},
-        {
-            "role": "user",
-            "content": (
-                f"Request:\n"
-                f"  tickers: {', '.join(req.tickers)}\n"
-                f"  amount:  ${req.amount:,.2f}\n"
-                f"  risk:    {req.risk} (profile '{profile.name}': max single "
-                f"{profile.max_single_pct:.0f}%, cash floor "
-                f"{profile.cash_floor_pct:.0f}%)\n"
-                f"  target:  {req.target}\n\n"
-                f"Signals (JSON, keyed by ticker):\n{signals}\n"
-                f"{prev_block}"
-                f"{batch_block}\n"
-                "Produce a valid Allocation."
-            ),
-        },
-    ]
+
+    # cache_control marker: Anthropic caches everything up to and including
+    # the marker. OpenAI ignores the field and auto-caches by prefix match.
+    system_msg = {
+        "role": "system",
+        "content": [
+            {
+                "type": "text",
+                "text": ALLOCATOR_SYSTEM,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+    }
+    user_msg = {
+        "role": "user",
+        "content": (
+            f"Request:\n"
+            f"  tickers: {', '.join(req.tickers)}\n"
+            f"  amount:  ${req.amount:,.2f}\n"
+            f"  risk:    {req.risk} (profile '{profile.name}': max single "
+            f"{profile.max_single_pct:.0f}%, cash floor "
+            f"{profile.cash_floor_pct:.0f}%)\n"
+            f"  target:  {req.target}\n\n"
+            f"Signals (JSON, keyed by ticker):\n{signals}\n"
+            f"{prev_block}"
+            f"{batch_block}\n"
+            "Produce a valid Allocation."
+        ),
+    }
+    return [system_msg, user_msg]
 
 
 def allocate(state: GraphState) -> dict:

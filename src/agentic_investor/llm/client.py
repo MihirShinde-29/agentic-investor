@@ -66,7 +66,13 @@ _PRICES: dict[str, tuple[float, float]] = {
 }
 
 
-def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+def _estimate_cost(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    cached_tokens: int = 0,
+) -> float:
     prices = _PRICES.get(model)
     if prices is None:
         # Substring fallback (e.g. "openai/gpt-4o-mini" or provider prefixes).
@@ -77,7 +83,11 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> fl
     if prices is None:
         return 0.0
     in_rate, out_rate = prices
-    return (prompt_tokens * in_rate + completion_tokens * out_rate) / 1_000_000
+    # OpenAI charges cached input at 50% of the base input rate.
+    uncached = max(0, prompt_tokens - cached_tokens)
+    input_cost = (uncached * in_rate + cached_tokens * in_rate * 0.5) / 1_000_000
+    output_cost = completion_tokens * out_rate / 1_000_000
+    return input_cost + output_cost
 
 
 @dataclass
@@ -85,6 +95,7 @@ class _CallStats:
     n_calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0
     estimated_cost_usd: float = 0.0
     by_model: dict[str, dict] = field(default_factory=dict)
 
@@ -107,6 +118,7 @@ def get_call_stats() -> _CallStats:
             n_calls=_stats.n_calls,
             prompt_tokens=_stats.prompt_tokens,
             completion_tokens=_stats.completion_tokens,
+            cached_tokens=_stats.cached_tokens,
             estimated_cost_usd=_stats.estimated_cost_usd,
             by_model={k: dict(v) for k, v in _stats.by_model.items()},
         )
@@ -117,43 +129,66 @@ def format_call_stats(stats: _CallStats | None = None) -> str:
     s = stats if stats is not None else get_call_stats()
     if s.n_calls == 0:
         return "  LLM usage: 0 calls (no LLM hit this run)"
+    cache_hint = ""
+    if s.prompt_tokens > 0 and s.cached_tokens > 0:
+        pct = s.cached_tokens / s.prompt_tokens * 100
+        cache_hint = f" ({s.cached_tokens:,} cached, {pct:.0f}% hit)"
     lines = [
         f"  LLM usage: {s.n_calls} calls, "
-        f"{s.prompt_tokens:,} input + {s.completion_tokens:,} output tokens, "
-        f"~${s.estimated_cost_usd:.4f} estimated"
+        f"{s.prompt_tokens:,} input{cache_hint} + {s.completion_tokens:,} output "
+        f"tokens, ~${s.estimated_cost_usd:.4f} estimated"
     ]
     for model, m in s.by_model.items():
+        cached = m.get("cached", 0)
+        c_hint = f" ({cached:,} cached)" if cached else ""
         lines.append(
             f"    - {model}: {m['calls']} calls, "
-            f"{m['prompt']:,}/{m['completion']:,} tokens, ~${m['cost']:.4f}"
+            f"{m['prompt']:,}{c_hint}/{m['completion']:,} tokens, ~${m['cost']:.4f}"
         )
     return "\n".join(lines)
+
+
+def _extract_cached_tokens(usage: dict) -> int:
+    """Pull cached-input-tokens from OpenAI or Anthropic usage payload."""
+    # OpenAI: usage.prompt_tokens_details.cached_tokens
+    details = usage.get("prompt_tokens_details") or {}
+    if hasattr(details, "model_dump"):
+        details = details.model_dump()
+    elif hasattr(details, "__dict__"):
+        details = {**getattr(details, "__dict__", {})}
+    cached = int(details.get("cached_tokens", 0) or 0)
+    # Anthropic: usage.cache_read_input_tokens (LiteLLM passes through)
+    cached += int(usage.get("cache_read_input_tokens", 0) or 0)
+    return cached
 
 
 def _track_usage(kwargs, completion_response, start_time, end_time) -> None:
     """LiteLLM success callback: pull token counts + estimate cost, accumulate."""
     try:
         usage = getattr(completion_response, "usage", None) or {}
-        # usage may be a dict or a pydantic-like object.
         if hasattr(usage, "model_dump"):
             usage = usage.model_dump()
         elif hasattr(usage, "__dict__"):
             usage = {**getattr(usage, "__dict__", {})}
         prompt = int(usage.get("prompt_tokens", 0) or 0)
         completion = int(usage.get("completion_tokens", 0) or 0)
+        cached = _extract_cached_tokens(usage)
         model = kwargs.get("model", "unknown")
-        cost = _estimate_cost(model, prompt, completion)
+        cost = _estimate_cost(model, prompt, completion, cached_tokens=cached)
         with _stats_lock:
             _stats.n_calls += 1
             _stats.prompt_tokens += prompt
             _stats.completion_tokens += completion
+            _stats.cached_tokens += cached
             _stats.estimated_cost_usd += cost
             m = _stats.by_model.setdefault(
-                model, {"calls": 0, "prompt": 0, "completion": 0, "cost": 0.0}
+                model,
+                {"calls": 0, "prompt": 0, "completion": 0, "cached": 0, "cost": 0.0},
             )
             m["calls"] += 1
             m["prompt"] += prompt
             m["completion"] += completion
+            m["cached"] += cached
             m["cost"] += cost
     except Exception:  # noqa: BLE001 - never let telemetry break a real call
         pass
