@@ -24,6 +24,11 @@ out/
 .pytest_cache/
 .ruff_cache/
 
+# Frontend build artifacts + deps
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.vite/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

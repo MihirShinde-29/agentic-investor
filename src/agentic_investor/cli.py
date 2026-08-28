@@ -877,6 +877,8 @@ def _paper_loop(
     log_file: str | None,
     regen_mode: str,
     force_open: bool,
+    serve_dashboard: bool,
+    dashboard_port: int,
 ) -> None:
     import logging
 
@@ -904,6 +906,10 @@ def _paper_loop(
 
     session = SessionRecorder.start()
     print(f"\nSession artifacts -> {session.out_dir}\n")
+    if serve_dashboard:
+        from agentic_investor.dashboard.server import serve_in_thread
+        serve_in_thread(port=dashboard_port)
+        print(f"Dashboard: http://localhost:{dashboard_port}\n")
     reset_call_stats()
     cfg = LoopConfig(
         profile_name=profile_name,
@@ -1232,6 +1238,11 @@ def main() -> None:
     pl.add_argument("--force-open", action="store_true",
                     help="skip market-hours check (dev/testing only - orders "
                          "will queue at Alpaca for next open)")
+    pl.add_argument("--serve-dashboard", action="store_true",
+                    help="also start the FastAPI + WebSocket dashboard on "
+                         "--dashboard-port so browsers can watch the loop live")
+    pl.add_argument("--dashboard-port", type=int, default=8000,
+                    help="port for --serve-dashboard (default 8000)")
 
     pa = sub.add_parser("paper-attribution",
                         help="rolling analysis across all sessions: filter "
@@ -1367,6 +1378,7 @@ def main() -> None:
             args.min_trade_dollars,
             args.stop_loss_pct, args.take_profit_pct, args.dry_run, args.once,
             args.log_file, args.regen_mode, args.force_open,
+            args.serve_dashboard, args.dashboard_port,
         )
     else:
         _print_config()

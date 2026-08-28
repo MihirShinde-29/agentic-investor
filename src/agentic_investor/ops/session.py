@@ -51,7 +51,8 @@ class SessionRecorder:
         return self.out_dir / "SUMMARY.md"
 
     def log(self, event: str, payload: dict[str, Any] | None = None) -> None:
-        """Append a single event to jsonl + emit a pretty console line."""
+        """Append a single event to jsonl + emit a pretty console line +
+        publish to the dashboard event bus for live WebSocket clients."""
         payload = payload or {}
         row = {
             "ts": datetime.now(UTC).isoformat(),
@@ -63,6 +64,12 @@ class SessionRecorder:
             with self.jsonl_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, default=str) + "\n")
         logger.info("[%s] %s", event, _pretty(payload))
+        # Dashboard fanout (no-op when the dashboard server isn't running).
+        try:
+            from agentic_investor.dashboard.events import get_bus
+            get_bus().publish(row)
+        except Exception:  # noqa: BLE001 - never let telemetry break the loop
+            pass
 
     def summary_lines(self) -> list[str]:
         lines = [f"# Session {self.started_at}", ""]

@@ -1,5 +1,7 @@
-"""Streamlit dashboard (M5).
+"""Live operating dashboard: FastAPI + WebSocket over the running paper loop.
 
-Takes amount, risk, and target, then shows each agent's analysis, the
-allocation pie, and the backtest curve vs SPY. Talks to the FastAPI service.
+Runs in the same process as the loop. `paper-loop --serve-dashboard --port 8000`
+starts a uvicorn worker on a background thread; the loop pushes every event
+through the in-memory bus (`events.py`); the WebSocket handler fans out to
+browser clients. REST endpoints hydrate initial state on page load.
 """
