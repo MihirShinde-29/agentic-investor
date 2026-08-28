@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,6 +27,15 @@ from fastapi.staticfiles import StaticFiles
 from agentic_investor.dashboard.events import get_bus
 
 logger = logging.getLogger(__name__)
+
+# On Windows, Python's mimetypes.guess_type reads from the registry and
+# sometimes returns 'text/plain' for .js files. Browsers refuse to execute
+# scripts with that MIME type. Force the correct types before StaticFiles
+# resolves them.
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
 
 _DIST = Path(__file__).parent.parent.parent.parent / "dashboard" / "dist"
 
