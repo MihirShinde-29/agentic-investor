@@ -11,14 +11,7 @@ from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
 import chromadb
-import finnhub
 from pydantic import BaseModel
-from tenacity import (
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from agentic_investor.config import get_settings
 
@@ -35,61 +28,70 @@ class NewsArticle(BaseModel):
     published_at: str  # ISO 8601 UTC
 
 
-# Finnhub
+# Alpaca News (unified with paper trading account; no separate key needed)
 
-def _finnhub_client() -> finnhub.Client:
+@lru_cache(maxsize=1)
+def _alpaca_news_client():
+    from alpaca.data.historical.news import NewsClient
+
     s = get_settings()
-    if not s.finnhub_api_key:
-        raise RuntimeError("FINNHUB_API_KEY not set")
-    return finnhub.Client(api_key=s.finnhub_api_key)
-
-
-def _is_rate_limit(e: BaseException) -> bool:
-    # Finnhub free tier: 60 req/min. Parallel picker runs blow this out easily.
-    return (
-        isinstance(e, finnhub.FinnhubAPIException) and getattr(e, "status_code", 0) == 429
-    )
-
-
-@retry(
-    retry=retry_if_exception(_is_rate_limit),
-    wait=wait_exponential(multiplier=1.0, min=1.0, max=30.0),
-    stop=stop_after_attempt(5),
-    reraise=True,
-)
-def _finnhub_company_news(ticker: str, frm: str, to: str) -> list[dict]:
-    """Retry the raw Finnhub call with exponential backoff on 429s only."""
-    return _finnhub_client().company_news(ticker.upper(), _from=frm, to=to)
+    if not s.alpaca_api_key or not s.alpaca_api_secret:
+        raise RuntimeError(
+            "ALPACA_API_KEY/SECRET must be set for news "
+            "(get free paper keys at alpaca.markets)"
+        )
+    return NewsClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_api_secret)
 
 
 @lru_cache(maxsize=512)
-def _cached_company_news(ticker: str, frm: str, to: str) -> tuple[dict, ...]:
-    """In-process cache keyed on (ticker, from, to). Same call re-uses result."""
-    return tuple(_finnhub_company_news(ticker, frm, to))
+def _cached_alpaca_news(ticker: str, frm_iso: str, to_iso: str) -> tuple[dict, ...]:
+    """In-process cache keyed on (ticker, from, to). Same call reuses result."""
+    from alpaca.data.requests import NewsRequest
+
+    client = _alpaca_news_client()
+    req = NewsRequest(
+        symbols=[ticker.upper()],
+        start=datetime.fromisoformat(frm_iso),
+        end=datetime.fromisoformat(to_iso),
+        limit=50,
+    )
+    resp = client.get_news(req)
+    # alpaca-py returns a NewsSet; .data is dict[symbol, list[News]]
+    articles = []
+    for arts in resp.data.values():
+        for a in arts:
+            articles.append({
+                "id": str(getattr(a, "id", "")),
+                "headline": str(getattr(a, "headline", "")),
+                "summary": str(getattr(a, "summary", "")),
+                "source": str(getattr(a, "source", "")),
+                "url": str(getattr(a, "url", "")),
+                "created_at": getattr(a, "created_at", None),
+            })
+    return tuple(articles)
 
 
 def fetch_company_news(ticker: str, days: int = 7) -> list[NewsArticle]:
-    """Pull recent company news for a ticker from Finnhub (retries on 429)."""
-    to = datetime.now(UTC).date()
-    frm = to - timedelta(days=days)
-    raw = list(_cached_company_news(ticker.upper(), frm.isoformat(), to.isoformat()))
+    """Pull recent company news for a ticker from Alpaca (Benzinga feed)."""
+    now = datetime.now(UTC)
+    frm = now - timedelta(days=days)
+    raw = list(_cached_alpaca_news(ticker.upper(), frm.isoformat(), now.isoformat()))
 
     out: list[NewsArticle] = []
     for item in raw:
-        if not item.get("headline"):
+        headline = item.get("headline", "")
+        if not headline:
             continue
-        ts = item.get("datetime")
-        published_at = (
-            datetime.fromtimestamp(ts, tz=UTC).isoformat() if ts else ""
-        )
+        ts = item.get("created_at")
+        published_at = str(ts) if ts else now.isoformat()
         out.append(
             NewsArticle(
-                id=str(item.get("id") or f"{ticker.upper()}-{ts or ''}"),
+                id=item.get("id") or f"{ticker.upper()}-{published_at}",
                 ticker=ticker.upper(),
-                headline=item["headline"],
-                summary=(item.get("summary") or "").strip(),
-                source=(item.get("source") or "").strip(),
-                url=(item.get("url") or "").strip(),
+                headline=headline,
+                summary=item.get("summary", "").strip(),
+                source=item.get("source", "").strip(),
+                url=item.get("url", "").strip(),
                 published_at=published_at,
             )
         )

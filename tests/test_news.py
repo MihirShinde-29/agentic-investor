@@ -1,7 +1,7 @@
 """Unit tests for the news tool.
 
-No network (finnhub is mocked), no real embedder (fake maps keywords to distinct
-vectors), and Chroma runs ephemeral (in-memory) so nothing hits the disk.
+No network (alpaca news is mocked), no real embedder (fake maps keywords to
+distinct vectors), and Chroma runs ephemeral (in-memory) so nothing hits disk.
 """
 
 import uuid
@@ -46,22 +46,22 @@ def _sample(ticker, art_id, headline, summary=""):
     )
 
 
-def test_fetch_company_news_parses_finnhub_response(monkeypatch):
-    class FakeClient:
-        def company_news(self, symbol, _from, to):
-            return [
-                {
-                    "id": 1,
-                    "headline": "NVDA beats estimates",
-                    "summary": "strong quarter",
-                    "source": "Reuters",
-                    "url": "https://r.com/1",
-                    "datetime": 1_723_000_000,
-                },
-                {"headline": "", "datetime": 1_723_000_100},  # skipped: empty headline
-            ]
-
-    monkeypatch.setattr(news, "_finnhub_client", lambda: FakeClient())
+def test_fetch_company_news_parses_alpaca_response(monkeypatch):
+    # Fake the module-level cached function directly to bypass alpaca-py.
+    monkeypatch.setattr(
+        news, "_cached_alpaca_news",
+        lambda ticker, frm, to: (
+            {
+                "id": "1",
+                "headline": "NVDA beats estimates",
+                "summary": "strong quarter",
+                "source": "Reuters",
+                "url": "https://r.com/1",
+                "created_at": "2026-08-18T12:00:00+00:00",
+            },
+            {"headline": "", "created_at": "2026-08-18T12:01:00+00:00"},  # skipped
+        ),
+    )
     arts = news.fetch_company_news("nvda", days=3)
     assert len(arts) == 1
     assert arts[0].ticker == "NVDA"

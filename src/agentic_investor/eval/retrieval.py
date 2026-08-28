@@ -2,7 +2,7 @@
 
 Loads hand-curated fixture articles into an ephemeral Chroma collection, runs
 each query, and scores against ground-truth relevant IDs using Hit@k, Recall@k,
-MRR, and NDCG@k. Fully offline once fixtures exist: no live Finnhub calls.
+MRR, and NDCG@k. Fully offline once fixtures exist: no live news-API calls.
 The real sentence-transformers embedder is used by default so scores reflect
 production quality; tests inject a fake embedder for speed.
 """

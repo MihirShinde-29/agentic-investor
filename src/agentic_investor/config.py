@@ -26,7 +26,6 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
-    finnhub_api_key: str | None = None
 
     # Local embeddings, no API key required.
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
