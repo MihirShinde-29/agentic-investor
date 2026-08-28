@@ -744,6 +744,129 @@ def _paper_rebalance(
     print(f"\nSubmitted {len(orders)} orders.")
 
 
+def _parse_interval(text: str) -> int:
+    """Turn "30m", "1h", "45" into seconds. Bare numbers are seconds."""
+    t = text.strip().lower()
+    if t.endswith("h"):
+        return int(float(t[:-1]) * 3600)
+    if t.endswith("m"):
+        return int(float(t[:-1]) * 60)
+    if t.endswith("s"):
+        return int(float(t[:-1]))
+    return int(float(t))
+
+
+def _paper_loop(
+    profile_name: str,
+    amount: float,
+    tickers: list[str],
+    auto: bool,
+    universe: str,
+    top_n: int,
+    interval: str,
+    band_abs_pct: float,
+    min_trade_dollars: float,
+    stop_loss_pct: float | None,
+    take_profit_pct: float | None,
+    dry_run: bool,
+    once: bool,
+    log_file: str | None,
+    regen_mode: str,
+) -> None:
+    import logging
+
+    from agentic_investor.llm.client import format_call_stats, reset_call_stats
+    from agentic_investor.ops.session import SessionRecorder
+    from agentic_investor.orchestrator.loop import (
+        LoopConfig,
+        format_session_summary,
+        run_event_loop,
+        run_loop,
+    )
+    from agentic_investor.tools.paper_broker import get_broker
+
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        from pathlib import Path
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+    session = SessionRecorder.start()
+    print(f"\nSession artifacts -> {session.out_dir}\n")
+    reset_call_stats()
+    cfg = LoopConfig(
+        profile_name=profile_name,
+        amount=amount,
+        tickers=tickers,
+        auto=auto,
+        universe=universe,
+        top_n=top_n,
+        interval_seconds=_parse_interval(interval),
+        band_abs_pct=band_abs_pct,
+        min_trade_dollars=min_trade_dollars,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+        dry_run=dry_run,
+        once=once,
+    )
+    broker = get_broker()
+    try:
+        if regen_mode == "event":
+            state = run_event_loop(cfg, broker, session=session)
+        else:
+            state = run_loop(cfg, broker, session=session)
+    finally:
+        session.finalize()
+    print(format_session_summary(state))
+    print(format_call_stats())
+    print(f"\nSession summary written: {session.summary_path}")
+
+
+def _paper_tick(
+    profile_name: str,
+    amount: float,
+    tickers: list[str],
+    auto: bool,
+    universe: str,
+    top_n: int,
+    band_abs_pct: float,
+    min_trade_dollars: float,
+    stop_loss_pct: float | None,
+    take_profit_pct: float | None,
+    dry_run: bool,
+) -> None:
+    """Single-shot tick - useful for cron / manual runs / testing."""
+    import logging
+
+    from agentic_investor.llm.client import format_call_stats, reset_call_stats
+    from agentic_investor.orchestrator.loop import LoopConfig, LoopState, run_tick
+    from agentic_investor.tools.paper_broker import get_broker
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", force=True)
+    reset_call_stats()
+
+    cfg = LoopConfig(
+        profile_name=profile_name, amount=amount, tickers=tickers,
+        auto=auto, universe=universe, top_n=top_n,
+        band_abs_pct=band_abs_pct, min_trade_dollars=min_trade_dollars,
+        stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
+        dry_run=dry_run, once=True,
+    )
+    broker = get_broker()
+    state = LoopState()
+    result = run_tick(cfg, state, broker)
+    tag = " (fresh rec)" if result.regenerated_rec else ""
+    print(f"\nTick{tag}: rec_id={result.rec_id} equity=${result.equity:,.2f} "
+          f"plans={result.plan_count} submitted={len(result.submitted)}")
+    print(format_call_stats())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="agentic-investor")
     sub = parser.add_subparsers(dest="cmd")
@@ -949,6 +1072,49 @@ def main() -> None:
     pr.add_argument("--dry-run", action="store_true",
                     help="print the plan but submit nothing")
 
+    pt = sub.add_parser("paper-tick",
+                        help="single loop iteration (regenerate rec if new day, "
+                             "rebalance if drift > band); useful for cron/manual")
+    pt.add_argument("--profile", default="moderate")
+    pt.add_argument("--amount", type=float, default=10_000.0)
+    pt.add_argument("--tickers", default=None,
+                    help="comma-separated tickers; omit if using --auto")
+    pt.add_argument("--auto", action="store_true")
+    pt.add_argument("--universe", default="mega_tech")
+    pt.add_argument("--top-n", type=int, default=8)
+    pt.add_argument("--band-abs-pct", type=float, default=5.0)
+    pt.add_argument("--min-trade-dollars", type=float, default=50.0)
+    pt.add_argument("--stop-loss-pct", type=float, default=None)
+    pt.add_argument("--take-profit-pct", type=float, default=None)
+    pt.add_argument("--dry-run", action="store_true")
+
+    pl = sub.add_parser("paper-loop",
+                        help="continuous paper-trading loop during market hours; "
+                             "regenerates rec once per day, ticks at --interval")
+    pl.add_argument("--profile", default="moderate")
+    pl.add_argument("--amount", type=float, default=10_000.0)
+    pl.add_argument("--tickers", default=None,
+                    help="comma-separated tickers; omit if using --auto")
+    pl.add_argument("--auto", action="store_true")
+    pl.add_argument("--universe", default="mega_tech")
+    pl.add_argument("--top-n", type=int, default=8)
+    pl.add_argument("--interval", default="30m",
+                    help="tick cadence; accepts 30m / 1h / 45s (default 30m)")
+    pl.add_argument("--band-abs-pct", type=float, default=5.0)
+    pl.add_argument("--min-trade-dollars", type=float, default=50.0)
+    pl.add_argument("--stop-loss-pct", type=float, default=None)
+    pl.add_argument("--take-profit-pct", type=float, default=None)
+    pl.add_argument("--dry-run", action="store_true",
+                    help="every tick prints its plan but submits nothing")
+    pl.add_argument("--once", action="store_true",
+                    help="one tick then exit (great for testing)")
+    pl.add_argument("--log-file", default="out/paper_loop.log",
+                    help="also stream logs to this file (default out/paper_loop.log)")
+    pl.add_argument("--regen-mode", default="daily",
+                    choices=["daily", "event"],
+                    help="daily: regen rec once at open. event: subscribe to "
+                         "alpaca news, fire on decision moments (micro-batched)")
+
     args = parser.parse_args()
     if args.cmd == "analyze":
         _analyze(args.tickers, args.model)
@@ -1017,6 +1183,27 @@ def main() -> None:
         _paper_rebalance(
             args.rec_id, args.stop_loss_pct, args.take_profit_pct,
             args.min_trade_dollars, args.dry_run,
+        )
+    elif args.cmd == "paper-tick":
+        tickers = (
+            [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+            if args.tickers else []
+        )
+        _paper_tick(
+            args.profile, args.amount, tickers, args.auto, args.universe,
+            args.top_n, args.band_abs_pct, args.min_trade_dollars,
+            args.stop_loss_pct, args.take_profit_pct, args.dry_run,
+        )
+    elif args.cmd == "paper-loop":
+        tickers = (
+            [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+            if args.tickers else []
+        )
+        _paper_loop(
+            args.profile, args.amount, tickers, args.auto, args.universe,
+            args.top_n, args.interval, args.band_abs_pct, args.min_trade_dollars,
+            args.stop_loss_pct, args.take_profit_pct, args.dry_run, args.once,
+            args.log_file, args.regen_mode,
         )
     else:
         _print_config()

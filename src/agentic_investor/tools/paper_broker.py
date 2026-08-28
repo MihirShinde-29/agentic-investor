@@ -47,6 +47,14 @@ class PaperPosition:
 
 
 @dataclass
+class PaperClock:
+    now: str  # ISO 8601
+    is_open: bool
+    next_open: str
+    next_close: str
+
+
+@dataclass
 class PaperOrder:
     id: str  # broker order id
     client_order_id: str  # idempotency key we own
@@ -69,6 +77,7 @@ class PaperOrder:
 class PaperBroker(Protocol):
     def get_account(self) -> PaperAccount: ...
     def get_positions(self) -> list[PaperPosition]: ...
+    def get_clock(self) -> PaperClock: ...
     def list_orders(self, limit: int = 50, status: str = "all") -> list[PaperOrder]: ...
     def submit_market_order(
         self,
@@ -116,6 +125,15 @@ class AlpacaPaperBroker:
             equity=float(a.equity),
             buying_power=float(a.buying_power),
             portfolio_value=float(a.portfolio_value),
+        )
+
+    def get_clock(self) -> PaperClock:
+        c = self._client.get_clock()
+        return PaperClock(
+            now=str(c.timestamp),
+            is_open=bool(c.is_open),
+            next_open=str(c.next_open),
+            next_close=str(c.next_close),
         )
 
     def get_positions(self) -> list[PaperPosition]:
