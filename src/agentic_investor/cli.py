@@ -756,6 +756,30 @@ def _parse_interval(text: str) -> int:
     return int(float(t))
 
 
+def _paper_attribution(sessions_dir: str, out_path: str) -> None:
+    from agentic_investor.ops.attribution import build_rolling_report
+
+    print(f"\nScanning: {sessions_dir}")
+    path = build_rolling_report(sessions_dir, out_path)
+    print(f"\nRolling attribution report: {path}")
+    print("\nOpen to see per-session metrics, filter behavior, honesty notes.")
+
+
+def _paper_report(session_dir: str | None) -> None:
+    from pathlib import Path
+
+    from agentic_investor.ops.report import build_report, most_recent_session_dir
+
+    target = Path(session_dir) if session_dir else most_recent_session_dir()
+    print(f"\nBuilding report for: {target}")
+    build_report(target)
+    print("\nWrote:")
+    print(f"  {target / 'REPORT.md'}")
+    print(f"  {target / 'equity_curve.png'}")
+    print(f"  {target / 'trades.csv'}")
+    print("\nOpen the markdown to see the full breakdown.")
+
+
 def _paper_test_event(
     tickers: list[str],
     headlines: list[str],
@@ -1186,6 +1210,18 @@ def main() -> None:
                     help="skip market-hours check (dev/testing only - orders "
                          "will queue at Alpaca for next open)")
 
+    pa = sub.add_parser("paper-attribution",
+                        help="rolling analysis across all sessions: filter "
+                             "firing rates, trades, cost, P&L")
+    pa.add_argument("--sessions-dir", default="out/sessions")
+    pa.add_argument("--out", default="out/attribution/rolling_report.md")
+
+    pr2 = sub.add_parser("paper-report",
+                         help="post-market session review: equity curve PNG + "
+                              "trade log CSV + REPORT.md summary")
+    pr2.add_argument("--session", default=None,
+                     help="path to a session dir; omit for most-recent session")
+
     pt2 = sub.add_parser("paper-test-event",
                          help="synthetic decision moment: inject fake news, "
                               "run one full tick, verify event-driven wiring")
@@ -1277,6 +1313,10 @@ def main() -> None:
             args.top_n, args.band_abs_pct, args.min_trade_dollars,
             args.stop_loss_pct, args.take_profit_pct, args.dry_run,
         )
+    elif args.cmd == "paper-attribution":
+        _paper_attribution(args.sessions_dir, args.out)
+    elif args.cmd == "paper-report":
+        _paper_report(args.session)
     elif args.cmd == "paper-test-event":
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
         _paper_test_event(
