@@ -773,17 +773,13 @@ def run_event_loop(
     decision_state = DecisionState()
     event_q: _q.Queue = _q.Queue()
 
-    # Streamer subscribes to the FULL universe pool (or explicit tickers) so
-    # we get news for candidates too, not just held names. This is what lets
-    # the LLM discover better opportunities via watchlist news.
+    # Streamer subscription: wildcard "*" in auto mode gets ALL news, then
+    # filtered downstream by ticker-mention extraction against the universe.
+    # Explicit tickers mode subscribes only to those (narrow, deterministic).
     if cfg.tickers:
         initial_tickers = list(cfg.tickers)
     elif cfg.auto:
-        try:
-            from agentic_investor.universes import get_universe
-            initial_tickers = get_universe(cfg.universe)
-        except Exception:  # noqa: BLE001
-            initial_tickers = ["SPY"]
+        initial_tickers = ["*"]
     else:
         initial_tickers = ["SPY"]
     streamer = NewsStreamer(initial_tickers, event_queue=event_q)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -21,6 +22,22 @@ from datetime import UTC, datetime
 from agentic_investor.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+# Cashtag + parenthesized symbols only - bare all-caps standalones would need
+# a known-ticker gate to avoid false positives like "AI" / "CEO".
+_CASHTAG_RE = re.compile(r"\$([A-Z]{1,5})\b")
+# Matches (TSM), (NVDA), (NASDAQ:AAPL), (NYSE:BRK.B) etc.
+_PAREN_RE = re.compile(r"\((?:[A-Z]{2,10}:)?([A-Z]{1,5})(?:\.[A-Z])?\)")
+
+
+def extract_tickers_from_text(text: str) -> set[str]:
+    """Pull ticker mentions from a news body (cashtag + parenthesized only)."""
+    if not text:
+        return set()
+    tickers = set(_CASHTAG_RE.findall(text))
+    tickers.update(_PAREN_RE.findall(text))
+    return tickers
 
 
 @dataclass
@@ -35,7 +52,12 @@ class NewsEvent:
 
 
 class NewsStreamer:
-    """Background-thread wrapper over alpaca-py's NewsDataStream."""
+    """Background-thread wrapper over alpaca-py's NewsDataStream.
+
+    Pass tickers=["*"] to subscribe to ALL news (wildcard); tickers filter
+    is disabled and every event reaches the queue with whatever symbols
+    Alpaca tagged.
+    """
 
     def __init__(
         self,
@@ -44,7 +66,8 @@ class NewsStreamer:
         event_queue: queue.Queue[NewsEvent],
         stream_factory: Callable | None = None,
     ):
-        self.tickers = [t.upper() for t in tickers]
+        self.wildcard = "*" in tickers
+        self.tickers = [] if self.wildcard else [t.upper() for t in tickers]
         self.event_queue = event_queue
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -69,12 +92,12 @@ class NewsStreamer:
         self.start()
 
     def _run(self) -> None:
-        # Reconnect loop: any exception in the stream tries again after backoff.
         backoff = 1.0
         while not self._stop.is_set():
             try:
                 stream = self._build_stream()
-                stream.subscribe_news(self._on_news, *self.tickers)
+                subs = ("*",) if self.wildcard else tuple(self.tickers)
+                stream.subscribe_news(self._on_news, *subs)
                 stream.run()
                 backoff = 1.0
             except Exception as e:  # noqa: BLE001
@@ -91,16 +114,23 @@ class NewsStreamer:
         return NewsDataStream(api_key=s.alpaca_api_key, secret_key=s.alpaca_api_secret)
 
     async def _on_news(self, item) -> None:
-        # alpaca-py sends symbols as a list per item.
         symbols = getattr(item, "symbols", None) or []
         headline = str(getattr(item, "headline", ""))
         summary = str(getattr(item, "summary", ""))
         published = getattr(item, "created_at", None) or datetime.now(UTC)
         url = str(getattr(item, "url", ""))
         source = str(getattr(item, "source", ""))
-        for sym in symbols:
-            sym = str(sym).upper()
-            if self.tickers and sym not in self.tickers:
+
+        # 0p: extract additional tickers from the body that Alpaca may not
+        # have tagged (secondary beneficiaries named in the article).
+        extra = extract_tickers_from_text(f"{headline}\n{summary}")
+        all_symbols = list(dict.fromkeys(
+            [str(s).upper() for s in symbols] + list(extra)
+        ))
+
+        for sym in all_symbols:
+            # Non-wildcard mode: still filter to subscribed tickers.
+            if not self.wildcard and self.tickers and sym not in self.tickers:
                 continue
             evt = NewsEvent(
                 ticker=sym,
