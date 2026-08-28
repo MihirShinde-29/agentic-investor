@@ -611,6 +611,139 @@ def _compare_allocators(
     print(format_call_stats())
 
 
+# Paper trading (M7)
+
+
+def _paper_status() -> None:
+    from agentic_investor.tools.paper_broker import get_broker
+    from agentic_investor.tools.paper_store import record_snapshot
+
+    broker = get_broker()
+    acct = broker.get_account()
+    positions = broker.get_positions()
+    record_snapshot(acct, positions)
+
+    print(f"\nAlpaca paper account #{acct.account_number}")
+    print(f"  Equity           ${acct.equity:>12,.2f}")
+    print(f"  Cash             ${acct.cash:>12,.2f}")
+    print(f"  Buying power     ${acct.buying_power:>12,.2f}")
+    print(f"  Portfolio value  ${acct.portfolio_value:>12,.2f}\n")
+    if not positions:
+        print("  (no open positions)")
+        return
+    print(f"  {'Ticker':<8}{'Qty':>10}{'Avg entry':>12}{'Mkt value':>14}"
+          f"{'Unrealized':>14}{'P&L %':>9}")
+    print("  " + "-" * 65)
+    for p in positions:
+        print(f"  {p.ticker:<8}{p.qty:>10.2f}{p.avg_entry_price:>12.2f}"
+              f"${p.market_value:>13,.2f}${p.unrealized_pl:>13,.2f}"
+              f"{p.unrealized_pl_pct:>8.2f}%")
+
+
+def _paper_orders(limit: int, status: str) -> None:
+    from agentic_investor.tools.paper_broker import get_broker
+
+    broker = get_broker()
+    orders = broker.list_orders(limit=limit, status=status)
+    if not orders:
+        print(f"(no {status} orders)")
+        return
+    print(f"\n{len(orders)} recent orders ({status}):")
+    print(f"  {'Ticker':<8}{'Side':>6}{'Qty':>10}{'Type':>10}"
+          f"{'Status':>16}{'Filled@':>10}   Submitted")
+    print("  " + "-" * 90)
+    for o in orders:
+        fill = f"{o.filled_avg_price:.2f}" if o.filled_avg_price else "-"
+        print(f"  {o.ticker:<8}{o.side:>6}{o.qty:>10.2f}{o.order_type:>10}"
+              f"{o.status:>16}{fill:>10}   {o.submitted_at}")
+
+
+def _paper_submit(
+    ticker: str,
+    side: str,
+    qty: float,
+    stop_loss_pct: float | None,
+    take_profit_pct: float | None,
+) -> None:
+    from agentic_investor.tools.paper_broker import get_broker
+    from agentic_investor.tools.paper_store import record_order
+
+    broker = get_broker()
+    order = broker.submit_market_order(
+        ticker, side, qty,
+        stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
+    )
+    record_order(order, source="manual")
+    print(f"\nSubmitted: {order.side} {order.qty} {order.ticker} ({order.order_type})")
+    print(f"  Broker id       {order.id}")
+    print(f"  Client order id {order.client_order_id}")
+    print(f"  Status          {order.status}")
+
+
+def _paper_rebalance(
+    rec_id: int,
+    stop_loss_pct: float | None,
+    take_profit_pct: float | None,
+    min_trade_dollars: float,
+    dry_run: bool,
+) -> None:
+    from agentic_investor.orchestrator.rebalancer import (
+        compute_trade_plan,
+        execute_trade_plan,
+    )
+    from agentic_investor.orchestrator.store import load_recommendation
+    from agentic_investor.tools.market import fetch_ohlcv
+    from agentic_investor.tools.paper_broker import get_broker
+    from agentic_investor.tools.paper_store import record_order
+
+    rec = load_recommendation(rec_id)
+    if rec is None:
+        print(f"No recommendation with id {rec_id}.")
+        return
+
+    broker = get_broker()
+    acct = broker.get_account()
+    positions = broker.get_positions()
+    current_dollars = {p.ticker.upper(): p.market_value for p in positions}
+
+    tickers = {p.ticker.upper() for p in rec.allocation.positions} | set(current_dollars)
+    prices: dict[str, float] = {}
+    for t in tickers:
+        try:
+            prices[t] = float(fetch_ohlcv(t, period="1y")["Close"].iloc[-1])
+        except Exception as e:  # noqa: BLE001
+            print(f"  warn: no price for {t}: {e}")
+
+    plans = compute_trade_plan(
+        rec, current_dollars, acct.equity,
+        prices=prices, min_trade_dollars=min_trade_dollars,
+    )
+
+    print(f"\nRebalance plan for recommendation #{rec_id} "
+          f"(equity ${acct.equity:,.2f}, min-trade ${min_trade_dollars:.0f})")
+    if not plans:
+        print("  Already on target - no trades needed.")
+        return
+    print(f"  {'Ticker':<8}{'Side':>6}{'Qty':>10}{'$Delta':>12}"
+          f"{'Current%':>10}{'Target%':>10}   Reason")
+    print("  " + "-" * 80)
+    for p in plans:
+        print(f"  {p.ticker:<8}{p.side:>6}{p.qty:>10.2f}${p.dollars:>11,.2f}"
+              f"{p.current_pct:>10.2f}{p.target_pct:>10.2f}   {p.reason}")
+
+    if dry_run:
+        print("\n[dry-run] no orders submitted. Re-run without --dry-run to execute.")
+        return
+
+    orders = execute_trade_plan(
+        plans, broker, rec_id=rec_id,
+        stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
+    )
+    for o in orders:
+        record_order(o, source="rebalance", rec_id=rec_id)
+    print(f"\nSubmitted {len(orders)} orders.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="agentic-investor")
     sub = parser.add_subparsers(dest="cmd")
@@ -784,6 +917,38 @@ def main() -> None:
                     help="YYYY-MM-DD; picker uses prices only up to this date "
                          "(defaults to --start if omitted, eliminating look-ahead)")
 
+    # Paper trading (M7)
+    sub.add_parser("paper-status",
+                   help="show Alpaca paper account balance + open positions")
+
+    po = sub.add_parser("paper-orders", help="list recent paper orders from Alpaca")
+    po.add_argument("--limit", type=int, default=20)
+    po.add_argument("--status", default="all",
+                    choices=["all", "open", "closed"])
+
+    ps = sub.add_parser("paper-submit",
+                        help="submit a manual paper market order (sanity check)")
+    ps.add_argument("ticker")
+    ps.add_argument("side", choices=["buy", "sell"])
+    ps.add_argument("qty", type=float)
+    ps.add_argument("--stop-loss-pct", type=float, default=None,
+                    help="attach a stop-loss leg at this %% below entry "
+                         "(bracket order; buys only)")
+    ps.add_argument("--take-profit-pct", type=float, default=None,
+                    help="attach a take-profit leg at this %% above entry "
+                         "(bracket order; buys only)")
+
+    pr = sub.add_parser("paper-rebalance",
+                        help="turn a saved recommendation into paper orders "
+                             "(computes diff vs current positions)")
+    pr.add_argument("rec_id", type=int)
+    pr.add_argument("--stop-loss-pct", type=float, default=None)
+    pr.add_argument("--take-profit-pct", type=float, default=None)
+    pr.add_argument("--min-trade-dollars", type=float, default=25.0,
+                    help="skip trades smaller than this to avoid churn")
+    pr.add_argument("--dry-run", action="store_true",
+                    help="print the plan but submit nothing")
+
     args = parser.parse_args()
     if args.cmd == "analyze":
         _analyze(args.tickers, args.model)
@@ -838,6 +1003,20 @@ def main() -> None:
             tickers, args.amount, args.target,
             args.start, args.end, args.benchmark, args.out, args.no_baseline,
             args.auto, args.universe, args.top_n, args.exclude, args.as_of,
+        )
+    elif args.cmd == "paper-status":
+        _paper_status()
+    elif args.cmd == "paper-orders":
+        _paper_orders(args.limit, args.status)
+    elif args.cmd == "paper-submit":
+        _paper_submit(
+            args.ticker.upper(), args.side, args.qty,
+            args.stop_loss_pct, args.take_profit_pct,
+        )
+    elif args.cmd == "paper-rebalance":
+        _paper_rebalance(
+            args.rec_id, args.stop_loss_pct, args.take_profit_pct,
+            args.min_trade_dollars, args.dry_run,
         )
     else:
         _print_config()
