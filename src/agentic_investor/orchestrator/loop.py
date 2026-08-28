@@ -390,6 +390,12 @@ def run_tick(
                     max(deltas.values(), default=0.0), aggregate_turnover,
                 )
                 state.pending_news_context = None
+                # Update last_regen_at even on skip - we DID fire an LLM call
+                # and decided to keep the current rec. Without this the
+                # force-regen check keeps returning True on every subsequent
+                # poll and re-fires until an actual regen happens (runaway
+                # cost observed 2026-08-28 13:36 ET).
+                state.last_regen_at = now
                 if session:
                     session.log("opinion_drift_skip", {
                         "reason": reason,
@@ -580,7 +586,14 @@ def run_event_loop(
     last_interval_tick = _dt.now(_UTC) - _td(seconds=cfg.interval_seconds)
     try:
         while True:
-            clock = broker.get_clock()
+            try:
+                clock = broker.get_clock()
+            except Exception as e:  # noqa: BLE001 - network hiccup mustn't crash loop
+                logger.warning("get_clock failed (%s); retrying in 15s", e)
+                if session:
+                    session.log("clock_error", {"error": str(e)})
+                time.sleep(15)
+                continue
             if not clock.is_open and not cfg.force_open:
                 if session:
                     session.log("market_closed", {"next_open": clock.next_open})
@@ -758,7 +771,14 @@ def run_loop(
     logger.info("paper-loop starting: %s", cfg)
     try:
         while True:
-            clock = broker.get_clock()
+            try:
+                clock = broker.get_clock()
+            except Exception as e:  # noqa: BLE001 - network hiccup mustn't crash loop
+                logger.warning("get_clock failed (%s); retrying in 15s", e)
+                if session:
+                    session.log("clock_error", {"error": str(e)})
+                time.sleep(15)
+                continue
             if not clock.is_open and not cfg.force_open:
                 if cfg.once:
                     logger.info("market closed; --once specified - exiting")
