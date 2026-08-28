@@ -7,6 +7,9 @@ from agentic_investor.orchestrator.loop import (
     LoopState,
     _drift_exceeds_band,
     _effective_band,
+    _opinion_barely_moved,
+    _price_move_trigger,
+    _technical_stance_changed,
     run_loop,
     run_tick,
 )
@@ -22,6 +25,10 @@ from agentic_investor.tools.paper_broker import (
     PaperOrder,
     PaperPosition,
 )
+
+
+def _fake_generate(cfg, as_of=None, news_batch_context=None, pre_picked_tickers=None):
+    return _rec(cfg.amount), list(cfg.tickers) or ["AAPL", "NVDA"]
 
 
 def _rec(rec_amount: float = 10_000.0) -> Recommendation:
@@ -149,6 +156,135 @@ def test_low_confidence_widens_band_and_suppresses_drift_trigger():
     ) is True
 
 
+def test_opinion_barely_moved_true_when_all_deltas_below_threshold():
+    prev = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=40, dollars=4000, rationale="x"),
+                Position(ticker="NVDA", weight_pct=40, dollars=4000, rationale="x"),
+            ],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    # New rec: AAPL 41 (delta 1), NVDA 39 (delta 1), cash 20 - all < 3pp
+    new = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=41, dollars=4100, rationale="x"),
+                Position(ticker="NVDA", weight_pct=39, dollars=3900, rationale="x"),
+            ],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    barely, deltas = _opinion_barely_moved(new, prev, threshold_pct=3.0)
+    assert barely is True
+    assert deltas == {"AAPL": 1.0, "NVDA": 1.0}
+
+
+def test_opinion_barely_moved_false_when_any_delta_exceeds_threshold():
+    prev = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=40, dollars=4000, rationale="x"),
+                Position(ticker="NVDA", weight_pct=40, dollars=4000, rationale="x"),
+            ],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    # AAPL delta = 5pp (exceeds 3pp threshold) - opinion DID move
+    new = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=45, dollars=4500, rationale="x"),
+                Position(ticker="NVDA", weight_pct=35, dollars=3500, rationale="x"),
+            ],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    barely, _ = _opinion_barely_moved(new, prev, threshold_pct=3.0)
+    assert barely is False
+
+
+def test_opinion_barely_moved_treats_added_position_as_moved():
+    prev = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=80, dollars=8000, rationale="x"),
+            ],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    # Added NVDA position - delta from 0 -> 30 counts as moved.
+    new = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=50, dollars=5000, rationale="x"),
+                Position(ticker="NVDA", weight_pct=30, dollars=3000, rationale="x"),
+            ],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    barely, _ = _opinion_barely_moved(new, prev, threshold_pct=3.0)
+    assert barely is False
+
+
+def test_opinion_barely_moved_false_when_no_previous_rec():
+    new = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(ticker="AAPL", weight_pct=80, dollars=8000, rationale="x")],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    barely, _ = _opinion_barely_moved(new, None, threshold_pct=3.0)
+    assert barely is False
+
+
+def test_price_move_trigger_fires_when_ticker_moves_beyond_threshold():
+    baseline = {"NVDA": 200.0, "AAPL": 150.0}
+    current = {"NVDA": 204.5, "AAPL": 148.0}  # NVDA +2.25% (over 2), AAPL -1.33%
+    fire, moves = _price_move_trigger(baseline, current, threshold_pct=2.0)
+    assert fire is True
+    assert moves["NVDA"] == 2.25
+    assert moves["AAPL"] == -1.33
+
+
+def test_price_move_trigger_silent_when_all_within_threshold():
+    baseline = {"NVDA": 200.0, "AAPL": 150.0}
+    current = {"NVDA": 201.5, "AAPL": 149.5}  # both < 1% move
+    fire, moves = _price_move_trigger(baseline, current, threshold_pct=2.0)
+    assert fire is False
+    assert len(moves) == 2
+
+
+def test_price_move_trigger_silent_when_baseline_empty():
+    fire, moves = _price_move_trigger({}, {"NVDA": 200}, threshold_pct=2.0)
+    assert fire is False
+    assert moves == {}
+
+
+def test_technical_stance_change_detects_flips():
+    prev = {"NVDA": "bullish", "AAPL": "neutral", "MSFT": "bearish"}
+    cur = {"NVDA": "neutral", "AAPL": "neutral", "MSFT": "bearish"}
+    fire, changes = _technical_stance_changed(prev, cur)
+    assert fire is True
+    assert changes == {"NVDA": "bullish -> neutral"}
+
+
+def test_technical_stance_no_change_returns_false():
+    prev = {"NVDA": "bullish", "AAPL": "neutral"}
+    cur = {"NVDA": "bullish", "AAPL": "neutral"}
+    fire, changes = _technical_stance_changed(prev, cur)
+    assert fire is False
+    assert changes == {}
+
+
 def test_drift_true_when_position_no_longer_in_target():
     rec = _rec()
     # Portfolio still holds 30% TSLA which isn't in target - big drift.
@@ -161,7 +297,7 @@ def test_drift_true_when_position_no_longer_in_target():
 def test_tick_regenerates_rec_on_first_run_and_submits_orders(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop._generate_recommendation",
-        lambda cfg, as_of=None, news_batch_context=None: _rec(cfg.amount),
+        _fake_generate,
     )
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop.record_snapshot",
@@ -194,7 +330,7 @@ def test_tick_regenerates_rec_on_first_run_and_submits_orders(tmp_path, monkeypa
 def test_tick_reuses_rec_within_same_day_and_skips_when_no_drift(monkeypatch):
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop._generate_recommendation",
-        lambda cfg, as_of=None, news_batch_context=None: _rec(cfg.amount),
+        _fake_generate,
     )
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_snapshot", lambda *a, **k: 1)
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_order", lambda *a, **k: None)
@@ -228,7 +364,7 @@ def test_tick_reuses_rec_within_same_day_and_skips_when_no_drift(monkeypatch):
 def test_dry_run_computes_plan_but_submits_no_orders(monkeypatch):
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop._generate_recommendation",
-        lambda cfg, as_of=None, news_batch_context=None: _rec(cfg.amount),
+        _fake_generate,
     )
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_snapshot", lambda *a, **k: 1)
 
@@ -248,7 +384,7 @@ def test_dry_run_computes_plan_but_submits_no_orders(monkeypatch):
 def test_loop_exits_when_market_closed_and_once_flag(monkeypatch):
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop._generate_recommendation",
-        lambda cfg, as_of=None, news_batch_context=None: _rec(cfg.amount),
+        _fake_generate,
     )
     cfg = LoopConfig(once=True, tickers=["AAPL"])
     broker = FakeBroker(is_open=False)
@@ -261,7 +397,7 @@ def test_loop_exits_when_market_closed_and_once_flag(monkeypatch):
 def test_loop_runs_one_tick_then_exits_with_once(monkeypatch):
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop._generate_recommendation",
-        lambda cfg, as_of=None, news_batch_context=None: _rec(cfg.amount),
+        _fake_generate,
     )
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_snapshot", lambda *a, **k: 1)
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_order", lambda *a, **k: None)

@@ -51,6 +51,31 @@ class LoopConfig:
     interval_seconds: int = 30 * 60  # 30 min default
     band_abs_pct: float = 5.0  # only rebalance when a position drifts this many pp
     min_trade_dollars: float = 50.0
+    # Opinion-drift filter: if a fresh regen produced target weights that all
+    # differ from the previous rec's weights by less than this threshold,
+    # the LLM's opinion barely moved - skip the whole rebalance. Prevents
+    # churn from LLM output variance (25% -> 24% -> 25% is noise, not signal).
+    opinion_drift_threshold_pct: float = 3.0
+    # Price-move trigger: fires a decision moment when any held ticker
+    # moves more than this % from its baseline (last-regen price). Catches
+    # significant intraday moves that don't have a news catalyst.
+    price_move_threshold_pct: float = 2.0
+    # Force-regen ceiling: even without news or price moves, force a fresh
+    # LLM rec every N seconds so a quiet day still gets periodic re-evaluation.
+    # Set to 0 to disable.
+    force_regen_seconds: int = 30 * 60
+    # Technical-signal change trigger: if any held ticker's technical stance
+    # (bearish/neutral/bullish) changed since last rec, force a regen even
+    # without news. DISABLED by default because the technical agent is
+    # LLM-based (temperature 0.2) and stance flips are dominated by output
+    # variance, not real market changes. Re-enable once the technical agent
+    # is deterministic (temp=0) OR the stance derives from raw indicators.
+    enable_technical_change_trigger: bool = False
+    # Aggregate-turnover safety cap: if a fresh regen would rebalance more
+    # than this % of the portfolio in total (sum of |per-ticker deltas|),
+    # skip - the LLM's opinion swung too far to trust. Catches full-portfolio
+    # flips like the 2026-08-28 12:16 event (40pp turnover, LLM variance).
+    max_aggregate_turnover_pct: float = 25.0
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
 
@@ -81,6 +106,95 @@ class LoopState:
     # Event-driven mode: set by the event loop when a news batch fires.
     # Consumed by run_tick to force a fresh rec that sees the batch context.
     pending_news_context: str | None = None
+    # Sticky picker output: cached after the first regen so subsequent
+    # news-triggered regens don't re-shuffle the ticker set. Prevents the
+    # portfolio churn we observed live on 2026-08-28 where every regen ran
+    # the picker again and produced slightly different top-N.
+    frozen_picker_tickers: list[str] | None = None
+    # Baseline prices captured at the last regen; price-move trigger checks
+    # current price vs baseline. Reset on every regen.
+    baseline_prices: dict[str, float] = field(default_factory=dict)
+    # Last regen timestamp (any trigger). Force-regen fires when now -
+    # last_regen_at exceeds cfg.force_regen_seconds.
+    last_regen_at: datetime | None = None
+    # Per-ticker technical stance from the last rec's TechnicalSignal list,
+    # used by the technical-change trigger to detect stance transitions.
+    last_stances: dict[str, str] = field(default_factory=dict)
+
+
+def _price_move_trigger(
+    baseline_prices: dict[str, float],
+    current_prices: dict[str, float],
+    threshold_pct: float,
+) -> tuple[bool, dict[str, float]]:
+    """Any held ticker moved more than threshold_pct from its baseline price?
+
+    Returns (should_fire, per_ticker_move_pct). Uses only tickers present in
+    BOTH baseline and current so a freshly-added position doesn't trigger.
+    """
+    if not baseline_prices:
+        return False, {}
+    moves: dict[str, float] = {}
+    should_fire = False
+    for t, base in baseline_prices.items():
+        cur = current_prices.get(t)
+        if cur is None or base <= 0:
+            continue
+        pct = (cur / base - 1) * 100
+        moves[t] = round(pct, 2)
+        if abs(pct) >= threshold_pct:
+            should_fire = True
+    return should_fire, moves
+
+
+def _technical_stance_changed(
+    prev_stances: dict[str, str],
+    current_stances: dict[str, str],
+) -> tuple[bool, dict[str, str]]:
+    """Any ticker's technical stance flipped since last rec?
+
+    Returns (should_fire, per_ticker_transition) where transitions are
+    "prev -> current" strings only for tickers that actually changed.
+    """
+    changes: dict[str, str] = {}
+    for t, cur in current_stances.items():
+        prev = prev_stances.get(t)
+        if prev and prev != cur:
+            changes[t] = f"{prev} -> {cur}"
+    return bool(changes), changes
+
+
+def _opinion_barely_moved(
+    new_rec: Recommendation,
+    prev_rec: Recommendation | None,
+    threshold_pct: float,
+) -> tuple[bool, dict[str, float]]:
+    """True when EVERY position's target weight changed less than threshold.
+
+    Also returns the per-ticker weight delta so we can log what was skipped.
+    Compares by ticker so a new/dropped position always counts as "moved"
+    (weight change from 0% to X% is meaningful).
+    """
+    if prev_rec is None:
+        return False, {}
+    prev = {p.ticker.upper(): p.weight_pct for p in prev_rec.allocation.positions}
+    new = {p.ticker.upper(): p.weight_pct for p in new_rec.allocation.positions}
+    tickers = set(prev) | set(new)
+    deltas = {t: abs(new.get(t, 0.0) - prev.get(t, 0.0)) for t in tickers}
+    barely = all(d < threshold_pct for d in deltas.values())
+    return barely, deltas
+
+
+def _extract_tickers_from_batch_ctx(batch_ctx: str) -> list[str]:
+    """Pull tickers out of a rendered batch context.
+
+    render_batch_context() emits lines like "- [HOT] NVDA  age=..." so a
+    simple regex over the second column recovers the ticker set.
+    """
+    import re
+
+    tickers = re.findall(r"\[(?:HOT|COOKED|STALE)\]\s+([A-Z][A-Z0-9.\-]+)", batch_ctx)
+    return list(dict.fromkeys(tickers))
 
 
 def _effective_band(base_band_pct: float, confidence: float | None) -> float:
@@ -128,18 +242,28 @@ def _generate_recommendation(
     *,
     as_of: str | None = None,
     news_batch_context: str | None = None,
-) -> Recommendation:
+    pre_picked_tickers: list[str] | None = None,
+) -> tuple[Recommendation, list[str]]:
     """Run the orchestrator once for today's decision. Uses the M6 profile.
 
     news_batch_context: optional rendered HOT/COOKED news events from the
     event-driven loop, forwarded to the allocator prompt.
+
+    pre_picked_tickers: if provided, skip the picker and use these tickers
+    directly. Enables sticky picker output across regens - the loop caches
+    the first regen's picks so news-triggered regens don't churn the
+    portfolio by re-running the picker (mega_tech scores shift by the minute).
+
+    Returns (rec, tickers_used) so callers can cache the ticker set.
     """
     from agentic_investor.orchestrator.graph import run_orchestrator
     from agentic_investor.orchestrator.strategy import load_profile
 
     profile = load_profile(cfg.profile_name)
     tickers = list(cfg.tickers)
-    if cfg.auto:
+    if pre_picked_tickers is not None:
+        tickers = list(pre_picked_tickers)
+    elif cfg.auto:
         from agentic_investor.orchestrator.picker import pick_top_n
         from agentic_investor.universes import get_universe
 
@@ -156,10 +280,12 @@ def _generate_recommendation(
         if profile.name in {"conservative", "moderate", "aggressive"}
         else "moderate"
     )
+    final_tickers = [t.upper() for t in tickers]
     req = OrchestratorRequest(
-        tickers=[t.upper() for t in tickers], amount=cfg.amount, risk=risk,
+        tickers=final_tickers, amount=cfg.amount, risk=risk,
     )
-    return run_orchestrator(req, profile=profile, news_batch_context=news_batch_context)
+    rec = run_orchestrator(req, profile=profile, news_batch_context=news_batch_context)
+    return rec, final_tickers
 
 
 def run_tick(
@@ -191,6 +317,19 @@ def run_tick(
         def price_fetcher(t: str) -> float:  # type: ignore[misc]
             return float(fetch_ohlcv(t, period="1y")["Close"].iloc[-1])
 
+    def _log_tick_cost() -> None:
+        if not session:
+            return
+        after = get_call_stats()
+        cost = after.estimated_cost_usd - stats_before.estimated_cost_usd
+        session.log("tick_cost", {
+            "tick_at": tick_at,
+            "llm_calls": after.n_calls - stats_before.n_calls,
+            "prompt_tokens": after.prompt_tokens - stats_before.prompt_tokens,
+            "completion_tokens": after.completion_tokens - stats_before.completion_tokens,
+            "cost_usd": f"${cost:.4f}",
+        })
+
     # Two-tier: regenerate the recommendation once per day OR when the event
     # loop pushed news batch context onto state; reuse otherwise.
     regenerated = False
@@ -207,11 +346,88 @@ def run_tick(
         logger.info("tick %s: regenerating recommendation (%s)", tick_at, reason)
         if session:
             session.log("regen_start", {"reason": reason, "has_news_batch": bool(batch_ctx)})
-        rec = _generate_recommendation(cfg, news_batch_context=batch_ctx)
+        # Sticky picker: on the first regen the picker runs, we cache its
+        # output; every regen after reuses those tickers so news-triggered
+        # regens don't churn the portfolio. Cache resets across days.
+        is_new_day = state.last_rec_date != today
+        pre_picked = None if is_new_day else state.frozen_picker_tickers
+        # Watchlist promotion: on news-triggered regen, expand the ticker
+        # set to include any non-held candidate mentioned in the batch so
+        # the LLM can propose adding it. Batch context is already in the
+        # prompt; this lets the allocator actually WEIGHT the new name.
+        if batch_ctx and pre_picked is not None:
+            batch_tickers = _extract_tickers_from_batch_ctx(batch_ctx)
+            pre_picked = list(dict.fromkeys([*pre_picked, *batch_tickers]))
+        rec, tickers_used = _generate_recommendation(
+            cfg, news_batch_context=batch_ctx, pre_picked_tickers=pre_picked,
+        )
+        # Opinion-drift filter: on non-first-tick regens, compare new rec's
+        # target weights to the PREVIOUS rec's. Skip the rebalance in TWO
+        # cases: (a) all per-position deltas < threshold (opinion barely
+        # moved, treat as LLM noise), or (b) aggregate turnover exceeds
+        # max_aggregate_turnover_pct (opinion swung too far, likely LLM
+        # variance not real signal).
+        if not is_new_day and state.last_rec_id is not None:
+            from agentic_investor.orchestrator.store import (
+                load_recommendation as _load,
+            )
+            prev_rec = _load(state.last_rec_id)
+            barely, deltas = _opinion_barely_moved(
+                rec, prev_rec, cfg.opinion_drift_threshold_pct,
+            )
+            aggregate_turnover = sum(deltas.values())
+            too_much = aggregate_turnover > cfg.max_aggregate_turnover_pct
+            skip_reason = None
+            if barely:
+                skip_reason = "barely-moved"
+            elif too_much:
+                skip_reason = "aggregate-too-large"
+            if skip_reason is not None:
+                logger.info(
+                    "tick %s: opinion-drift skip (%s) - max delta %.2fpp, "
+                    "aggregate %.1fpp",
+                    tick_at, skip_reason,
+                    max(deltas.values(), default=0.0), aggregate_turnover,
+                )
+                state.pending_news_context = None
+                if session:
+                    session.log("opinion_drift_skip", {
+                        "reason": reason,
+                        "skip_reason": skip_reason,
+                        "max_delta_pp": round(max(deltas.values(), default=0.0), 2),
+                        "aggregate_turnover_pp": round(aggregate_turnover, 2),
+                        "threshold_pp": cfg.opinion_drift_threshold_pct,
+                        "max_aggregate_pp": cfg.max_aggregate_turnover_pct,
+                        "deltas": {t: round(d, 2) for t, d in deltas.items()},
+                    })
+                _log_tick_cost()
+                return TickResult(
+                    tick_at=tick_at, rec_id=state.last_rec_id,
+                    regenerated_rec=False, plan_count=0,
+                    submitted=[], equity=broker.get_account().equity,
+                )
         rec_id = save_rec(rec)
         state.last_rec_id = rec_id
         state.last_rec_date = today
+        state.frozen_picker_tickers = tickers_used  # cache for subsequent regens
         state.pending_news_context = None  # consume it - next tick reuses rec
+        state.last_regen_at = now
+        # Record baseline prices + stances for the price-move + technical
+        # triggers to compare against on subsequent ticks.
+        try:
+            from agentic_investor.tools.market import fetch_ohlcv
+            state.baseline_prices = {
+                p.ticker.upper(): float(
+                    fetch_ohlcv(p.ticker.upper(), period="1y")["Close"].iloc[-1]
+                )
+                for p in rec.allocation.positions
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.warning("baseline price capture failed: %s", e)
+            state.baseline_prices = {}
+        state.last_stances = {
+            s.ticker.upper(): s.stance for s in rec.technical_signals
+        }
         regenerated = True
         if session:
             session.log("regen_done", {
@@ -231,21 +447,6 @@ def run_tick(
     positions = broker.get_positions()
     positions_dollars = {p.ticker.upper(): p.market_value for p in positions}
     record_snapshot(acct, positions)
-
-    def _log_tick_cost() -> None:
-        if not session:
-            return
-        after = get_call_stats()
-        cost = after.estimated_cost_usd - stats_before.estimated_cost_usd
-        session.log("tick_cost", {
-            "tick_at": tick_at,
-            "llm_calls": after.n_calls - stats_before.n_calls,
-            "prompt_tokens": after.prompt_tokens - stats_before.prompt_tokens,
-            "completion_tokens": after.completion_tokens - stats_before.completion_tokens,
-            # String-formatted to preserve small-cost precision in the pretty
-            # console output (jsonl gets the same string; total is fine).
-            "cost_usd": f"${cost:.4f}",
-        })
 
     if not regenerated and not _drift_exceeds_band(
         rec, positions_dollars, acct.equity, cfg.band_abs_pct
@@ -354,7 +555,19 @@ def run_event_loop(
     decision_state = DecisionState()
     event_q: _q.Queue = _q.Queue()
 
-    initial_tickers = list(cfg.tickers) or ["SPY"]  # streamer needs a subscription
+    # Streamer subscribes to the FULL universe pool (or explicit tickers) so
+    # we get news for candidates too, not just held names. This is what lets
+    # the LLM discover better opportunities via watchlist news.
+    if cfg.tickers:
+        initial_tickers = list(cfg.tickers)
+    elif cfg.auto:
+        try:
+            from agentic_investor.universes import get_universe
+            initial_tickers = get_universe(cfg.universe)
+        except Exception:  # noqa: BLE001
+            initial_tickers = ["SPY"]
+    else:
+        initial_tickers = ["SPY"]
     streamer = NewsStreamer(initial_tickers, event_queue=event_q)
     streamer.start()
     if session:
@@ -390,7 +603,92 @@ def run_event_loop(
             interval_due = (
                 (now - last_interval_tick).total_seconds() >= cfg.interval_seconds
             )
-            if fire or interval_due:
+
+            # Extra triggers layered on top of news + interval:
+            # (a) price-move: any held ticker moved > threshold from baseline
+            # (b) force-regen: last regen was more than force_regen_seconds ago
+            # (c) technical-stance: any held ticker's technical stance flipped
+            price_ctx = ""
+            price_fire = False
+            if not fire and state.baseline_prices:
+                try:
+                    from agentic_investor.tools.market import fetch_ohlcv
+                    cur_prices = {}
+                    for t in state.baseline_prices:
+                        try:
+                            cur_prices[t] = float(
+                                fetch_ohlcv(t, period="1y")["Close"].iloc[-1]
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                    hit, moves = _price_move_trigger(
+                        state.baseline_prices, cur_prices,
+                        cfg.price_move_threshold_pct,
+                    )
+                    if hit:
+                        moved = []
+                        for t, m in moves.items():
+                            if abs(m) >= cfg.price_move_threshold_pct:
+                                base = state.baseline_prices[t]
+                                cur = cur_prices[t]
+                                moved.append(
+                                    f"{t}: {m:+.2f}% (${base:.2f} -> ${cur:.2f})"
+                                )
+                        price_ctx = "Price-move alert since last decision:\n" + "\n".join(
+                            f"- {line}" for line in moved
+                        )
+                        price_fire = True
+                        reason = "price-move"
+                        if session:
+                            session.log("price_move_trigger", {"moves": moves})
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("price-move check failed: %s", e)
+
+            force_fire = False
+            if not fire and not price_fire and cfg.force_regen_seconds > 0:
+                if state.last_regen_at is None:
+                    force_fire = False  # first regen handled by is_new_day path
+                else:
+                    age = (now - state.last_regen_at).total_seconds()
+                    if age >= cfg.force_regen_seconds:
+                        force_fire = True
+                        reason = "force-regen"
+                        if session:
+                            session.log("force_regen_trigger", {
+                                "seconds_since_last": int(age),
+                            })
+
+            stance_fire = False
+            stance_ctx = ""
+            if (not fire and not price_fire and not force_fire
+                    and cfg.enable_technical_change_trigger
+                    and state.last_stances):
+                try:
+                    from agentic_investor.agents.technical import analyze_technical
+                    from agentic_investor.tools.market import get_market_snapshot
+                    cur_stances = {}
+                    for t in state.last_stances:
+                        try:
+                            snap = get_market_snapshot(t)
+                            sig = analyze_technical(snap)
+                            cur_stances[t] = sig.stance
+                        except Exception:  # noqa: BLE001
+                            pass
+                    hit, changes = _technical_stance_changed(
+                        state.last_stances, cur_stances,
+                    )
+                    if hit:
+                        stance_ctx = "Technical stance change since last decision:\n" + "\n".join(
+                            f"- {t}: {c}" for t, c in changes.items()
+                        )
+                        stance_fire = True
+                        reason = "technical-change"
+                        if session:
+                            session.log("technical_change_trigger", {"changes": changes})
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("technical-change check failed: %s", e)
+
+            if fire or price_fire or force_fire or stance_fire or interval_due:
                 if fire:
                     batch = build_batch(
                         decision_state, now,
@@ -408,6 +706,24 @@ def run_event_loop(
                             "context_chars": len(ctx),
                             "cooked_with_reaction": cooked_with_reaction,
                         })
+                elif price_fire or stance_fire:
+                    # Non-news trigger: forge a minimal batch_context so the
+                    # allocator prompt sees WHY it's being re-invoked.
+                    state.pending_news_context = "\n\n".join(
+                        c for c in (price_ctx, stance_ctx) if c
+                    ) or None
+                    if session:
+                        session.log("decision_moment", {
+                            "reason": reason,
+                            "context_chars": len(state.pending_news_context or ""),
+                        })
+                elif force_fire:
+                    state.pending_news_context = (
+                        "Force-regen: no news / price / technical trigger in the "
+                        f"last {cfg.force_regen_seconds // 60} minutes; re-evaluate."
+                    )
+                    if session:
+                        session.log("decision_moment", {"reason": reason})
                 try:
                     result = run_tick(cfg, state, broker, now=now, session=session)
                     state.ticks_run += 1
