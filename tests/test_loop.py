@@ -6,6 +6,7 @@ from agentic_investor.orchestrator.loop import (
     LoopConfig,
     LoopState,
     _drift_exceeds_band,
+    _effective_band,
     run_loop,
     run_tick,
 )
@@ -94,6 +95,60 @@ def test_drift_exceeds_band_false_when_within_tolerance():
     ) is False
 
 
+def test_effective_band_narrows_with_high_confidence():
+    # confidence=0.9 -> factor 0.6 -> 3.0
+    assert _effective_band(5.0, confidence=0.9) < 5.0
+    assert _effective_band(5.0, confidence=0.9) == 5.0 * 0.6
+
+
+def test_effective_band_widens_with_low_confidence():
+    # confidence=0.2 -> factor 1.3 -> 6.5
+    assert _effective_band(5.0, confidence=0.2) > 5.0
+    assert _effective_band(5.0, confidence=0.2) == 5.0 * 1.3
+
+
+def test_effective_band_neutral_at_half_confidence():
+    assert _effective_band(5.0, confidence=0.5) == 5.0
+
+
+def test_effective_band_defaults_to_base_when_confidence_missing():
+    assert _effective_band(5.0, confidence=None) == 5.0
+
+
+def test_low_confidence_widens_band_and_suppresses_drift_trigger():
+    # 3pp drift; base band=5pp normally does NOT trigger anyway.
+    # But test at 5.5pp drift with different confidence:
+    #   confidence=0.2 -> effective band 6.5 -> 5.5 NOT trigger.
+    #   confidence=0.9 -> effective band 3.0 -> 5.5 DOES trigger.
+    rec_low = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(
+                ticker="AAPL", weight_pct=40, dollars=4000,
+                rationale="x", confidence=0.2,
+            )],
+            cash_pct=60, cash_dollars=6000, portfolio_rationale="x",
+        ),
+    )
+    assert _drift_exceeds_band(
+        rec_low, {"AAPL": 4550}, total_equity=10_000, band_abs_pct=5.0
+    ) is False
+
+    rec_high = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(
+                ticker="AAPL", weight_pct=40, dollars=4000,
+                rationale="x", confidence=0.9,
+            )],
+            cash_pct=60, cash_dollars=6000, portfolio_rationale="x",
+        ),
+    )
+    assert _drift_exceeds_band(
+        rec_high, {"AAPL": 4550}, total_equity=10_000, band_abs_pct=5.0
+    ) is True
+
+
 def test_drift_true_when_position_no_longer_in_target():
     rec = _rec()
     # Portfolio still holds 30% TSLA which isn't in target - big drift.
@@ -106,7 +161,7 @@ def test_drift_true_when_position_no_longer_in_target():
 def test_tick_regenerates_rec_on_first_run_and_submits_orders(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop._generate_recommendation",
-        lambda cfg, as_of=None: _rec(cfg.amount),
+        lambda cfg, as_of=None, news_batch_context=None: _rec(cfg.amount),
     )
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop.record_snapshot",
@@ -139,7 +194,7 @@ def test_tick_regenerates_rec_on_first_run_and_submits_orders(tmp_path, monkeypa
 def test_tick_reuses_rec_within_same_day_and_skips_when_no_drift(monkeypatch):
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop._generate_recommendation",
-        lambda cfg, as_of=None: _rec(cfg.amount),
+        lambda cfg, as_of=None, news_batch_context=None: _rec(cfg.amount),
     )
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_snapshot", lambda *a, **k: 1)
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_order", lambda *a, **k: None)
@@ -173,7 +228,7 @@ def test_tick_reuses_rec_within_same_day_and_skips_when_no_drift(monkeypatch):
 def test_dry_run_computes_plan_but_submits_no_orders(monkeypatch):
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop._generate_recommendation",
-        lambda cfg, as_of=None: _rec(cfg.amount),
+        lambda cfg, as_of=None, news_batch_context=None: _rec(cfg.amount),
     )
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_snapshot", lambda *a, **k: 1)
 
@@ -193,7 +248,7 @@ def test_dry_run_computes_plan_but_submits_no_orders(monkeypatch):
 def test_loop_exits_when_market_closed_and_once_flag(monkeypatch):
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop._generate_recommendation",
-        lambda cfg, as_of=None: _rec(cfg.amount),
+        lambda cfg, as_of=None, news_batch_context=None: _rec(cfg.amount),
     )
     cfg = LoopConfig(once=True, tickers=["AAPL"])
     broker = FakeBroker(is_open=False)
@@ -206,7 +261,7 @@ def test_loop_exits_when_market_closed_and_once_flag(monkeypatch):
 def test_loop_runs_one_tick_then_exits_with_once(monkeypatch):
     monkeypatch.setattr(
         "agentic_investor.orchestrator.loop._generate_recommendation",
-        lambda cfg, as_of=None: _rec(cfg.amount),
+        lambda cfg, as_of=None, news_batch_context=None: _rec(cfg.amount),
     )
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_snapshot", lambda *a, **k: 1)
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_order", lambda *a, **k: None)

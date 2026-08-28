@@ -39,6 +39,10 @@ class Position(BaseModel):
     weight_pct: float = Field(ge=0.0, le=100.0)
     dollars: float = Field(ge=0.0)
     rationale: str
+    # LLM's stated conviction for this weight (0.0-1.0). Optional so pre-M7
+    # allocations without confidence still validate. Rebalance bands scale
+    # inversely with confidence: high conviction -> tighter band -> act more.
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class Allocation(BaseModel):
@@ -179,3 +183,7 @@ class GraphState(TypedDict, total=False):
     market_snapshots: dict[str, object]  # dict[str, MarketSnapshot]
     allocation: Allocation
     violations: list[str]
+    # Event-driven mode: fresh news events tagged HOT/COOKED with reaction_pct
+    # rendered as a text block; None or empty when the daily orchestrator runs
+    # without event context.
+    news_batch_context: str

@@ -7,6 +7,7 @@ from agentic_investor.orchestrator.decision_engine import (
     _tag,
     build_batch,
     ingest,
+    render_batch_context,
     should_fire,
 )
 from agentic_investor.tools.news_stream import NewsEvent
@@ -91,6 +92,31 @@ def test_build_batch_tags_and_resets_state():
     assert state.unprocessed == []
     assert state.last_batch_window_started is None
     assert state.last_fire_at == now
+
+
+def test_render_batch_context_groups_events_by_age_tag():
+    now = datetime.now(UTC)
+    state = DecisionState(unprocessed=[
+        _news("AAPL", 1, headline="Apple beats earnings"),
+        _news("NVDA", 16, headline="Nvidia downgraded by Barclays"),
+        _news("MSFT", 90, headline="Old MSFT news"),
+    ])
+    state.last_batch_window_started = now - timedelta(seconds=60)
+    batch = build_batch(state, now)
+    text = render_batch_context(batch)
+    # Each ticker + age tag should appear; ordering is HOT then COOKED then STALE.
+    assert "[HOT] AAPL" in text
+    assert "Apple beats earnings" in text
+    assert "[COOKED] NVDA" in text
+    assert "[STALE] MSFT" in text
+    # HOT should come before COOKED which should come before STALE.
+    assert text.index("[HOT]") < text.index("[COOKED]") < text.index("[STALE]")
+
+
+def test_render_batch_context_empty_when_no_events():
+    now = datetime.now(UTC)
+    batch = build_batch(DecisionState(), now)
+    assert render_batch_context(batch) == ""
 
 
 def test_ingest_opens_batch_window_on_first_event():

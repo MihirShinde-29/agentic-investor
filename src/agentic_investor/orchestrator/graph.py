@@ -56,6 +56,11 @@ How to reason:
 - If most signals are neutral or bearish, lean on cash.
 - In each position rationale, cite the specific stances and drivers you used.
 - In portfolio_rationale, summarize how the mix fits the risk band and target.
+- For each position also emit `confidence` in [0.0, 1.0] reflecting how sure
+  you are of that weight. High (0.8-1.0) = both agents strongly agree, thesis
+  is clear. Medium (0.5-0.7) = one strong signal, one weak or missing.
+  Low (0.2-0.4) = conflicting signals, forced-choice sizing. The rebalancer
+  uses this to widen bands on low-confidence positions (anti-churn).
 """
 
 
@@ -125,6 +130,17 @@ def _messages(state: GraphState) -> list[dict]:
     signals = _summarize_signals(
         state.get("technical_signals", []), state.get("news_signals", [])
     )
+    batch_ctx = (state.get("news_batch_context") or "").strip()
+    batch_block = (
+        f"\nBreaking-news events (from live stream):\n{batch_ctx}\n"
+        "Weight HOT news toward scout sizing (~50% of your intended target). "
+        "Weight COOKED news toward full sizing informed by news_reaction_pct: "
+        "high positive reaction = already priced in, avoid chasing; flat despite "
+        "bullish news = underreaction, edge remains; sharp negative reaction on "
+        "bad news = thesis re-evaluation warranted.\n"
+        if batch_ctx
+        else ""
+    )
     return [
         {"role": "system", "content": ALLOCATOR_SYSTEM},
         {
@@ -137,7 +153,8 @@ def _messages(state: GraphState) -> list[dict]:
                 f"{profile.max_single_pct:.0f}%, cash floor "
                 f"{profile.cash_floor_pct:.0f}%)\n"
                 f"  target:  {req.target}\n\n"
-                f"Signals (JSON, keyed by ticker):\n{signals}\n\n"
+                f"Signals (JSON, keyed by ticker):\n{signals}\n"
+                f"{batch_block}\n"
                 "Produce a valid Allocation."
             ),
         },
@@ -190,11 +207,20 @@ def _get_graph():
 def run_orchestrator(
     request: OrchestratorRequest,
     profile: StrategyProfile | None = None,
+    *,
+    news_batch_context: str | None = None,
 ) -> Recommendation:
-    """Run the orchestrator graph. If profile is None, uses the risk-tier preset."""
+    """Run the orchestrator graph. If profile is None, uses the risk-tier preset.
+
+    news_batch_context is an optional text block from the event-driven loop
+    (HOT/COOKED news events with reaction_pct); when set, it flows into the
+    allocator prompt so the LLM can weight breaking news in its decision.
+    """
     initial: dict = {"request": request}
     if profile is not None:
         initial["profile"] = profile
+    if news_batch_context:
+        initial["news_batch_context"] = news_batch_context
     final = _get_graph().invoke(initial)
     return Recommendation(
         request=request,

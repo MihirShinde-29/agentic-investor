@@ -77,6 +77,24 @@ class LoopState:
     ticks_run: int = 0
     orders_submitted: int = 0
     started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    # Event-driven mode: set by the event loop when a news batch fires.
+    # Consumed by run_tick to force a fresh rec that sees the batch context.
+    pending_news_context: str | None = None
+
+
+def _effective_band(base_band_pct: float, confidence: float | None) -> float:
+    """Scale the rebalance band by inverse LLM confidence.
+
+    Formula: factor = 1.5 - confidence  (in [0.5, 1.5])
+    - High conviction 1.0 -> 0.5x base   (act on smaller drift)
+    - Neutral        0.5 -> 1.0x base   (unchanged)
+    - Low conviction 0.0 -> 1.5x base   (anti-churn while uncertain)
+    Missing confidence -> use base band unchanged (backward compat).
+    """
+    if confidence is None:
+        return base_band_pct
+    c = max(0.0, min(1.0, confidence))
+    return base_band_pct * (1.5 - c)
 
 
 def _drift_exceeds_band(
@@ -85,17 +103,21 @@ def _drift_exceeds_band(
     total_equity: float,
     band_abs_pct: float,
 ) -> bool:
-    """Any position (target OR current) drifted more than band_abs_pct from target?"""
+    """Any position drifted more than its (confidence-adjusted) band from target?"""
     if total_equity <= 0:
         return True
     target = {p.ticker.upper(): p.weight_pct for p in rec.allocation.positions}
+    confidence = {p.ticker.upper(): p.confidence for p in rec.allocation.positions}
     current_pct = {
         t: (v / total_equity) * 100.0 for t, v in positions_dollars.items()
     }
     tickers = set(target) | set(current_pct)
     for t in tickers:
         drift = abs(target.get(t, 0.0) - current_pct.get(t, 0.0))
-        if drift >= band_abs_pct:
+        # Positions the LLM dropped entirely get the base band (no confidence
+        # is meaningful for a zeroed-out position).
+        band = _effective_band(band_abs_pct, confidence.get(t))
+        if drift >= band:
             return True
     return False
 
@@ -104,8 +126,13 @@ def _generate_recommendation(
     cfg: LoopConfig,
     *,
     as_of: str | None = None,
+    news_batch_context: str | None = None,
 ) -> Recommendation:
-    """Run the orchestrator once for today's decision. Uses the M6 profile."""
+    """Run the orchestrator once for today's decision. Uses the M6 profile.
+
+    news_batch_context: optional rendered HOT/COOKED news events from the
+    event-driven loop, forwarded to the allocator prompt.
+    """
     from agentic_investor.orchestrator.graph import run_orchestrator
     from agentic_investor.orchestrator.strategy import load_profile
 
@@ -131,7 +158,7 @@ def _generate_recommendation(
     req = OrchestratorRequest(
         tickers=[t.upper() for t in tickers], amount=cfg.amount, risk=risk,
     )
-    return run_orchestrator(req, profile=profile)
+    return run_orchestrator(req, profile=profile, news_batch_context=news_batch_context)
 
 
 def run_tick(
@@ -160,22 +187,34 @@ def run_tick(
         def price_fetcher(t: str) -> float:  # type: ignore[misc]
             return float(fetch_ohlcv(t, period="1y")["Close"].iloc[-1])
 
-    # Two-tier: regenerate the recommendation once per day; reuse otherwise.
+    # Two-tier: regenerate the recommendation once per day OR when the event
+    # loop pushed news batch context onto state; reuse otherwise.
     regenerated = False
-    if state.last_rec_date != today or state.last_rec_id is None:
-        logger.info("tick %s: regenerating recommendation for %s", tick_at, today)
+    batch_ctx = state.pending_news_context
+    if (
+        state.last_rec_date != today
+        or state.last_rec_id is None
+        or batch_ctx
+    ):
+        reason = (
+            "news-batch" if batch_ctx
+            else ("new-day" if state.last_rec_date != today else "first-tick")
+        )
+        logger.info("tick %s: regenerating recommendation (%s)", tick_at, reason)
         if session:
-            session.log("regen_start", {"reason": "new-day-or-first-tick"})
-        rec = _generate_recommendation(cfg)
+            session.log("regen_start", {"reason": reason, "has_news_batch": bool(batch_ctx)})
+        rec = _generate_recommendation(cfg, news_batch_context=batch_ctx)
         rec_id = save_rec(rec)
         state.last_rec_id = rec_id
         state.last_rec_date = today
+        state.pending_news_context = None  # consume it - next tick reuses rec
         regenerated = True
         if session:
             session.log("regen_done", {
                 "rec_id": rec_id,
                 "targets": {p.ticker: p.weight_pct for p in rec.allocation.positions},
                 "cash_pct": rec.allocation.cash_pct,
+                "trigger": reason,
             })
     else:
         from agentic_investor.orchestrator.store import load_recommendation
@@ -283,6 +322,7 @@ def run_event_loop(
         build_batch,
         drain_queue,
         ingest,
+        render_batch_context,
         should_fire,
     )
     from agentic_investor.tools.news_stream import NewsStreamer
@@ -326,10 +366,13 @@ def run_event_loop(
             if fire or interval_due:
                 if fire:
                     batch = build_batch(decision_state, now)
+                    ctx = render_batch_context(batch)
+                    state.pending_news_context = ctx or None
                     if session:
                         session.log("decision_moment", {
                             "reason": reason,
                             **batch.summary(),
+                            "context_chars": len(ctx),
                         })
                 try:
                     result = run_tick(cfg, state, broker, now=now, session=session)

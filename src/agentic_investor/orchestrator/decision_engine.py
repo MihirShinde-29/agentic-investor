@@ -160,6 +160,30 @@ def build_batch(
     return batch
 
 
+def render_batch_context(batch: DecisionBatch) -> str:
+    """Render a DecisionBatch into a text block for the allocator prompt.
+
+    Format is deliberately compact so it drops into the existing prompt without
+    ballooning tokens. Each line names the tag, ticker, headline snippet, age,
+    and news_reaction_pct where available.
+    """
+    lines: list[str] = []
+    for group_name, group in (("HOT", batch.hot), ("COOKED", batch.cooked), ("STALE", batch.stale)):
+        for item in group:
+            e = item.event
+            headline = (e.headline or "").strip()[:120]
+            age_min = int(item.age_seconds // 60)
+            reaction = (
+                f", reaction={item.reaction_pct:+.2f}%"
+                if item.reaction_pct is not None
+                else ""
+            )
+            lines.append(
+                f"- [{group_name}] {e.ticker}  age={age_min}m{reaction}: {headline}"
+            )
+    return "\n".join(lines) if lines else ""
+
+
 def ingest(state: DecisionState, events: list[NewsEvent], now: datetime) -> None:
     """Accept new events into the state; open batch window if first in a while."""
     if not events:
