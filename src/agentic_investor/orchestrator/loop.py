@@ -603,8 +603,14 @@ def run_tick(
     positions_dollars = {p.ticker.upper(): p.market_value for p in positions}
     record_snapshot(acct, positions)
 
+    # Cap the invested base at cfg.amount so drift/rebalance math matches
+    # what the user asked to trade with (not the full account equity).
+    allocation_base_for_drift = (
+        min(cfg.amount, acct.equity) if cfg.amount > 0 else acct.equity
+    )
+
     if not regenerated and not _drift_exceeds_band(
-        rec, positions_dollars, acct.equity, cfg.band_abs_pct
+        rec, positions_dollars, allocation_base_for_drift, cfg.band_abs_pct
     ):
         logger.info(
             "tick %s: no drift beyond %.1fpp - nothing to trade", tick_at, cfg.band_abs_pct
@@ -649,8 +655,12 @@ def run_tick(
         cur = prices.get(t)
         if baseline and cur and baseline > 0:
             ticker_recent_moves[t] = (cur / baseline - 1) * 100
+    # --amount caps invested capital when the account is bigger than what
+    # the user asked to trade with. If cfg.amount >= acct.equity we're
+    # unconstrained (allocate against full account); otherwise cap here.
+    allocation_base = min(cfg.amount, acct.equity) if cfg.amount > 0 else acct.equity
     plans = compute_trade_plan(
-        rec, positions_dollars, acct.equity,
+        rec, positions_dollars, allocation_base,
         prices=prices, min_trade_dollars=cfg.min_trade_dollars,
         recent_trades=recent_typed,
         cooldown_seconds=getattr(cfg, "cooldown_seconds", 900),
