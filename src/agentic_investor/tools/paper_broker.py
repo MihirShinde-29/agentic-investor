@@ -90,6 +90,7 @@ class PaperBroker(Protocol):
         take_profit_pct: float | None = None,
     ) -> PaperOrder: ...
     def cancel_order(self, order_id: str) -> None: ...
+    def close_position(self, ticker: str) -> PaperOrder: ...
 
 
 # Real Alpaca client.
@@ -243,6 +244,11 @@ class AlpacaPaperBroker:
 
     def cancel_order(self, order_id: str) -> None:
         self._client.cancel_order_by_id(order_id)
+
+    def close_position(self, ticker: str) -> PaperOrder:
+        """Full liquidation of a position - Alpaca handles fractional shares."""
+        raw = self._client.close_position(ticker.upper())
+        return _alpaca_order_to_domain(raw)
 
     def _latest_trade_price(self, ticker: str) -> float:
         return get_latest_price(ticker)

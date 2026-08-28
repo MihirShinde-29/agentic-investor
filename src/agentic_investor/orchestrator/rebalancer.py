@@ -180,10 +180,20 @@ def execute_trade_plan(
     take_profit_pct: float | None = None,
     day: str | None = None,
 ) -> list[PaperOrder]:
-    """Submit each plan through the broker. Idempotent by client_order_id."""
+    """Submit each plan through the broker. Idempotent by client_order_id.
+
+    Full-exit SELLs (target_pct == 0) are routed via broker.close_position()
+    so Alpaca liquidates exact holdings without leaving fractional-share dust.
+    """
     day = day or datetime.now(UTC).strftime("%Y-%m-%d")
     submitted: list[PaperOrder] = []
     for p in plans:
+        if p.side == "sell" and p.target_pct == 0.0:
+            try:
+                submitted.append(broker.close_position(p.ticker))
+                continue
+            except Exception:  # noqa: BLE001 - fall back to computed-qty sell
+                pass
         coid = _client_order_id(rec_id, p.ticker, p.side, day)
         order = broker.submit_market_order(
             p.ticker,

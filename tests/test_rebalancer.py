@@ -106,6 +106,7 @@ def test_client_order_id_is_stable_across_same_day_retries():
 class _FakeBroker:
     def __init__(self):
         self.calls = []
+        self.close_calls = []
 
     def submit_market_order(self, ticker, side, qty, *, client_order_id=None,
                             stop_loss_pct=None, take_profit_pct=None):
@@ -118,6 +119,15 @@ class _FakeBroker:
         return PaperOrder(
             id=f"broker-{len(self.calls)}", client_order_id=client_order_id,
             ticker=ticker, side=side, qty=qty,
+            order_type="market", status="accepted",
+            submitted_at="2026-08-27T10:00:00Z",
+        )
+
+    def close_position(self, ticker):
+        self.close_calls.append(ticker)
+        return PaperOrder(
+            id=f"close-{len(self.close_calls)}", client_order_id="close",
+            ticker=ticker, side="sell", qty=0.0,
             order_type="market", status="accepted",
             submitted_at="2026-08-27T10:00:00Z",
         )
@@ -412,6 +422,25 @@ def test_force_loss_cut_replaces_partial_trim_with_full_exit():
     assert nvda_plan.side == "sell"
     assert nvda_plan.dollars == 2500  # full exit, not partial
     assert "force loss-cut" in nvda_plan.reason
+
+
+def test_full_exit_sell_routes_via_close_position():
+    """target_pct == 0 should trigger broker.close_position (no fractional dust)."""
+    # Rec doesn't include TSLA (dropped from portfolio); we hold $3000 of TSLA.
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 0, "NVDA": 0, "TSLA": 3000},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200, "TSLA": 250},
+        min_trade_dollars=1.0,
+    )
+    tsla_plan = next(p for p in plans if p.ticker == "TSLA")
+    assert tsla_plan.target_pct == 0.0
+    broker = _FakeBroker()
+    execute_trade_plan(plans, broker, rec_id=1, day="2026-08-28")
+    # TSLA should be closed via close_position, not submit_market_order
+    assert "TSLA" in broker.close_calls
+    assert not any(c["ticker"] == "TSLA" for c in broker.calls)
 
 
 def test_execute_only_attaches_stops_to_buy_side():
