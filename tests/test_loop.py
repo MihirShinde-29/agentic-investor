@@ -7,6 +7,7 @@ from agentic_investor.orchestrator.loop import (
     LoopState,
     _drift_exceeds_band,
     _effective_band,
+    _filter_should_skip,
     _opinion_barely_moved,
     _price_move_trigger,
     _technical_stance_changed,
@@ -284,6 +285,109 @@ def test_technical_stance_no_change_returns_false():
     fire, changes = _technical_stance_changed(prev, cur)
     assert fire is False
     assert changes == {}
+
+
+def _rec_with_weights(**kw) -> Recommendation:
+    positions = [
+        Position(ticker=t, weight_pct=w, dollars=w * 100, rationale="x",
+                 confidence=kw.get("confidences", {}).get(t, 0.5))
+        for t, w in kw.get("weights", {}).items()
+    ]
+    return Recommendation(
+        request=OrchestratorRequest(tickers=list(kw.get("weights", {})),
+                                    amount=10_000),
+        allocation=Allocation(
+            positions=positions,
+            cash_pct=kw.get("cash", 100 - sum(kw.get("weights", {}).values())),
+            cash_dollars=0, portfolio_rationale="x",
+        ),
+    )
+
+
+def test_opinion_barely_moved_now_includes_cash_delta():
+    prev = _rec_with_weights(weights={"AAPL": 40, "NVDA": 40}, cash=20)
+    # Cash rotates 5pp - filter now catches this in deltas
+    new = _rec_with_weights(weights={"AAPL": 40, "NVDA": 45}, cash=15)
+    barely, deltas = _opinion_barely_moved(new, prev, threshold_pct=3.0)
+    assert "__cash__" in deltas
+    assert deltas["__cash__"] == 5.0
+    assert barely is False  # cash delta 5pp exceeds 3pp threshold
+
+
+def test_filter_skips_when_avg_drift_high():
+    prev = _rec_with_weights(weights={"AAPL": 30, "NVDA": 30, "MSFT": 30}, cash=10)
+    # All 3 positions moved 6pp - avg drift 6pp, above 5pp default
+    new = _rec_with_weights(weights={"AAPL": 36, "NVDA": 24, "MSFT": 36}, cash=4)
+    skip, reason, deltas, stats = _filter_should_skip(
+        new, prev,
+        opinion_drift_threshold_pct=3.0,
+        max_avg_drift_pct=5.0,
+        max_single_delta_pct=15.0,
+    )
+    assert skip is True
+    assert reason == "avg-drift-too-high"
+    assert stats["avg_drift"] == 6.0
+
+
+def test_filter_allows_max_delta_when_news_covers_ticker():
+    prev = _rec_with_weights(weights={"AAPL": 20, "NVDA": 60}, cash=20)
+    new = _rec_with_weights(weights={"AAPL": 20, "NVDA": 40}, cash=40,
+                            confidences={"NVDA": 0.4})
+    # NVDA moved 20pp (over 15pp threshold), low confidence.
+    # But news specifically for NVDA - allowed.
+    skip, reason, _, _ = _filter_should_skip(
+        new, prev,
+        opinion_drift_threshold_pct=3.0,
+        max_avg_drift_pct=25.0,  # keep avg check relaxed
+        max_single_delta_pct=15.0,
+        news_batch_tickers={"NVDA"},
+    )
+    assert skip is False
+
+
+def test_filter_blocks_max_delta_when_no_news_and_low_confidence():
+    prev = _rec_with_weights(weights={"AAPL": 20, "NVDA": 60}, cash=20)
+    new = _rec_with_weights(weights={"AAPL": 20, "NVDA": 40}, cash=40,
+                            confidences={"NVDA": 0.4})
+    # NVDA moved 20pp, no news for NVDA, low confidence -> blocked.
+    skip, reason, _, _ = _filter_should_skip(
+        new, prev,
+        opinion_drift_threshold_pct=3.0,
+        max_avg_drift_pct=25.0,
+        max_single_delta_pct=15.0,
+        news_batch_tickers=set(),
+    )
+    assert skip is True
+    assert reason == "max-delta-unjustified"
+
+
+def test_filter_allows_max_delta_when_high_confidence():
+    prev = _rec_with_weights(weights={"AAPL": 20, "NVDA": 60}, cash=20)
+    new = _rec_with_weights(weights={"AAPL": 20, "NVDA": 40}, cash=40,
+                            confidences={"NVDA": 0.85})
+    # NVDA moved 20pp, no news, but HIGH confidence -> allowed.
+    skip, _, _, _ = _filter_should_skip(
+        new, prev,
+        opinion_drift_threshold_pct=3.0,
+        max_avg_drift_pct=25.0,
+        max_single_delta_pct=15.0,
+        confidence_by_ticker={"NVDA": 0.85},
+    )
+    assert skip is False
+
+
+def test_filter_blocks_max_delta_when_no_news_low_conf_from_lookup():
+    prev = _rec_with_weights(weights={"AAPL": 20, "NVDA": 60}, cash=20)
+    new = _rec_with_weights(weights={"AAPL": 20, "NVDA": 40}, cash=40)
+    skip, reason, _, _ = _filter_should_skip(
+        new, prev,
+        opinion_drift_threshold_pct=3.0,
+        max_avg_drift_pct=25.0,
+        max_single_delta_pct=15.0,
+        confidence_by_ticker={"NVDA": 0.4},
+    )
+    assert skip is True
+    assert reason == "max-delta-unjustified"
 
 
 def test_loop_state_round_trips_through_dict():

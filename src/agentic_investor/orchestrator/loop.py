@@ -75,7 +75,16 @@ class LoopConfig:
     # than this % of the portfolio in total (sum of |per-ticker deltas|),
     # skip - the LLM's opinion swung too far to trust. Catches full-portfolio
     # flips like the 2026-08-28 12:16 event (40pp turnover, LLM variance).
+    # DEPRECATED - kept for backward compat; new filter uses avg + max deltas.
     max_aggregate_turnover_pct: float = 25.0
+    # Filter v2 (0i + 0h): scale-invariant + context-aware skip logic.
+    # avg_drift = sum(|per-position deltas|) / n_tickers - flags portfolio-
+    # wide churn independent of ticker count. Default 5pp.
+    max_avg_drift_pct: float = 5.0
+    # max_single_delta - flags dramatic single-position moves. Only skips
+    # when the moving ticker is NOT in news_batch AND confidence < 0.7
+    # (otherwise the move is justified). Default 15pp.
+    max_single_delta_pct: float = 15.0
     # Temporal cooldown on trade reversals: any proposed trade on the
     # opposite side of a recent trade for the same ticker is vetoed for
     # cooldown_seconds unless the ticker appears in the current news batch
@@ -225,7 +234,9 @@ def _opinion_barely_moved(
 ) -> tuple[bool, dict[str, float]]:
     """True when EVERY position's target weight changed less than threshold.
 
-    Also returns the per-ticker weight delta so we can log what was skipped.
+    Also returns the per-ticker weight delta INCLUDING cash so callers get
+    a complete picture (0k fix - cash was excluded from deltas before, so
+    a 5pp cash rotation slipped through the aggregate check).
     Compares by ticker so a new/dropped position always counts as "moved"
     (weight change from 0% to X% is meaningful).
     """
@@ -235,8 +246,69 @@ def _opinion_barely_moved(
     new = {p.ticker.upper(): p.weight_pct for p in new_rec.allocation.positions}
     tickers = set(prev) | set(new)
     deltas = {t: abs(new.get(t, 0.0) - prev.get(t, 0.0)) for t in tickers}
+    # 0k: include cash rotation in the deltas dict so aggregate turnover
+    # calculations are accurate. Uses "__cash__" as a sentinel key that
+    # doesn't collide with real tickers.
+    cash_delta = abs(new_rec.allocation.cash_pct - prev_rec.allocation.cash_pct)
+    if cash_delta > 0:
+        deltas["__cash__"] = cash_delta
     barely = all(d < threshold_pct for d in deltas.values())
     return barely, deltas
+
+
+def _filter_should_skip(
+    new_rec: Recommendation,
+    prev_rec: Recommendation | None,
+    *,
+    opinion_drift_threshold_pct: float,
+    max_avg_drift_pct: float,
+    max_single_delta_pct: float,
+    news_batch_tickers: set[str] | None = None,
+    confidence_by_ticker: dict[str, float] | None = None,
+) -> tuple[bool, str, dict[str, float], dict[str, float]]:
+    """Filter v2: scale-invariant + context-aware skip decision.
+
+    Skip if:
+      (a) all deltas < opinion_drift_threshold (LLM noise floor)
+      (b) avg_drift > max_avg_drift_pct (portfolio-wide churn)
+      (c) max_single_delta > max_single_delta_pct AND the moving ticker is
+          NOT in news_batch_tickers AND its confidence < 0.7
+          (dramatic single move without justification)
+
+    Returns (should_skip, skip_reason, deltas, stats). stats has
+    "avg_drift", "max_delta", "max_delta_ticker", "n_tickers".
+    """
+    barely, deltas = _opinion_barely_moved(
+        new_rec, prev_rec, opinion_drift_threshold_pct
+    )
+    if barely:
+        return True, "barely-moved", deltas, {}
+    # Exclude cash from per-position stats (avg/max) since cash isn't a
+    # ticker with signal - it's the residual.
+    position_deltas = {k: v for k, v in deltas.items() if k != "__cash__"}
+    n = len(position_deltas)
+    if n == 0:
+        return False, "", deltas, {}
+    max_single = max(position_deltas.values())
+    max_ticker = max(position_deltas, key=lambda k: position_deltas[k])
+    avg_drift = sum(position_deltas.values()) / n
+    stats = {
+        "avg_drift": round(avg_drift, 2),
+        "max_delta": round(max_single, 2),
+        "max_delta_ticker": max_ticker,
+        "n_tickers": n,
+    }
+    # Rule (b): scale-invariant avg-drift check
+    if avg_drift > max_avg_drift_pct:
+        return True, "avg-drift-too-high", deltas, stats
+    # Rule (c): context-aware max-single check
+    if max_single > max_single_delta_pct:
+        news_tickers = news_batch_tickers or set()
+        conf = (confidence_by_ticker or {}).get(max_ticker, 0.5)
+        justified = max_ticker in news_tickers or conf >= 0.7
+        if not justified:
+            return True, "max-delta-unjustified", deltas, stats
+    return False, "", deltas, stats
 
 
 def _extract_tickers_from_batch_ctx(batch_ctx: str) -> list[str]:
@@ -442,22 +514,33 @@ def run_tick(
                 load_recommendation as _load,
             )
             prev_rec = _load(state.last_rec_id)
-            barely, deltas = _opinion_barely_moved(
-                rec, prev_rec, cfg.opinion_drift_threshold_pct,
+            # Parse news batch tickers + build confidence lookup for the
+            # context-aware max-delta check.
+            batch_tickers_for_filter: set[str] = set()
+            if batch_ctx:
+                for line in batch_ctx.split("\n"):
+                    parts = line.strip().split()
+                    if len(parts) >= 3 and parts[0] == "-":
+                        batch_tickers_for_filter.add(parts[2].strip(":").upper())
+            confidence_lookup = {
+                p.ticker.upper(): (p.confidence or 0.5)
+                for p in rec.allocation.positions
+            }
+            should_skip, skip_reason, deltas, stats = _filter_should_skip(
+                rec, prev_rec,
+                opinion_drift_threshold_pct=cfg.opinion_drift_threshold_pct,
+                max_avg_drift_pct=cfg.max_avg_drift_pct,
+                max_single_delta_pct=cfg.max_single_delta_pct,
+                news_batch_tickers=batch_tickers_for_filter,
+                confidence_by_ticker=confidence_lookup,
             )
-            aggregate_turnover = sum(deltas.values())
-            too_much = aggregate_turnover > cfg.max_aggregate_turnover_pct
-            skip_reason = None
-            if barely:
-                skip_reason = "barely-moved"
-            elif too_much:
-                skip_reason = "aggregate-too-large"
-            if skip_reason is not None:
+            if should_skip:
                 logger.info(
-                    "tick %s: opinion-drift skip (%s) - max delta %.2fpp, "
-                    "aggregate %.1fpp",
+                    "tick %s: filter skip (%s) - avg %.2fpp, max %.2fpp on %s",
                     tick_at, skip_reason,
-                    max(deltas.values(), default=0.0), aggregate_turnover,
+                    stats.get("avg_drift", 0),
+                    stats.get("max_delta", 0),
+                    stats.get("max_delta_ticker", "?"),
                 )
                 state.pending_news_context = None
                 # Update last_regen_at even on skip - we DID fire an LLM call
@@ -475,10 +558,13 @@ def run_tick(
                     session.log("opinion_drift_skip", {
                         "reason": reason,
                         "skip_reason": skip_reason,
-                        "max_delta_pp": round(max(deltas.values(), default=0.0), 2),
-                        "aggregate_turnover_pp": round(aggregate_turnover, 2),
+                        "avg_drift_pp": stats.get("avg_drift", 0),
+                        "max_delta_pp": stats.get("max_delta", 0),
+                        "max_delta_ticker": stats.get("max_delta_ticker", "?"),
+                        "n_tickers": stats.get("n_tickers", 0),
                         "threshold_pp": cfg.opinion_drift_threshold_pct,
-                        "max_aggregate_pp": cfg.max_aggregate_turnover_pct,
+                        "max_avg_drift_pp": cfg.max_avg_drift_pct,
+                        "max_single_delta_pp": cfg.max_single_delta_pct,
                         "deltas": {t: round(d, 2) for t, d in deltas.items()},
                     })
                 _log_tick_cost()
