@@ -69,6 +69,10 @@ class LoopConfig:
     max_avg_drift_pct: float = 5.0
     max_single_delta_pct: float = 15.0
 
+    # 0w: cap on beneficiary tickers promoted from news bodies per regen.
+    # Bounds prompt-size growth from wildcard news + body-ticker extraction.
+    max_promotions_per_regen: int = 3
+
     # Discipline layer (vetoes at the rebalancer boundary)
     cooldown_seconds: int = 900              # 0q temporal cooldown
     adverse_move_threshold_pct: float = 1.0  # 0r don't buy falling knives
@@ -370,6 +374,7 @@ def _generate_recommendation(
     news_batch_context: str | None = None,
     pre_picked_tickers: list[str] | None = None,
     previous_rec: Recommendation | None = None,
+    extra_tickers: list[str] | None = None,
 ) -> tuple[Recommendation, list[str]]:
     """Run the orchestrator once for today's decision. Uses the M6 profile.
 
@@ -380,6 +385,10 @@ def _generate_recommendation(
     directly. Enables sticky picker output across regens - the loop caches
     the first regen's picks so news-triggered regens don't churn the
     portfolio by re-running the picker (mega_tech scores shift by the minute).
+
+    extra_tickers: promoted beneficiary candidates from news bodies (0w).
+    Appended after the picker/frozen set so they surface to the allocator
+    with signals; the LLM decides whether to weight them.
 
     Returns (rec, tickers_used) so callers can cache the ticker set.
     """
@@ -401,6 +410,13 @@ def _generate_recommendation(
     for extra in profile.universe_extras:
         if extra not in tickers:
             tickers.append(extra)
+    # 0w: news-body beneficiary promotions. Append after core universe so the
+    # allocator sees them as extras, not primary picks.
+    if extra_tickers:
+        for t in extra_tickers:
+            up = t.upper()
+            if up not in [x.upper() for x in tickers]:
+                tickers.append(up)
 
     risk = (
         profile.name
@@ -482,13 +498,26 @@ def run_tick(
         if session:
             session.log("regen_start", {"reason": reason, "has_news_batch": bool(batch_ctx)})
         # Frozen picker: cached after first regen of the day so news-triggered
-        # regens don't reshuffle the ticker set. Watchlist promotion adds
-        # news-mentioned candidates to the LLM's consideration set.
+        # regens don't reshuffle the ticker set.
         is_new_day = state.last_rec_date != today
         pre_picked = None if is_new_day else state.frozen_picker_tickers
-        if batch_ctx and pre_picked is not None:
-            batch_tickers = _extract_tickers_from_batch_ctx(batch_ctx)
-            pre_picked = list(dict.fromkeys([*pre_picked, *batch_tickers]))
+
+        # 0w: news-body beneficiary promotion. Extract every ticker named in
+        # the batch (both Alpaca-tagged and body-extracted, per 0p fan-out),
+        # subtract anything already in the pick set, cap at N to bound prompt
+        # size. Works on first-day too.
+        promoted: list[str] = []
+        if batch_ctx:
+            already = set()
+            if pre_picked:
+                already.update(x.upper() for x in pre_picked)
+            if cfg.tickers:
+                already.update(x.upper() for x in cfg.tickers)
+            for t in _extract_tickers_from_batch_ctx(batch_ctx):
+                if t.upper() not in already and t not in promoted:
+                    promoted.append(t)
+                    if len(promoted) >= cfg.max_promotions_per_regen:
+                        break
 
         # Delta-form prompt anchor (non-first-day only).
         prev_rec_for_prompt = None
@@ -500,6 +529,7 @@ def run_tick(
         rec, tickers_used = _generate_recommendation(
             cfg, news_batch_context=batch_ctx, pre_picked_tickers=pre_picked,
             previous_rec=prev_rec_for_prompt,
+            extra_tickers=promoted or None,
         )
 
         # Opinion-drift filter: compare new rec to previous; skip on LLM

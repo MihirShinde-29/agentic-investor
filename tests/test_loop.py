@@ -31,7 +31,8 @@ from agentic_investor.tools.paper_broker import (
 
 
 def _fake_generate(cfg, as_of=None, news_batch_context=None,
-                   pre_picked_tickers=None, previous_rec=None):
+                   pre_picked_tickers=None, previous_rec=None,
+                   extra_tickers=None):
     return _rec(cfg.amount), list(cfg.tickers) or ["AAPL", "NVDA"]
 
 
@@ -478,6 +479,47 @@ def test_drift_true_when_position_no_longer_in_target():
         rec, {"AAPL": 4000, "NVDA": 3000, "TSLA": 3000},
         total_equity=10_000, band_abs_pct=5.0
     ) is True
+
+
+def test_promotion_extracts_beneficiaries_from_batch_and_caps(monkeypatch):
+    """0w: news-body tickers get promoted into the LLM's ticker set, bounded."""
+    captured = {}
+
+    def _capture_generate(cfg, as_of=None, news_batch_context=None,
+                          pre_picked_tickers=None, previous_rec=None,
+                          extra_tickers=None):
+        captured["extra_tickers"] = extra_tickers
+        return _rec(cfg.amount), list(cfg.tickers) or ["AAPL"]
+
+    monkeypatch.setattr(
+        "agentic_investor.orchestrator.loop._generate_recommendation",
+        _capture_generate,
+    )
+    monkeypatch.setattr("agentic_investor.orchestrator.loop.record_snapshot", lambda *a, **k: 1)
+    monkeypatch.setattr("agentic_investor.orchestrator.loop.record_order", lambda *a, **k: None)
+
+    batch_ctx = (
+        "- [HOT] BE  age=1m: Bloom Energy could benefit\n"
+        "- [HOT] TSM  age=1m: TSMC ramps capacity\n"
+        "- [HOT] AVGO  age=2m: Broadcom secures deal\n"
+        "- [HOT] PLTR  age=2m: Palantir expands contract\n"
+        "- [HOT] SNOW  age=3m: Snowflake beats"
+    )
+    cfg = LoopConfig(
+        tickers=["AAPL"], band_abs_pct=5.0, min_trade_dollars=1.0,
+        max_promotions_per_regen=3,
+    )
+    state = LoopState(pending_news_context=batch_ctx)
+    broker = FakeBroker(cash=10_000, equity=10_000)
+
+    run_tick(cfg, state, broker, save_rec=lambda r: 1,
+             price_fetcher=lambda t: 100.0)
+
+    # AAPL is in cfg.tickers; other 5 are candidates. Capped at 3.
+    assert captured["extra_tickers"] is not None
+    assert len(captured["extra_tickers"]) == 3
+    assert "AAPL" not in captured["extra_tickers"]
+    assert set(captured["extra_tickers"]).issubset({"BE", "TSM", "AVGO", "PLTR", "SNOW"})
 
 
 def test_tick_regenerates_rec_on_first_run_and_submits_orders(tmp_path, monkeypatch):
