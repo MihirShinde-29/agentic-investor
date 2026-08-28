@@ -49,8 +49,9 @@ def _cached_alpaca_news(ticker: str, frm_iso: str, to_iso: str) -> tuple[dict, .
     from alpaca.data.requests import NewsRequest
 
     client = _alpaca_news_client()
+    # alpaca-py's NewsRequest.symbols is a comma-separated string, not a list.
     req = NewsRequest(
-        symbols=[ticker.upper()],
+        symbols=ticker.upper(),
         start=datetime.fromisoformat(frm_iso),
         end=datetime.fromisoformat(to_iso),
         limit=50,
