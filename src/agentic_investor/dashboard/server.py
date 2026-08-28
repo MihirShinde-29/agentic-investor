@@ -129,6 +129,80 @@ def create_app() -> FastAPI:
                 })
         return out
 
+    @app.get("/api/snapshots")
+    def snapshots(limit: int = 500) -> list[dict]:
+        """Portfolio equity snapshots for the equity-curve chart."""
+        from agentic_investor.tools.paper_store import list_snapshots
+
+        raw = list_snapshots(limit=limit)
+        return [
+            {
+                "ts": s["captured_at"],
+                "equity": float(s["account"]["equity"]),
+                "cash": float(s["account"]["cash"]),
+                "portfolio_value": float(s["account"]["portfolio_value"]),
+            }
+            for s in reversed(raw)  # oldest first for time series
+        ]
+
+    @app.get("/api/bars/{ticker}")
+    def bars(ticker: str, period: str = "1d", interval: str = "5m") -> dict:
+        """OHLCV bars for a ticker; used by per-ticker charts + SPY overlay."""
+        from agentic_investor.tools.market import fetch_ohlcv
+
+        try:
+            df = fetch_ohlcv(ticker.upper(), period=period, interval=interval)
+            if df.empty:
+                return {"ticker": ticker.upper(), "bars": []}
+            # Simple SMA20 overlay (needs 20+ bars to render)
+            close = df["Close"].astype(float)
+            sma20 = close.rolling(20).mean()
+            bars_out = []
+            for ts, row in df.iterrows():
+                bars_out.append({
+                    "t": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                    "o": float(row["Open"]),
+                    "h": float(row["High"]),
+                    "l": float(row["Low"]),
+                    "c": float(row["Close"]),
+                    "v": float(row["Volume"]),
+                    "sma20": (float(sma20.loc[ts])
+                              if not (sma20.loc[ts] != sma20.loc[ts])  # NaN check
+                              else None),
+                })
+            return {"ticker": ticker.upper(), "bars": bars_out}
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(
+                {"ticker": ticker.upper(), "error": str(e)}, status_code=500
+            )
+
+    @app.get("/api/rec/{rec_id}")
+    def rec(rec_id: int) -> dict:
+        """Recommendation details for the trade drill-down."""
+        from agentic_investor.orchestrator.store import load_recommendation
+
+        r = load_recommendation(rec_id)
+        if r is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return {
+            "rec_id": rec_id,
+            "amount": r.request.amount,
+            "risk": r.request.risk,
+            "positions": [
+                {
+                    "ticker": p.ticker,
+                    "weight_pct": p.weight_pct,
+                    "dollars": p.dollars,
+                    "confidence": p.confidence,
+                    "rationale": p.rationale,
+                }
+                for p in r.allocation.positions
+            ],
+            "cash_pct": r.allocation.cash_pct,
+            "cash_dollars": r.allocation.cash_dollars,
+            "portfolio_rationale": r.allocation.portfolio_rationale,
+        }
+
     @app.websocket("/ws/live")
     async def live(ws: WebSocket) -> None:
         await ws.accept()
