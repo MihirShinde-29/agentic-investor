@@ -145,19 +145,50 @@ def check_risk_rules(allocation: Allocation, risk: RiskLevel) -> list[str]:
     return violations
 
 
-def check_profile_rules(allocation: Allocation, profile) -> list[str]:
+def effective_max_weight(
+    profile, atr_pct: float | None
+) -> float:
+    """Vol-scaled max weight for a single ticker.
+
+    High-volatility names get a smaller cap so no single volatile bet
+    dominates the portfolio. NVDA at 3.5% daily vol with 2% reference =
+    35% * (2/3.5) = 20% max weight, vs base 35%.
+    """
+    base = profile.max_single_pct
+    if not getattr(profile, "vol_scaling_enabled", False) or not atr_pct:
+        return base
+    ref = getattr(profile, "vol_reference_pct", 2.0)
+    if atr_pct <= ref:
+        return base  # low-vol tickers stay at base cap
+    return base * (ref / atr_pct)
+
+
+def check_profile_rules(
+    allocation: Allocation,
+    profile,
+    snapshots: "dict | None" = None,
+) -> list[str]:
     """Profile-aware version of check_risk_rules. Accepts a StrategyProfile.
 
     Uses the profile's max_single_pct + cash_floor_pct rather than the fixed
     RISK_RULES table. This is the M6+ path; check_risk_rules stays for backward
     compatibility.
+
+    When `snapshots` is provided (dict[ticker, MarketSnapshot]), the max-weight
+    check per position uses vol-scaled cap via effective_max_weight().
     """
     violations: list[str] = []
     for p in allocation.positions:
-        if p.weight_pct > profile.max_single_pct + 0.5:
+        atr = None
+        if snapshots and p.ticker in snapshots:
+            atr = getattr(snapshots[p.ticker], "atr_pct", None)
+        cap = effective_max_weight(profile, atr)
+        if p.weight_pct > cap + 0.5:
             violations.append(
                 f"{p.ticker} weight {p.weight_pct:.1f}% exceeds "
-                f"{profile.name} cap {profile.max_single_pct:.0f}%"
+                f"{profile.name} cap {cap:.1f}%"
+                + (f" (vol-scaled from {profile.max_single_pct:.0f})"
+                   if cap < profile.max_single_pct else "")
             )
     if allocation.cash_pct + 0.5 < profile.cash_floor_pct:
         violations.append(

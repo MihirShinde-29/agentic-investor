@@ -205,7 +205,10 @@ def allocate(state: GraphState) -> dict:
 
 def validate(state: GraphState) -> dict:
     profile = _profile_from_state(state)
-    return {"violations": check_profile_rules(state["allocation"], profile)}
+    return {"violations": check_profile_rules(
+        state["allocation"], profile,
+        snapshots=state.get("market_snapshots"),
+    )}
 
 
 def build_graph():

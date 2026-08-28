@@ -15,6 +15,31 @@ def _pos(ticker: str, weight: float, dollars: float = 0.0) -> Position:
     return Position(ticker=ticker, weight_pct=weight, dollars=dollars, rationale="x")
 
 
+def test_effective_max_weight_scales_down_for_high_vol():
+    from types import SimpleNamespace
+
+    from agentic_investor.orchestrator.state import effective_max_weight
+
+    profile = SimpleNamespace(max_single_pct=35.0, vol_scaling_enabled=True, vol_reference_pct=2.0)
+    # low-vol (1%) → base cap 35% (no scaling since atr < reference)
+    assert effective_max_weight(profile, 1.0) == 35.0
+    # at reference → base cap
+    assert effective_max_weight(profile, 2.0) == 35.0
+    # 2x vol → half cap
+    assert effective_max_weight(profile, 4.0) == pytest.approx(17.5)
+    # missing atr → base cap
+    assert effective_max_weight(profile, None) == 35.0
+
+
+def test_effective_max_weight_disabled_returns_base():
+    from types import SimpleNamespace
+
+    from agentic_investor.orchestrator.state import effective_max_weight
+
+    profile = SimpleNamespace(max_single_pct=35.0, vol_scaling_enabled=False, vol_reference_pct=2.0)
+    assert effective_max_weight(profile, 4.0) == 35.0
+
+
 def test_position_defaults_confidence_to_neutral():
     p = Position(ticker="AAPL", weight_pct=40, dollars=4000, rationale="x")
     assert p.confidence == 0.5

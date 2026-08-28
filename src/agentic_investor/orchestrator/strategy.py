@@ -45,6 +45,13 @@ class StrategyProfile(BaseModel):
     max_single_pct: float = Field(35.0, ge=0.0, le=100.0)
     cash_floor_pct: float = Field(10.0, ge=0.0, le=100.0)
     drawdown_stop_pct: float | None = None  # e.g. -25.0 halts on -25% DD
+    # Vol-scaled max weight: a ticker's effective max weight is scaled DOWN
+    # when its recent daily volatility is high. Formula:
+    #   effective_max = max_single_pct * min(1, vol_reference_pct / atr_pct)
+    # e.g. reference=2%, NVDA atr_pct=3.5% -> effective_max = 35 * (2/3.5) = 20%
+    # Set vol_scaling_enabled=False to disable (backward compat).
+    vol_scaling_enabled: bool = True
+    vol_reference_pct: float = 2.0  # baseline "normal" daily vol, in %
 
     # Backtest friction defaults
     tcost_bps: float = 0.0
