@@ -42,6 +42,11 @@ def compute_trade_plan(
     cooldown_seconds: int = 900,
     now: datetime | None = None,
     news_batch_tickers: set[str] | None = None,
+    # 0r Buy discipline layer:
+    ticker_recent_moves: dict[str, float] | None = None,
+    adverse_move_threshold_pct: float = 1.0,
+    avg_entry_prices: dict[str, float] | None = None,
+    halt_buys_drawdown_pct: float = 5.0,
 ) -> list[TradePlan]:
     """Diff target-weight allocation against current positions.
 
@@ -50,10 +55,20 @@ def compute_trade_plan(
     cooldown_seconds is vetoed to prevent whipsaws (buy-then-sell-same-ticker
     within 15 min). Exception: if the ticker appears in news_batch_tickers,
     the cooldown is bypassed (fresh material signal justifies the reversal).
+
+    ticker_recent_moves: dict[ticker, pct] recent short-window price move.
+    Any BUY proposal for a ticker with move <= -adverse_move_threshold_pct
+    is vetoed - don't buy falling knives. SELL/HOLD authority unchanged.
+
+    avg_entry_prices: dict[ticker, avg_entry_price] from broker. When a
+    BUY is proposed for a position already down more than
+    halt_buys_drawdown_pct from entry, veto - don't average down on losers.
     """
     now = now or datetime.now(UTC)
     recent_trades = recent_trades or {}
     news_batch_tickers = news_batch_tickers or set()
+    ticker_recent_moves = ticker_recent_moves or {}
+    avg_entry_prices = avg_entry_prices or {}
     target_dollars = {
         p.ticker: total_equity * (p.weight_pct / 100.0) for p in rec.allocation.positions
     }
@@ -83,6 +98,16 @@ def compute_trade_plan(
             if (recent_side != side and age < cooldown_seconds
                     and t.upper() not in news_batch_tickers):
                 continue  # cooldown veto
+        # 0r Buy discipline: (a) adverse-move veto + (b) drawdown-halt-buys.
+        if side == "buy":
+            move = ticker_recent_moves.get(t.upper())
+            if move is not None and move <= -adverse_move_threshold_pct:
+                continue  # falling-knife veto
+            avg_entry = avg_entry_prices.get(t.upper())
+            if avg_entry and avg_entry > 0:
+                loss_pct = (price / avg_entry - 1) * 100
+                if loss_pct <= -halt_buys_drawdown_pct:
+                    continue  # don't average down on losers
         plans.append(
             TradePlan(
                 ticker=t,

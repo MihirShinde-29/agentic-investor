@@ -91,6 +91,11 @@ class LoopConfig:
     # (fresh material signal justifies reversal). Prevents whipsaws like
     # 2026-08-28 rec #67 -> rec #68 NVDA sell-then-rebuy in 14 min.
     cooldown_seconds: int = 900  # 15 min
+    # 0r Buy discipline: veto BUY orders on tickers that recently moved
+    # against us (adverse-move veto) or on positions already deep underwater
+    # (halt-buys drawdown). LLM keeps SELL/HOLD authority; only BUYs gated.
+    adverse_move_threshold_pct: float = 1.0  # veto BUY if down > 1% recently
+    halt_buys_drawdown_pct: float = 5.0  # veto BUY if position down > 5% from entry
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
 
@@ -580,18 +585,17 @@ def run_tick(
         state.pending_news_context = None  # consume it - next tick reuses rec
         state.last_regen_at = now
         # Record baseline prices + stances for the price-move + technical
-        # triggers to compare against on subsequent ticks.
-        try:
-            from agentic_investor.tools.market import fetch_ohlcv
-            state.baseline_prices = {
-                p.ticker.upper(): float(
-                    fetch_ohlcv(p.ticker.upper(), period="1y")["Close"].iloc[-1]
+        # triggers to compare against on subsequent ticks. Reuse the
+        # injected price_fetcher so tests can supply deterministic prices.
+        state.baseline_prices = {}
+        for p in rec.allocation.positions:
+            try:
+                state.baseline_prices[p.ticker.upper()] = float(
+                    price_fetcher(p.ticker.upper())
                 )
-                for p in rec.allocation.positions
-            }
-        except Exception as e:  # noqa: BLE001
-            logger.warning("baseline price capture failed: %s", e)
-            state.baseline_prices = {}
+            except Exception as e:  # noqa: BLE001
+                logger.warning("baseline price capture failed for %s: %s",
+                               p.ticker, e)
         state.last_stances = {
             s.ticker.upper(): s.stance for s in rec.technical_signals
         }
@@ -664,6 +668,17 @@ def run_tick(
             parts = line.strip().split()
             if len(parts) >= 3 and parts[0] == "-":
                 batch_tickers_for_cooldown.add(parts[2].strip(":").upper())
+    # 0r Buy discipline: compute recent price moves + collect avg entry prices
+    # so the rebalancer can veto BUY orders on falling knives + losing
+    # positions being averaged down.
+    ticker_recent_moves: dict[str, float] = {}
+    avg_entry_prices: dict[str, float] = {p.ticker.upper(): float(p.avg_entry_price)
+                                          for p in positions if p.avg_entry_price}
+    for t in tickers:
+        baseline = state.baseline_prices.get(t)
+        cur = prices.get(t)
+        if baseline and cur and baseline > 0:
+            ticker_recent_moves[t] = (cur / baseline - 1) * 100
     plans = compute_trade_plan(
         rec, positions_dollars, acct.equity,
         prices=prices, min_trade_dollars=cfg.min_trade_dollars,
@@ -671,6 +686,10 @@ def run_tick(
         cooldown_seconds=getattr(cfg, "cooldown_seconds", 900),
         now=now,
         news_batch_tickers=batch_tickers_for_cooldown,
+        ticker_recent_moves=ticker_recent_moves,
+        adverse_move_threshold_pct=cfg.adverse_move_threshold_pct,
+        avg_entry_prices=avg_entry_prices,
+        halt_buys_drawdown_pct=cfg.halt_buys_drawdown_pct,
     )
 
     if cfg.dry_run or not plans:

@@ -206,6 +206,90 @@ def test_cooldown_expired_allows_reversal():
     assert any(p.ticker == "AAPL" for p in plans)
 
 
+def test_adverse_move_vetos_buy_but_not_sell():
+    # AAPL down 2% recently - BUY should be vetoed, SELL side unaffected.
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 0, "NVDA": 8000},  # need BUY AAPL, SELL NVDA
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=1.0,
+        ticker_recent_moves={"AAPL": -2.0, "NVDA": -3.0},
+        adverse_move_threshold_pct=1.0,
+    )
+    tickers_and_sides = {(p.ticker, p.side) for p in plans}
+    # AAPL BUY vetoed by adverse move
+    assert ("AAPL", "buy") not in tickers_and_sides
+    # NVDA SELL allowed (adverse move only gates BUYs)
+    assert ("NVDA", "sell") in tickers_and_sides
+
+
+def test_adverse_move_allows_buy_when_ticker_is_up():
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 0, "NVDA": 0},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=1.0,
+        ticker_recent_moves={"AAPL": 0.5, "NVDA": 1.5},  # both positive
+        adverse_move_threshold_pct=1.0,
+    )
+    tickers = {p.ticker for p in plans}
+    assert "AAPL" in tickers
+    assert "NVDA" in tickers
+
+
+def test_halt_buys_drawdown_prevents_averaging_down():
+    # Currently hold 50 shares of AAPL at avg entry $100 (=$5000 value).
+    # Current price $92 = down 8%. Halt threshold 5% - BUY vetoed.
+    # AAPL target is 40% = $4000 -> actually we already have $4600, so
+    # rebalance would be SELL (not BUY). Set target higher to force BUY.
+    from agentic_investor.orchestrator.state import (
+        Allocation, OrchestratorRequest, Position, Recommendation,
+    )
+    rec = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(ticker="AAPL", weight_pct=80, dollars=8000, rationale="x")],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    plans = compute_trade_plan(
+        rec,
+        current_positions={"AAPL": 4600},  # 50 sh @ current 92
+        total_equity=10_000,
+        prices={"AAPL": 92},  # current price
+        min_trade_dollars=1.0,
+        avg_entry_prices={"AAPL": 100.0},  # bought at 100 -> down 8%
+        halt_buys_drawdown_pct=5.0,
+    )
+    # BUY should be vetoed (position down 8% > 5% halt threshold)
+    assert not any(p.ticker == "AAPL" and p.side == "buy" for p in plans)
+
+
+def test_halt_buys_allows_buy_when_position_is_up():
+    from agentic_investor.orchestrator.state import (
+        Allocation, OrchestratorRequest, Position, Recommendation,
+    )
+    rec = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(ticker="AAPL", weight_pct=80, dollars=8000, rationale="x")],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    plans = compute_trade_plan(
+        rec,
+        current_positions={"AAPL": 4600},
+        total_equity=10_000,
+        prices={"AAPL": 105},  # current > entry
+        min_trade_dollars=1.0,
+        avg_entry_prices={"AAPL": 100.0},  # up 5%
+        halt_buys_drawdown_pct=5.0,
+    )
+    assert any(p.ticker == "AAPL" and p.side == "buy" for p in plans)
+
+
 def test_execute_only_attaches_stops_to_buy_side():
     plans = compute_trade_plan(
         _rec(),
