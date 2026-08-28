@@ -815,6 +815,15 @@ def run_event_loop(
                 continue
 
             now = _dt.now(_UTC)
+            # Poll broker for order fill updates; cheap (one REST call), keeps
+            # paper_orders mirror in sync with actual Alpaca state.
+            try:
+                from agentic_investor.tools.paper_store import reconcile_orders
+                n_updated = reconcile_orders(broker)
+                if n_updated and session:
+                    session.log("orders_reconciled", {"updated": n_updated})
+            except Exception as e:  # noqa: BLE001
+                logger.warning("reconcile_orders failed: %s", e)
             new_events = drain_queue(event_q)
             if new_events and session:
                 for e in new_events:

@@ -144,6 +144,49 @@ def record_order(
         conn.commit()
 
 
+def reconcile_orders(broker, *, limit: int = 200, url: str | None = None) -> int:
+    """Poll the broker for recent orders and update our mirror's fill status.
+
+    Alpaca is source of truth for state. We only see status="pending_new" at
+    submission time; fills, partial fills, cancels, rejects arrive
+    asynchronously. This closes the gap so paper-report shows real fill
+    prices instead of "-".
+
+    Returns count of rows updated. Safe to call periodically from the loop.
+    """
+    updated = 0
+    try:
+        remote = broker.list_orders(limit=limit, status="all")
+    except Exception:  # noqa: BLE001 - broker outage mustn't crash reconcile
+        return 0
+    if not remote:
+        return 0
+    with _connect(_resolve_url(url)) as conn:
+        for o in remote:
+            coid = getattr(o, "client_order_id", None) or ""
+            if not coid:
+                continue
+            cur = conn.execute(
+                """
+                UPDATE paper_orders SET
+                    status = ?, filled_at = ?, filled_avg_price = ?,
+                    broker_order_id = COALESCE(NULLIF(broker_order_id, ''), ?)
+                WHERE client_order_id = ?
+                """,
+                (
+                    getattr(o, "status", None),
+                    getattr(o, "filled_at", None),
+                    getattr(o, "filled_avg_price", None),
+                    getattr(o, "id", None),
+                    coid,
+                ),
+            )
+            if cur.rowcount > 0:
+                updated += cur.rowcount
+        conn.commit()
+    return updated
+
+
 def list_orders(
     *, limit: int = 50, url: str | None = None
 ) -> list[dict]:
