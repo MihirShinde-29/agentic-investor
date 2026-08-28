@@ -57,6 +57,7 @@ class LoopConfig:
     # Ops toggles
     dry_run: bool = False
     once: bool = False  # run one tick then exit (for testing)
+    force_open: bool = False  # skip market-hours check (dev/testing only)
 
 
 @dataclass
@@ -172,9 +173,12 @@ def run_tick(
     session=None,  # SessionRecorder | None - optional live logging
 ) -> TickResult:
     """One iteration of the loop. Callable independently for cron-style ops."""
+    from agentic_investor.llm.client import get_call_stats
+
     now = now or datetime.now(UTC)
     today = now.strftime("%Y-%m-%d")
     tick_at = now.isoformat()
+    stats_before = get_call_stats()
 
     if save_rec is None:
         from agentic_investor.orchestrator.store import save_recommendation as _save
@@ -228,12 +232,28 @@ def run_tick(
     positions_dollars = {p.ticker.upper(): p.market_value for p in positions}
     record_snapshot(acct, positions)
 
+    def _log_tick_cost() -> None:
+        if not session:
+            return
+        after = get_call_stats()
+        cost = after.estimated_cost_usd - stats_before.estimated_cost_usd
+        session.log("tick_cost", {
+            "tick_at": tick_at,
+            "llm_calls": after.n_calls - stats_before.n_calls,
+            "prompt_tokens": after.prompt_tokens - stats_before.prompt_tokens,
+            "completion_tokens": after.completion_tokens - stats_before.completion_tokens,
+            # String-formatted to preserve small-cost precision in the pretty
+            # console output (jsonl gets the same string; total is fine).
+            "cost_usd": f"${cost:.4f}",
+        })
+
     if not regenerated and not _drift_exceeds_band(
         rec, positions_dollars, acct.equity, cfg.band_abs_pct
     ):
         logger.info(
             "tick %s: no drift beyond %.1fpp - nothing to trade", tick_at, cfg.band_abs_pct
         )
+        _log_tick_cost()
         return TickResult(
             tick_at=tick_at, rec_id=state.last_rec_id,
             regenerated_rec=regenerated, plan_count=0,
@@ -254,6 +274,7 @@ def run_tick(
     )
 
     if cfg.dry_run or not plans:
+        _log_tick_cost()
         return TickResult(
             tick_at=tick_at, rec_id=state.last_rec_id,
             regenerated_rec=regenerated, plan_count=len(plans),
@@ -282,6 +303,7 @@ def run_tick(
                 "client_order_id": o.client_order_id,
             })
     state.orders_submitted += len(submitted)
+    _log_tick_cost()
     return TickResult(
         tick_at=tick_at, rec_id=state.last_rec_id,
         regenerated_rec=regenerated, plan_count=len(plans),
@@ -320,6 +342,7 @@ def run_event_loop(
     from agentic_investor.orchestrator.decision_engine import (
         DecisionState,
         build_batch,
+        default_reaction_price_fetcher,
         drain_queue,
         ingest,
         render_batch_context,
@@ -337,11 +360,15 @@ def run_event_loop(
     if session:
         session.log("streamer_start", {"tickers": initial_tickers})
 
-    last_interval_tick = _dt.now(_UTC)
+    # Backdate the interval tick so the first loop iteration always fires a
+    # tick (interval_due is immediately True). Otherwise --once + no news
+    # would sit idle for `interval_seconds` before exiting.
+    from datetime import timedelta as _td
+    last_interval_tick = _dt.now(_UTC) - _td(seconds=cfg.interval_seconds)
     try:
         while True:
             clock = broker.get_clock()
-            if not clock.is_open:
+            if not clock.is_open and not cfg.force_open:
                 if session:
                     session.log("market_closed", {"next_open": clock.next_open})
                 if cfg.once:
@@ -365,14 +392,21 @@ def run_event_loop(
             )
             if fire or interval_due:
                 if fire:
-                    batch = build_batch(decision_state, now)
+                    batch = build_batch(
+                        decision_state, now,
+                        reaction_price_fetcher=default_reaction_price_fetcher,
+                    )
                     ctx = render_batch_context(batch)
                     state.pending_news_context = ctx or None
                     if session:
+                        cooked_with_reaction = sum(
+                            1 for c in batch.cooked if c.reaction_pct is not None
+                        )
                         session.log("decision_moment", {
                             "reason": reason,
                             **batch.summary(),
                             "context_chars": len(ctx),
+                            "cooked_with_reaction": cooked_with_reaction,
                         })
                 try:
                     result = run_tick(cfg, state, broker, now=now, session=session)
@@ -409,7 +443,7 @@ def run_loop(
     try:
         while True:
             clock = broker.get_clock()
-            if not clock.is_open:
+            if not clock.is_open and not cfg.force_open:
                 if cfg.once:
                     logger.info("market closed; --once specified - exiting")
                     return state

@@ -838,6 +838,7 @@ def _paper_loop(
     once: bool,
     log_file: str | None,
     regen_mode: str,
+    force_open: bool,
 ) -> None:
     import logging
 
@@ -880,6 +881,7 @@ def _paper_loop(
         take_profit_pct=take_profit_pct,
         dry_run=dry_run,
         once=once,
+        force_open=force_open,
     )
     broker = get_broker()
     try:
@@ -1180,6 +1182,9 @@ def main() -> None:
                     choices=["daily", "event"],
                     help="daily: regen rec once at open. event: subscribe to "
                          "alpaca news, fire on decision moments (micro-batched)")
+    pl.add_argument("--force-open", action="store_true",
+                    help="skip market-hours check (dev/testing only - orders "
+                         "will queue at Alpaca for next open)")
 
     pt2 = sub.add_parser("paper-test-event",
                          help="synthetic decision moment: inject fake news, "
@@ -1286,7 +1291,7 @@ def main() -> None:
             args.profile, args.amount, tickers, args.auto, args.universe,
             args.top_n, args.interval, args.band_abs_pct, args.min_trade_dollars,
             args.stop_loss_pct, args.take_profit_pct, args.dry_run, args.once,
-            args.log_file, args.regen_mode,
+            args.log_file, args.regen_mode, args.force_open,
         )
     else:
         _print_config()

@@ -184,6 +184,43 @@ def render_batch_context(batch: DecisionBatch) -> str:
     return "\n".join(lines) if lines else ""
 
 
+def default_reaction_price_fetcher(event: NewsEvent) -> float | None:
+    """Real news_reaction_pct: intraday price change from published_at to now.
+
+    Uses 1-minute yfinance bars (available for the last 7 days). Returns None
+    when we can't compute a reaction - the LLM prompt handles missing values
+    gracefully (COOKED entries without reaction data just omit the field).
+    """
+    try:
+        import pandas as pd
+
+        from agentic_investor.tools.market import fetch_ohlcv
+
+        ts = datetime.fromisoformat(str(event.published_at).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        df = fetch_ohlcv(event.ticker, period="7d", interval="1m")
+        if df.empty or len(df) < 2:
+            return None
+        # yfinance 1m bars are timezone-aware; normalize both sides.
+        if df.index.tz is None:
+            idx = df.index.tz_localize(UTC)
+        else:
+            idx = df.index.tz_convert(UTC)
+        ts_pd = pd.Timestamp(ts)
+        mask = idx >= ts_pd
+        if not mask.any():
+            return None
+        price_at_news = float(df["Close"].iloc[mask.argmax()])
+        current = float(df["Close"].iloc[-1])
+        if price_at_news <= 0:
+            return None
+        return round((current / price_at_news - 1) * 100, 2)
+    except Exception as e:  # noqa: BLE001 - reaction is best-effort
+        logger.warning("reaction pct failed for %s: %s", event.ticker, e)
+        return None
+
+
 def ingest(state: DecisionState, events: list[NewsEvent], now: datetime) -> None:
     """Accept new events into the state; open batch window if first in a while."""
     if not events:
