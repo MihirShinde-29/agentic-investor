@@ -756,6 +756,72 @@ def _parse_interval(text: str) -> int:
     return int(float(t))
 
 
+def _paper_test_event(
+    tickers: list[str],
+    headlines: list[str],
+    profile_name: str,
+    amount: float,
+    dry_run: bool,
+) -> None:
+    """One synthetic decision moment - useful to verify event-driven wiring
+    when market is closed or news is quiet. Builds a batch from CLI headlines,
+    threads it through the allocator prompt, prints everything.
+    """
+    import logging
+    from datetime import UTC, datetime
+
+    from agentic_investor.llm.client import format_call_stats, reset_call_stats
+    from agentic_investor.ops.session import SessionRecorder
+    from agentic_investor.orchestrator.decision_engine import (
+        DecisionBatch,
+        TaggedNews,
+        render_batch_context,
+    )
+    from agentic_investor.orchestrator.loop import LoopConfig, LoopState, run_tick
+    from agentic_investor.tools.news_stream import NewsEvent
+    from agentic_investor.tools.paper_broker import get_broker
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(message)s", force=True
+    )
+    session = SessionRecorder.start()
+    print(f"\nSession artifacts -> {session.out_dir}\n")
+    reset_call_stats()
+
+    now = datetime.now(UTC)
+    batch = DecisionBatch(fire_at=now.isoformat())
+    # Distribute headlines across tickers (round-robin) so the batch sees
+    # multi-ticker news like a realistic burst.
+    for i, h in enumerate(headlines):
+        ticker = tickers[i % len(tickers)]
+        event = NewsEvent(
+            ticker=ticker, headline=h, summary="",
+            published_at=now.isoformat(), received_at=now.isoformat(),
+        )
+        batch.hot.append(TaggedNews(event=event, age_seconds=30.0, tag="HOT"))
+
+    ctx = render_batch_context(batch)
+    print("Synthetic news batch:")
+    print(ctx)
+    print()
+    session.log("decision_moment", {"reason": "synthetic-test", **batch.summary()})
+
+    cfg = LoopConfig(
+        profile_name=profile_name, amount=amount,
+        tickers=[t.upper() for t in tickers], auto=False,
+        band_abs_pct=5.0, min_trade_dollars=1.0, dry_run=dry_run,
+    )
+    state = LoopState(pending_news_context=ctx)
+    broker = get_broker()
+    result = run_tick(cfg, state, broker, session=session, now=now)
+
+    print(f"\nTick result: rec_id={result.rec_id} equity=${result.equity:,.2f} "
+          f"plans={result.plan_count} submitted={len(result.submitted)}")
+    session.finalize()
+    print(f"\nSession summary: {session.summary_path}")
+    print(format_call_stats())
+
+
 def _paper_loop(
     profile_name: str,
     amount: float,
@@ -1115,6 +1181,18 @@ def main() -> None:
                     help="daily: regen rec once at open. event: subscribe to "
                          "alpaca news, fire on decision moments (micro-batched)")
 
+    pt2 = sub.add_parser("paper-test-event",
+                         help="synthetic decision moment: inject fake news, "
+                              "run one full tick, verify event-driven wiring")
+    pt2.add_argument("--tickers", required=True,
+                     help="comma-separated tickers to build the batch for")
+    pt2.add_argument("--headlines", nargs="+", required=True,
+                     help="one or more fake headlines (distributed across tickers)")
+    pt2.add_argument("--profile", default="moderate")
+    pt2.add_argument("--amount", type=float, default=10_000.0)
+    pt2.add_argument("--dry-run", action="store_true",
+                     help="print the plan but submit nothing")
+
     args = parser.parse_args()
     if args.cmd == "analyze":
         _analyze(args.tickers, args.model)
@@ -1193,6 +1271,11 @@ def main() -> None:
             args.profile, args.amount, tickers, args.auto, args.universe,
             args.top_n, args.band_abs_pct, args.min_trade_dollars,
             args.stop_loss_pct, args.take_profit_pct, args.dry_run,
+        )
+    elif args.cmd == "paper-test-event":
+        tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+        _paper_test_event(
+            tickers, args.headlines, args.profile, args.amount, args.dry_run,
         )
     elif args.cmd == "paper-loop":
         tickers = (
