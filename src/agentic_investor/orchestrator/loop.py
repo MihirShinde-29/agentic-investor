@@ -50,6 +50,11 @@ class LoopConfig:
     # Tick cadence
     interval_seconds: int = 30 * 60
     band_abs_pct: float = 5.0
+    # Size-aware bands: small positions get proportionally tighter thresholds.
+    # effective_base = min(band_abs_pct, target_pct * band_rel_pct/100).
+    # e.g. band_rel_pct=20 -> a 5%-target position gets a 1pp band; a
+    # 25%-target position stays at the full 5pp abs band. 0 disables.
+    band_rel_pct: float = 20.0
     min_trade_dollars: float = 50.0
 
     # Triggers
@@ -298,19 +303,34 @@ def _extract_tickers_from_batch_ctx(batch_ctx: str) -> list[str]:
     return list(dict.fromkeys(tickers))
 
 
-def _effective_band(base_band_pct: float, confidence: float | None) -> float:
-    """Scale the rebalance band by inverse LLM confidence.
+def _effective_band(
+    band_abs_pct: float,
+    confidence: float | None,
+    *,
+    target_pct: float = 0.0,
+    band_rel_pct: float = 0.0,
+) -> float:
+    """Effective drift band for one position.
 
-    Formula: factor = 1.5 - confidence  (in [0.5, 1.5])
-    - High conviction 1.0 -> 0.5x base   (act on smaller drift)
-    - Neutral        0.5 -> 1.0x base   (unchanged)
-    - Low conviction 0.0 -> 1.5x base   (anti-churn while uncertain)
-    Missing confidence -> use base band unchanged (backward compat).
+    Two composable layers:
+    1. Size-aware base = min(band_abs_pct, target_pct * band_rel_pct/100)
+       when band_rel_pct > 0. Small positions get proportionally tighter
+       thresholds. A 5% target with band_rel_pct=20 -> 1pp base band.
+       Zeroed-out positions (target=0) get the abs band unchanged.
+    2. Confidence scaling: factor = 1.5 - confidence  (in [0.5, 1.5])
+       - High conviction 1.0 -> 0.5x base (act on smaller drift)
+       - Neutral        0.5 -> 1.0x base (unchanged)
+       - Low conviction 0.0 -> 1.5x base (anti-churn while uncertain)
+       Missing confidence -> factor 1.0 (backward compat).
     """
+    base = band_abs_pct
+    if band_rel_pct > 0 and target_pct > 0:
+        rel_band = target_pct * band_rel_pct / 100.0
+        base = min(band_abs_pct, rel_band)
     if confidence is None:
-        return base_band_pct
+        return base
     c = max(0.0, min(1.0, confidence))
-    return base_band_pct * (1.5 - c)
+    return base * (1.5 - c)
 
 
 def _drift_exceeds_band(
@@ -318,8 +338,9 @@ def _drift_exceeds_band(
     positions_dollars: dict[str, float],
     total_equity: float,
     band_abs_pct: float,
+    band_rel_pct: float = 0.0,
 ) -> bool:
-    """Any position drifted more than its (confidence-adjusted) band from target?"""
+    """Any position drifted more than its (size- and confidence-adjusted) band?"""
     if total_equity <= 0:
         return True
     target = {p.ticker.upper(): p.weight_pct for p in rec.allocation.positions}
@@ -329,10 +350,14 @@ def _drift_exceeds_band(
     }
     tickers = set(target) | set(current_pct)
     for t in tickers:
-        drift = abs(target.get(t, 0.0) - current_pct.get(t, 0.0))
-        # Positions the LLM dropped entirely get the base band (no confidence
-        # is meaningful for a zeroed-out position).
-        band = _effective_band(band_abs_pct, confidence.get(t))
+        target_pct = target.get(t, 0.0)
+        drift = abs(target_pct - current_pct.get(t, 0.0))
+        band = _effective_band(
+            band_abs_pct,
+            confidence.get(t),
+            target_pct=target_pct,
+            band_rel_pct=band_rel_pct,
+        )
         if drift >= band:
             return True
     return False
@@ -610,7 +635,8 @@ def run_tick(
     )
 
     if not regenerated and not _drift_exceeds_band(
-        rec, positions_dollars, allocation_base_for_drift, cfg.band_abs_pct
+        rec, positions_dollars, allocation_base_for_drift,
+        cfg.band_abs_pct, cfg.band_rel_pct,
     ):
         logger.info(
             "tick %s: no drift beyond %.1fpp - nothing to trade", tick_at, cfg.band_abs_pct

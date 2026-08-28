@@ -855,6 +855,7 @@ def _paper_loop(
     top_n: int,
     interval: str,
     band_abs_pct: float,
+    band_rel_pct: float,
     min_trade_dollars: float,
     stop_loss_pct: float | None,
     take_profit_pct: float | None,
@@ -900,6 +901,7 @@ def _paper_loop(
         top_n=top_n,
         interval_seconds=_parse_interval(interval),
         band_abs_pct=band_abs_pct,
+        band_rel_pct=band_rel_pct,
         min_trade_dollars=min_trade_dollars,
         stop_loss_pct=stop_loss_pct,
         take_profit_pct=take_profit_pct,
@@ -928,6 +930,7 @@ def _paper_tick(
     universe: str,
     top_n: int,
     band_abs_pct: float,
+    band_rel_pct: float,
     min_trade_dollars: float,
     stop_loss_pct: float | None,
     take_profit_pct: float | None,
@@ -946,7 +949,8 @@ def _paper_tick(
     cfg = LoopConfig(
         profile_name=profile_name, amount=amount, tickers=tickers,
         auto=auto, universe=universe, top_n=top_n,
-        band_abs_pct=band_abs_pct, min_trade_dollars=min_trade_dollars,
+        band_abs_pct=band_abs_pct, band_rel_pct=band_rel_pct,
+        min_trade_dollars=min_trade_dollars,
         stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
         dry_run=dry_run, once=True,
     )
@@ -1175,6 +1179,9 @@ def main() -> None:
     pt.add_argument("--universe", default="dow30")
     pt.add_argument("--top-n", type=int, default=8)
     pt.add_argument("--band-abs-pct", type=float, default=5.0)
+    pt.add_argument("--band-rel-pct", type=float, default=20.0,
+                    help="size-aware band: pct of target weight (default 20; "
+                         "0 disables). Small positions get tighter bands.")
     pt.add_argument("--min-trade-dollars", type=float, default=50.0)
     pt.add_argument("--stop-loss-pct", type=float, default=None)
     pt.add_argument("--take-profit-pct", type=float, default=None)
@@ -1193,6 +1200,9 @@ def main() -> None:
     pl.add_argument("--interval", default="30m",
                     help="tick cadence; accepts 30m / 1h / 45s (default 30m)")
     pl.add_argument("--band-abs-pct", type=float, default=5.0)
+    pl.add_argument("--band-rel-pct", type=float, default=20.0,
+                    help="size-aware band: pct of target weight (default 20; "
+                         "0 disables). Small positions get tighter bands.")
     pl.add_argument("--min-trade-dollars", type=float, default=50.0)
     pl.add_argument("--stop-loss-pct", type=float, default=None)
     pl.add_argument("--take-profit-pct", type=float, default=None)
@@ -1310,7 +1320,8 @@ def main() -> None:
         )
         _paper_tick(
             args.profile, args.amount, tickers, args.auto, args.universe,
-            args.top_n, args.band_abs_pct, args.min_trade_dollars,
+            args.top_n, args.band_abs_pct, args.band_rel_pct,
+            args.min_trade_dollars,
             args.stop_loss_pct, args.take_profit_pct, args.dry_run,
         )
     elif args.cmd == "paper-attribution":
@@ -1329,7 +1340,8 @@ def main() -> None:
         )
         _paper_loop(
             args.profile, args.amount, tickers, args.auto, args.universe,
-            args.top_n, args.interval, args.band_abs_pct, args.min_trade_dollars,
+            args.top_n, args.interval, args.band_abs_pct, args.band_rel_pct,
+            args.min_trade_dollars,
             args.stop_loss_pct, args.take_profit_pct, args.dry_run, args.once,
             args.log_file, args.regen_mode, args.force_open,
         )

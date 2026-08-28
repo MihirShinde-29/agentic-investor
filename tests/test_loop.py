@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from agentic_investor.orchestrator.loop import (
     LoopConfig,
     LoopState,
@@ -122,6 +124,54 @@ def test_effective_band_neutral_at_half_confidence():
 
 def test_effective_band_defaults_to_base_when_confidence_missing():
     assert _effective_band(5.0, confidence=None) == 5.0
+
+
+def test_effective_band_tightens_for_small_positions():
+    # 5% target * 20% rel = 1pp rel band; less than 5pp abs -> use 1pp.
+    band = _effective_band(5.0, confidence=None, target_pct=5.0, band_rel_pct=20.0)
+    assert band == 1.0
+
+
+def test_effective_band_keeps_abs_for_large_positions():
+    # 30% target * 20% rel = 6pp rel band; more than 5pp abs -> use 5pp cap.
+    band = _effective_band(5.0, confidence=None, target_pct=30.0, band_rel_pct=20.0)
+    assert band == 5.0
+
+
+def test_effective_band_composes_size_and_confidence():
+    # 10% target * 20% rel = 2pp. High confidence 0.9 -> 2 * 0.6 = 1.2pp.
+    band = _effective_band(5.0, confidence=0.9, target_pct=10.0, band_rel_pct=20.0)
+    assert band == pytest.approx(1.2)
+
+
+def test_effective_band_rel_disabled_when_zero():
+    band = _effective_band(5.0, confidence=None, target_pct=5.0, band_rel_pct=0.0)
+    assert band == 5.0
+
+
+def test_drift_exceeds_band_triggers_on_small_position_when_size_aware():
+    # 5% target, 8% current = 3pp drift. Without size-aware: 5pp band ->
+    # no trigger. With band_rel_pct=20 -> band=1pp -> trigger.
+    small_rec = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(
+                ticker="AAPL", weight_pct=5, dollars=500,
+                rationale="x", confidence=0.5,
+            )],
+            cash_pct=95, cash_dollars=9500, portfolio_rationale="x",
+        ),
+    )
+    # Without size-aware: no trigger.
+    assert _drift_exceeds_band(
+        small_rec, {"AAPL": 800}, total_equity=10_000,
+        band_abs_pct=5.0, band_rel_pct=0.0,
+    ) is False
+    # With size-aware: trigger.
+    assert _drift_exceeds_band(
+        small_rec, {"AAPL": 800}, total_equity=10_000,
+        band_abs_pct=5.0, band_rel_pct=20.0,
+    ) is True
 
 
 def test_low_confidence_widens_band_and_suppresses_drift_trigger():
