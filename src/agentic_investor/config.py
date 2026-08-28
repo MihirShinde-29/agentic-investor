@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     chroma_dir: str = "./.chroma"
     data_dir: str = "./data"
 
+    # Alpaca paper trading. Sign up at alpaca.markets for free paper keys.
+    # ALPACA_PAPER=false switches to live trading - do NOT flip this without
+    # deliberate review; the client wrapper enforces paper=True by default.
+    alpaca_api_key: str | None = None
+    alpaca_api_secret: str | None = None
+    alpaca_paper: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

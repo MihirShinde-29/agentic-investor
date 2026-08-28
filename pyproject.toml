@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "alpaca-py>=0.44.0",
     "chromadb>=1.5.9",
     "finnhub-python>=2.4.29",
     "instructor>=1.15.4",
