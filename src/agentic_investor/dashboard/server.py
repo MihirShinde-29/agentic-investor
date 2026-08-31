@@ -234,6 +234,80 @@ def create_app() -> FastAPI:
 
         return list_filter_skips(limit=limit)
 
+    @app.get("/api/calibration")
+    def calibration(horizon_minutes: int = 60, n_buckets: int = 5) -> dict:
+        """Bucketed confidence-vs-win-rate for the calibration mini-widget."""
+        from agentic_investor.ops.calibration import (
+            bucket_outcomes,
+            compute_trade_outcomes,
+        )
+
+        try:
+            outcomes = compute_trade_outcomes(horizon_minutes=horizon_minutes)
+            buckets = bucket_outcomes(outcomes, n_buckets=n_buckets)
+            return {
+                "horizon_minutes": horizon_minutes,
+                "n_trades": len(outcomes),
+                "overall_win_rate": (
+                    sum(o.win for o in outcomes) / len(outcomes)
+                    if outcomes else 0.0
+                ),
+                "buckets": [
+                    {
+                        "lo": b.lo,
+                        "hi": b.hi,
+                        "n_trades": b.n_trades,
+                        "mean_confidence": b.mean_confidence,
+                        "win_rate": b.win_rate,
+                    }
+                    for b in buckets
+                ],
+            }
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(
+                {"error": str(e), "buckets": [], "n_trades": 0},
+                status_code=500,
+            )
+
+    @app.get("/api/broker/status")
+    def broker_status() -> dict:
+        """Live health of Alpaca connection (clock + market state)."""
+        from agentic_investor.tools.paper_broker import get_broker
+
+        try:
+            broker = get_broker()
+            clock = broker.get_clock()
+            return {
+                "connected": True,
+                "market_open": bool(getattr(clock, "is_open", False)),
+                "next_open": str(getattr(clock, "next_open", None)),
+                "next_close": str(getattr(clock, "next_close", None)),
+                "server_time": str(getattr(clock, "timestamp", None)),
+            }
+        except Exception as e:  # noqa: BLE001
+            return {"connected": False, "error": str(e)}
+
+    @app.get("/api/session/{session_id}/events")
+    def session_events(session_id: str, limit: int = 5000) -> list[dict]:
+        """Replay events from a past session's JSONL for the session picker."""
+        import json as _json
+
+        jsonl = Path("out/sessions") / session_id / "session.jsonl"
+        if not jsonl.exists():
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        out: list[dict] = []
+        for line in jsonl.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(_json.loads(line))
+            except _json.JSONDecodeError:
+                continue
+            if len(out) >= limit:
+                break
+        return out
+
     @app.websocket("/ws/live")
     async def live(ws: WebSocket) -> None:
         await ws.accept()

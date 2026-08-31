@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { TrendingUp } from "lucide-react";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { useLatestRecId, useSessionStartedAt } from "@/hooks/useLatestRecId";
+import { useReplayEvents } from "@/hooks/useReplayEvents";
 import { cn } from "@/lib/utils";
 import { HeaderStrip } from "@/components/HeaderStrip";
 import { PortfolioChart } from "@/components/PortfolioChart";
@@ -8,6 +10,10 @@ import { PositionsTable } from "@/components/PositionsTable";
 import { TickerGrid } from "@/components/TickerGrid";
 import { EventFeed } from "@/components/EventFeed";
 import { FilterAttribution } from "@/components/FilterAttribution";
+import { CalibrationMini } from "@/components/CalibrationMini";
+import { AlertBanner } from "@/components/AlertBanner";
+import { HealthStrip } from "@/components/HealthStrip";
+import { SessionPicker } from "@/components/SessionPicker";
 
 function StatusPill({ status }: { status: "connecting" | "open" | "closed" }) {
   const color =
@@ -38,9 +44,16 @@ function StatusPill({ status }: { status: "connecting" | "open" | "closed" }) {
 }
 
 function App() {
-  const { events, status } = useLiveEvents(500);
+  const { events: liveEvents, status } = useLiveEvents(500);
+  const [selectedSession, setSelectedSession] = useState<string | "live">("live");
+  const [dismissedAlerts, setDismissedAlerts] = useState<Set<string>>(new Set());
+  const replayEvents = useReplayEvents(selectedSession);
+  const events = replayEvents ?? liveEvents;
   const recId = useLatestRecId(events);
   const sessionStartedAt = useSessionStartedAt(events);
+
+  const dismissAlert = (key: string) =>
+    setDismissedAlerts((prev) => new Set(prev).add(key));
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -59,12 +72,18 @@ function App() {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <SessionPicker
+              selected={selectedSession}
+              onChange={setSelectedSession}
+            />
             <FilterAttribution sessionStartedAt={sessionStartedAt} />
             <span className="hidden text-xs text-muted-foreground md:inline">
               {events.length} events
             </span>
-            <StatusPill status={status} />
+            <StatusPill
+              status={selectedSession === "live" ? status : "closed"}
+            />
           </div>
         </div>
         <div className="mx-auto max-w-[1600px] px-6 pb-3">
@@ -73,10 +92,18 @@ function App() {
       </header>
 
       <main className="mx-auto max-w-[1600px] px-6 py-6">
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
+        <AlertBanner
+          events={events}
+          dismissed={dismissedAlerts}
+          onDismiss={dismissAlert}
+        />
+        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
           <div className="space-y-4">
             <PortfolioChart />
-            <PositionsTable recId={recId} />
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_320px]">
+              <PositionsTable recId={recId} />
+              <CalibrationMini />
+            </div>
             <TickerGrid recId={recId} />
           </div>
           {/*
@@ -93,6 +120,8 @@ function App() {
         <div className="mt-4 lg:hidden">
           <EventFeed events={events} />
         </div>
+
+        <HealthStrip events={events} wsStatus={status} />
       </main>
 
       {/*
