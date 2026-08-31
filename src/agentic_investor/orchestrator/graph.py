@@ -228,6 +228,39 @@ def _messages(state: GraphState) -> list[dict]:
     else:
         prev_block = ""
 
+    # Correlation hint: tell the LLM which pairs will trip the concentration
+    # constraint so it pre-empts the violation instead of tripping it and
+    # producing a rec that fails guardrail check.
+    corr_block = ""
+    if getattr(profile, "correlation_enabled", False) and req.tickers:
+        try:
+            from agentic_investor.orchestrator.correlation import (
+                find_correlated_pairs_hint,
+            )
+            pairs = find_correlated_pairs_hint(
+                list(req.tickers),
+                window_days=getattr(profile, "correlation_window_days", 60),
+                threshold=getattr(profile, "max_pair_correlation", 0.7),
+            )
+            if pairs:
+                corr_lines = [
+                    f"  {a}+{b}: {corr:+.2f}" for a, b, corr in pairs[:8]
+                ]
+                cap = getattr(
+                    profile, "max_joint_correlated_weight_pct", 50.0
+                )
+                corr_block = (
+                    "\nHighly-correlated pairs in this universe (60d daily "
+                    "returns):\n"
+                    + "\n".join(corr_lines)
+                    + f"\nJoint weight of any pair above the correlation "
+                    f"threshold cannot exceed {cap:.0f}% -- these are one bet "
+                    "under the hood, not diversification. If you want big "
+                    "exposure, pick the higher-conviction name.\n"
+                )
+        except Exception:  # noqa: BLE001 - hint is best-effort
+            pass
+
     # cache_control marker: Anthropic caches everything up to and including
     # the marker. OpenAI ignores the field and auto-caches by prefix match.
     system_msg = {
@@ -252,6 +285,7 @@ def _messages(state: GraphState) -> list[dict]:
             f"  target:  {req.target}\n\n"
             f"Signals (JSON, keyed by ticker):\n{signals}\n"
             f"{prev_block}"
+            f"{corr_block}"
             f"{batch_block}\n"
             "Produce a valid Allocation."
         ),

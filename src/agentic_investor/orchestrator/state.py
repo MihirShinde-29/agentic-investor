@@ -190,6 +190,29 @@ def check_profile_rules(
             f"cash {allocation.cash_pct:.1f}% below "
             f"{profile.name} floor {profile.cash_floor_pct:.0f}%"
         )
+    # Correlation constraint: two highly-correlated names shouldn't add up to
+    # more than max_joint_correlated_weight_pct combined (one big bet
+    # masquerading as diversification).
+    if getattr(profile, "correlation_enabled", False):
+        try:
+            from agentic_investor.orchestrator.correlation import (
+                find_correlated_over_cap,
+            )
+            weights = {
+                p.ticker.upper(): p.weight_pct for p in allocation.positions
+            }
+            pairs = find_correlated_over_cap(
+                weights,
+                window_days=getattr(profile, "correlation_window_days", 60),
+                max_pair_correlation=getattr(profile, "max_pair_correlation", 0.7),
+                max_joint_pct=getattr(
+                    profile, "max_joint_correlated_weight_pct", 50.0
+                ),
+            )
+            for pair in pairs:
+                violations.append(pair.as_violation())
+        except Exception:  # noqa: BLE001 - correlation check must never crash
+            pass
     return violations
 
 

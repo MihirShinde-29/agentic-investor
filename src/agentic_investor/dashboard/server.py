@@ -130,11 +130,54 @@ def create_app() -> FastAPI:
         return out
 
     @app.get("/api/snapshots")
-    def snapshots(limit: int = 500) -> list[dict]:
-        """Portfolio equity snapshots for the equity-curve chart."""
+    def snapshots(limit: int = 500, session: str | None = None) -> list[dict]:
+        """Portfolio equity snapshots for the equity-curve chart.
+
+        When ?session=<id> is passed, restrict to snapshots captured within
+        that session's start..end window (parsed from session.jsonl).
+        """
+        from datetime import datetime as _dt
+
         from agentic_investor.tools.paper_store import list_snapshots
 
-        raw = list_snapshots(limit=limit)
+        raw = list_snapshots(limit=max(limit, 1000))
+        window: tuple[_dt, _dt] | None = None
+        if session:
+            jsonl = Path("out/sessions") / session / "session.jsonl"
+            if jsonl.exists():
+                import json as _json
+
+                first: str | None = None
+                last: str | None = None
+                for line in jsonl.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = _json.loads(line)
+                    except _json.JSONDecodeError:
+                        continue
+                    ts = obj.get("ts")
+                    if ts:
+                        if first is None:
+                            first = ts
+                        last = ts
+                if first and last:
+                    window = (
+                        _dt.fromisoformat(first.replace("Z", "+00:00")),
+                        _dt.fromisoformat(last.replace("Z", "+00:00")),
+                    )
+
+        def _in_window(iso_ts: str) -> bool:
+            if window is None:
+                return True
+            try:
+                ts = _dt.fromisoformat(iso_ts.replace("Z", "+00:00"))
+            except ValueError:
+                return True
+            return window[0] <= ts <= window[1]
+
+        filtered = [s for s in raw if _in_window(s["captured_at"])]
         return [
             {
                 "ts": s["captured_at"],
@@ -142,19 +185,81 @@ def create_app() -> FastAPI:
                 "cash": float(s["account"]["cash"]),
                 "portfolio_value": float(s["account"]["portfolio_value"]),
             }
-            for s in reversed(raw)  # oldest first for time series
-        ]
+            for s in reversed(filtered)  # oldest first for time series
+        ][:limit]
 
     @app.get("/api/bars/{ticker}")
-    def bars(ticker: str, period: str = "1d", interval: str = "5m") -> dict:
-        """OHLCV bars for a ticker; used by per-ticker charts + SPY overlay."""
-        from agentic_investor.tools.market import fetch_ohlcv
+    def bars(
+        ticker: str,
+        period: str = "1d",
+        interval: str = "5m",
+        session: str | None = None,
+    ) -> dict:
+        """OHLCV bars for a ticker; used by per-ticker charts + SPY overlay.
+
+        When ?session=<id> is passed, ignore `period` and instead fetch bars
+        for the calendar day(s) that the session ran (parsed from JSONL).
+        This lets the SPY overlay match the equity curve for past-session
+        replays instead of always showing today's bars.
+        """
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        import yfinance as _yf
 
         try:
-            df = fetch_ohlcv(ticker.upper(), period=period, interval=interval)
-            if df.empty:
+            df = None
+            if session:
+                jsonl = Path("out/sessions") / session / "session.jsonl"
+                if jsonl.exists():
+                    import json as _json
+
+                    first_ts: str | None = None
+                    last_ts: str | None = None
+                    for line in jsonl.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = _json.loads(line)
+                        except _json.JSONDecodeError:
+                            continue
+                        ts = obj.get("ts")
+                        if ts:
+                            if first_ts is None:
+                                first_ts = ts
+                            last_ts = ts
+                    if first_ts and last_ts:
+                        first_dt = _dt.fromisoformat(first_ts.replace("Z", "+00:00"))
+                        last_dt = _dt.fromisoformat(last_ts.replace("Z", "+00:00"))
+                        # yfinance 'end' is exclusive; pad by a day to include
+                        # the last bar. 1m bars only work for last 7 days; use
+                        # 5m for anything older to stay within the 60-day cap.
+                        age_days = (_dt.now(first_dt.tzinfo) - first_dt).days
+                        chosen_interval = (
+                            "1m" if age_days <= 6 else "5m"
+                            if age_days <= 55 else "1d"
+                        )
+                        df = _yf.download(
+                            ticker.upper(),
+                            start=first_dt.date().isoformat(),
+                            end=(last_dt.date() + _td(days=1)).isoformat(),
+                            interval=chosen_interval,
+                            progress=False,
+                            auto_adjust=False,
+                        )
+                        if df is not None and not df.empty and isinstance(
+                            df.columns, __import__("pandas").MultiIndex
+                        ):
+                            df.columns = df.columns.get_level_values(0)
+
+            if df is None:
+                from agentic_investor.tools.market import fetch_ohlcv
+
+                df = fetch_ohlcv(ticker.upper(), period=period, interval=interval)
+
+            if df is None or df.empty:
                 return {"ticker": ticker.upper(), "bars": []}
-            # Simple SMA20 overlay (needs 20+ bars to render)
             close = df["Close"].astype(float)
             sma20 = close.rolling(20).mean()
             bars_out = []
@@ -166,9 +271,11 @@ def create_app() -> FastAPI:
                     "l": float(row["Low"]),
                     "c": float(row["Close"]),
                     "v": float(row["Volume"]),
-                    "sma20": (float(sma20.loc[ts])
-                              if not (sma20.loc[ts] != sma20.loc[ts])  # NaN check
-                              else None),
+                    "sma20": (
+                        float(sma20.loc[ts])
+                        if not (sma20.loc[ts] != sma20.loc[ts])
+                        else None
+                    ),
                 })
             return {"ticker": ticker.upper(), "bars": bars_out}
         except Exception as e:  # noqa: BLE001

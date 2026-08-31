@@ -18,16 +18,22 @@ import { formatPct } from "@/lib/utils";
 
 type Point = { ts: number; portfolio: number | null; spy: number | null };
 
-export function PortfolioChart() {
+export function PortfolioChart({ sessionId }: { sessionId?: string }) {
+  const snapshotsUrl = sessionId
+    ? `/api/snapshots?limit=500&session=${encodeURIComponent(sessionId)}`
+    : "/api/snapshots?limit=500";
+  const spyUrl = sessionId
+    ? `/api/bars/SPY?session=${encodeURIComponent(sessionId)}`
+    : "/api/bars/SPY?period=1d&interval=5m";
   const { data: snaps } = useSWR<SnapshotResp[]>(
-    "/api/snapshots?limit=500",
+    snapshotsUrl,
     fetcher,
-    { refreshInterval: 30_000 },
+    { refreshInterval: sessionId ? 0 : 30_000 },
   );
   const { data: spy } = useSWR<BarsResp>(
-    "/api/bars/SPY?period=1d&interval=5m",
+    spyUrl,
     fetcher,
-    { refreshInterval: 60_000 },
+    { refreshInterval: sessionId ? 0 : 60_000 },
   );
 
   const { data, portfolioReturn, spyReturn, alpha } = useMemo(() => {

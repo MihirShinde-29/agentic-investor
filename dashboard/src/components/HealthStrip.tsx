@@ -67,7 +67,7 @@ export function HealthStrip({
   }, [events]);
 
   return (
-    <div className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/40 bg-card/40 px-3 py-2 text-[11px]">
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/40 bg-card/40 px-3 py-2 text-[11px]">
       <div className="flex flex-wrap items-center gap-4">
         <div className="flex items-center gap-1.5">
           <StatDot ok={wsStatus === "open"} />

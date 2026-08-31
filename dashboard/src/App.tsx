@@ -91,15 +91,17 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1600px] px-6 py-6">
+      <main className="mx-auto max-w-[1600px] space-y-4 px-6 py-6">
         <AlertBanner
           events={events}
           dismissed={dismissedAlerts}
           onDismiss={dismissAlert}
         />
-        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
           <div className="space-y-4">
-            <PortfolioChart />
+            <PortfolioChart
+              sessionId={selectedSession === "live" ? undefined : selectedSession}
+            />
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_320px]">
               <PositionsTable recId={recId} />
               <CalibrationMini />
@@ -117,11 +119,17 @@ function App() {
         </div>
 
         {/* Mobile fallback: below lg the feed renders inline under the graphs. */}
-        <div className="mt-4 lg:hidden">
+        <div className="lg:hidden">
           <EventFeed events={events} />
         </div>
 
-        <HealthStrip events={events} wsStatus={status} />
+        {/*
+          Right-pad the health strip on desktop so it stops before the
+          fixed-position event feed panel (360px wide + 16px gap).
+        */}
+        <div className="lg:pr-[376px]">
+          <HealthStrip events={events} wsStatus={status} />
+        </div>
       </main>
 
       {/*

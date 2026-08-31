@@ -50,6 +50,16 @@ class StrategyProfile(BaseModel):
     vol_scaling_enabled: bool = True
     vol_reference_pct: float = 2.0
 
+    # Correlation constraint: when any two held names have rolling correlation
+    # above max_pair_correlation, their combined weight can't exceed
+    # max_joint_correlated_weight_pct. Prevents "two names, one bet" (e.g.
+    # NVDA + MSFT both bullish -> allocator stacks both into concentrated
+    # tech-mega exposure). Set correlation_enabled=False to disable entirely.
+    correlation_enabled: bool = True
+    max_pair_correlation: float = Field(0.7, ge=0.0, le=1.0)
+    max_joint_correlated_weight_pct: float = Field(50.0, ge=0.0, le=100.0)
+    correlation_window_days: int = Field(60, ge=10, le=252)
+
     # Backtest friction defaults
     tcost_bps: float = 0.0
     slippage_bps: float = 0.0
