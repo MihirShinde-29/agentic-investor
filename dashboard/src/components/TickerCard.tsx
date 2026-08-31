@@ -16,6 +16,20 @@ import { Badge } from "@/components/ui/badge";
 import { TradeDrillDown } from "@/components/TradeDrillDown";
 import { cn, formatPct, formatUSD } from "@/lib/utils";
 
+type Timeframe = "1D" | "1M" | "3M" | "1Y";
+
+// Interval choices honor yfinance's per-period caps: 1m ≤ 7d, 5m/15m/30m ≤ 60d,
+// 1h ≤ 730d, 1d unlimited.
+// yfinance interval caps: 1m ≤ 7d, 5m/15m/30m ≤ 60d, 1h ≤ 730d, 1d unlimited.
+// 1D uses 1-minute bars so the chart fills up minute-by-minute during the
+// session instead of showing just a handful of 5-min bars near open.
+const TIMEFRAMES: Record<Timeframe, { period: string; interval: string; refreshMs: number }> = {
+  "1D": { period: "1d",  interval: "1m", refreshMs: 30_000 },
+  "1M": { period: "1mo", interval: "1h", refreshMs: 5 * 60_000 },
+  "3M": { period: "3mo", interval: "1d", refreshMs: 15 * 60_000 },
+  "1Y": { period: "1y",  interval: "1d", refreshMs: 30 * 60_000 },
+};
+
 export function TickerCard({
   position,
   trades,
@@ -26,10 +40,19 @@ export function TickerCard({
   recId: number | null;
 }) {
   const [drillOpen, setDrillOpen] = useState(false);
+  const [timeframe, setTimeframe] = useState<Timeframe>("1D");
+  const tf = TIMEFRAMES[timeframe];
   const { data: bars } = useSWR<BarsResp>(
-    `/api/bars/${position.ticker}?period=1d&interval=5m`,
+    `/api/bars/${position.ticker}?period=${tf.period}&interval=${tf.interval}`,
     fetcher,
-    { refreshInterval: 60_000 },
+    { refreshInterval: tf.refreshMs },
+  );
+  // Live last-trade price (Alpaca) — polls fast so the chart doesn't look
+  // frozen between 5-minute yfinance bar rolls.
+  const { data: latest } = useSWR<{ price: number | null; ts: string }>(
+    `/api/latest/${position.ticker}`,
+    fetcher,
+    { refreshInterval: timeframe === "1D" ? 5_000 : 30_000 },
   );
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -58,7 +81,29 @@ export function TickerCard({
         horzLines: { color: "hsl(240 3.7% 12%)" },
       },
       rightPriceScale: { borderVisible: false },
-      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
+      timeScale: {
+        borderVisible: false,
+        timeVisible: true,
+        secondsVisible: false,
+        // Zero right padding: keep the newest data flush against the y-axis
+        // so there's no empty gap between the last tick and the price axis.
+        rightOffset: 0,
+        // Axis tick labels: render in the browser's local timezone.
+        // localization.timeFormatter below only affects the crosshair
+        // tooltip -- axis ticks use tickMarkFormatter.
+        tickMarkFormatter: (t: number) =>
+          new Date((t as number) * 1000).toLocaleTimeString(undefined, {
+            hour: "numeric",
+            minute: "2-digit",
+          }),
+      },
+      localization: {
+        timeFormatter: (t: number) =>
+          new Date((t as number) * 1000).toLocaleTimeString(undefined, {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+      },
       autoSize: true,
       handleScroll: false,
       handleScale: false,
@@ -137,10 +182,17 @@ export function TickerCard({
       }))
       .sort((a, b) => (a.time as number) - (b.time as number));
     createSeriesMarkers(price, markers);
+    // Refit on every bars update so the whole timeframe stays visible from
+    // its start (e.g. 9:30 for 1D) with no cropping on the left.
     chart.timeScale().fitContent();
-  }, [bars, tickerTrades]);
+  }, [bars, tickerTrades, timeframe]);
+
+  // Live price is shown in the header pill (green pulsing badge). No
+  // on-chart overlay - the dashed line was noisy and the pill's already
+  // enough for at-a-glance price awareness.
 
   const gain = position.unrealized_pl >= 0;
+  const livePrice = latest?.price ?? null;
 
   return (
     <Card>
@@ -160,7 +212,16 @@ export function TickerCard({
             {position.qty.toFixed(4)} sh · entry {formatUSD(position.avg_entry_price)}
           </CardTitle>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-2">
+          {livePrice != null && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-success/10 px-1.5 py-0.5 text-[10px] font-medium tabular text-success ring-1 ring-inset ring-success/30"
+              title="Live last-trade price (Alpaca)"
+            >
+              <span className="size-1 animate-pulse rounded-full bg-success" />
+              {formatUSD(livePrice)}
+            </span>
+          )}
           <span
             className={cn(
               "text-xs font-medium tabular",
@@ -172,6 +233,23 @@ export function TickerCard({
         </div>
       </CardHeader>
       <CardContent className="p-2">
+        <div className="mb-1.5 flex items-center justify-end gap-0.5 px-1">
+          {(Object.keys(TIMEFRAMES) as Timeframe[]).map((tfKey) => (
+            <button
+              key={tfKey}
+              type="button"
+              onClick={() => setTimeframe(tfKey)}
+              className={cn(
+                "rounded-md px-1.5 py-0.5 text-[10px] font-medium tabular transition-colors",
+                timeframe === tfKey
+                  ? "bg-primary/15 text-primary ring-1 ring-primary/30"
+                  : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
+              )}
+            >
+              {tfKey}
+            </button>
+          ))}
+        </div>
         <div
           ref={containerRef}
           className="h-52 w-full"

@@ -130,17 +130,26 @@ def create_app() -> FastAPI:
         return out
 
     @app.get("/api/snapshots")
-    def snapshots(limit: int = 500, session: str | None = None) -> list[dict]:
+    def snapshots(
+        limit: int = 500,
+        session: str | None = None,
+        period: str | None = None,
+    ) -> list[dict]:
         """Portfolio equity snapshots for the equity-curve chart.
 
         When ?session=<id> is passed, restrict to snapshots captured within
         that session's start..end window (parsed from session.jsonl).
+
+        When ?period=1d|1mo|3mo|1y is passed (and no session), restrict to
+        snapshots within that lookback window from now.
         """
+        from datetime import UTC as _UTC
         from datetime import datetime as _dt
+        from datetime import timedelta as _td
 
         from agentic_investor.tools.paper_store import list_snapshots
 
-        raw = list_snapshots(limit=max(limit, 1000))
+        raw = list_snapshots(limit=max(limit, 5000))
         window: tuple[_dt, _dt] | None = None
         if session:
             jsonl = Path("out/sessions") / session / "session.jsonl"
@@ -167,6 +176,26 @@ def create_app() -> FastAPI:
                         _dt.fromisoformat(first.replace("Z", "+00:00")),
                         _dt.fromisoformat(last.replace("Z", "+00:00")),
                     )
+        elif period:
+            p = period.lower()
+            now = _dt.now(_UTC)
+            if p == "1d":
+                # "Today's session" = since today's market open (9:30 ET).
+                # If we're before today's open, roll back to yesterday's open
+                # so the chart still shows something.
+                import zoneinfo
+
+                et = zoneinfo.ZoneInfo("America/New_York")
+                now_et = now.astimezone(et)
+                open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                if now_et < open_et:
+                    open_et = open_et - _td(days=1)
+                window = (open_et.astimezone(_UTC), now)
+            else:
+                days_map = {"1mo": 31, "3mo": 93, "1y": 366}
+                n = days_map.get(p)
+                if n:
+                    window = (now - _td(days=n), now)
 
         def _in_window(iso_ts: str) -> bool:
             if window is None:
@@ -281,6 +310,29 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001
             return JSONResponse(
                 {"ticker": ticker.upper(), "error": str(e)}, status_code=500
+            )
+
+    @app.get("/api/latest/{ticker}")
+    def latest_price(ticker: str) -> dict:
+        """Current last-trade price for one ticker; Alpaca first, yfinance
+        fallback. Feeds the per-ticker chart's live-price overlay so the
+        chart doesn't look frozen between 5-minute bar rolls."""
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        from agentic_investor.tools.paper_broker import get_latest_price
+
+        try:
+            price = get_latest_price(ticker.upper())
+            return {
+                "ticker": ticker.upper(),
+                "price": float(price) if price is not None else None,
+                "ts": _dt.now(_UTC).isoformat(),
+            }
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(
+                {"ticker": ticker.upper(), "price": None, "error": str(e)},
+                status_code=500,
             )
 
     @app.get("/api/rec/{rec_id}")

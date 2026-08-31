@@ -1,5 +1,5 @@
 import useSWR from "swr";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -14,26 +14,40 @@ import type { BarsResp, SnapshotResp } from "@/lib/api";
 import { fetcher } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { formatPct } from "@/lib/utils";
+import { cn, formatPct } from "@/lib/utils";
 
 type Point = { ts: number; portfolio: number | null; spy: number | null };
 
+type Timeframe = "1D" | "1M" | "3M" | "1Y";
+
+// Match TickerCard: 1D uses 1-minute bars so the intraday chart fills up
+// throughout the session instead of showing just a few 5-min bars at open.
+const TIMEFRAMES: Record<Timeframe, { period: string; interval: string; refreshMs: number }> = {
+  "1D": { period: "1d",  interval: "1m", refreshMs: 30_000 },
+  "1M": { period: "1mo", interval: "1h", refreshMs: 5 * 60_000 },
+  "3M": { period: "3mo", interval: "1d", refreshMs: 15 * 60_000 },
+  "1Y": { period: "1y",  interval: "1d", refreshMs: 30 * 60_000 },
+};
+
 export function PortfolioChart({ sessionId }: { sessionId?: string }) {
+  const [timeframe, setTimeframe] = useState<Timeframe>("1D");
+  const tf = TIMEFRAMES[timeframe];
+  // Session picker overrides the timeframe: replay always shows the session window.
   const snapshotsUrl = sessionId
-    ? `/api/snapshots?limit=500&session=${encodeURIComponent(sessionId)}`
-    : "/api/snapshots?limit=500";
+    ? `/api/snapshots?limit=2000&session=${encodeURIComponent(sessionId)}`
+    : `/api/snapshots?limit=2000&period=${tf.period}`;
   const spyUrl = sessionId
     ? `/api/bars/SPY?session=${encodeURIComponent(sessionId)}`
-    : "/api/bars/SPY?period=1d&interval=5m";
+    : `/api/bars/SPY?period=${tf.period}&interval=${tf.interval}`;
   const { data: snaps } = useSWR<SnapshotResp[]>(
     snapshotsUrl,
     fetcher,
-    { refreshInterval: sessionId ? 0 : 30_000 },
+    { refreshInterval: sessionId ? 0 : tf.refreshMs },
   );
   const { data: spy } = useSWR<BarsResp>(
     spyUrl,
     fetcher,
-    { refreshInterval: sessionId ? 0 : 60_000 },
+    { refreshInterval: sessionId ? 0 : tf.refreshMs },
   );
 
   const { data, portfolioReturn, spyReturn, alpha } = useMemo(() => {
@@ -81,20 +95,42 @@ export function PortfolioChart({ sessionId }: { sessionId?: string }) {
 
   return (
     <Card>
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <CardTitle>Portfolio vs SPY</CardTitle>
-          <span className="text-xs text-muted-foreground">
-            session return · rebased to open
-          </span>
+      <CardHeader className="flex-col items-stretch gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CardTitle>Portfolio vs SPY</CardTitle>
+            <span className="text-xs text-muted-foreground">
+              {sessionId ? "session return" : `${timeframe} return`} · rebased to start
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Badge variant={portfolioReturn > 0 ? "success" : portfolioReturn < 0 ? "danger" : "muted"}>
+              Portfolio {formatPct(portfolioReturn)}
+            </Badge>
+            <Badge variant="muted">SPY {formatPct(spyReturn)}</Badge>
+            <Badge variant={alphaVariant}>Alpha {formatPct(alpha)}</Badge>
+          </div>
         </div>
-        <div className="flex items-center gap-1.5">
-          <Badge variant={portfolioReturn > 0 ? "success" : portfolioReturn < 0 ? "danger" : "muted"}>
-            Portfolio {formatPct(portfolioReturn)}
-          </Badge>
-          <Badge variant="muted">SPY {formatPct(spyReturn)}</Badge>
-          <Badge variant={alphaVariant}>Alpha {formatPct(alpha)}</Badge>
-        </div>
+        {/* Timeframe pills; hidden in session-replay mode since the window is fixed. */}
+        {!sessionId && (
+          <div className="flex items-center justify-end gap-0.5">
+            {(Object.keys(TIMEFRAMES) as Timeframe[]).map((tfKey) => (
+              <button
+                key={tfKey}
+                type="button"
+                onClick={() => setTimeframe(tfKey)}
+                className={cn(
+                  "rounded-md px-1.5 py-0.5 text-[10px] font-medium tabular transition-colors",
+                  timeframe === tfKey
+                    ? "bg-primary/15 text-primary ring-1 ring-primary/30"
+                    : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
+                )}
+              >
+                {tfKey}
+              </button>
+            ))}
+          </div>
+        )}
       </CardHeader>
       <CardContent className="p-2">
         {data.length < 2 ? (

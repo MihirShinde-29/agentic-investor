@@ -22,6 +22,13 @@ const EVENT_TO_KIND: Record<string, Kind> = {
   state_restored: "info",
   price_move_trigger: "info",
   force_regen: "info",
+  orders_reconciled: "info",
+  streamer_start: "info",
+  streamer_stop: "info",
+  decision_moment: "info",
+  market_open: "info",
+  market_closed: "info",
+  finbert_skip: "skip",
 };
 
 const KIND_STYLES: Record<
