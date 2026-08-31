@@ -394,6 +394,48 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001
             return {"connected": False, "error": str(e)}
 
+    @app.get("/api/correlation")
+    def correlation(
+        tickers: str | None = None, window_days: int = 60
+    ) -> dict:
+        """Pairwise 60-day return correlation matrix for the heatmap widget.
+
+        When ?tickers=... isn't given, uses current open positions from the
+        broker so the widget "just works" without config.
+        """
+        from agentic_investor.orchestrator.correlation import (
+            compute_correlation_matrix,
+        )
+
+        if tickers:
+            symbols = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+        else:
+            try:
+                from agentic_investor.tools.paper_broker import get_broker
+
+                symbols = [p.ticker for p in get_broker().get_positions()]
+            except Exception:  # noqa: BLE001
+                symbols = []
+        if len(symbols) < 2:
+            return {"tickers": symbols, "matrix": [], "window_days": window_days}
+        try:
+            df = compute_correlation_matrix(symbols, window_days=window_days)
+            if df is None:
+                return {
+                    "tickers": symbols, "matrix": [], "window_days": window_days,
+                }
+            ordered = list(df.columns)
+            matrix = [
+                [float(df.loc[a, b]) for b in ordered] for a in ordered
+            ]
+            return {
+                "tickers": ordered,
+                "matrix": matrix,
+                "window_days": window_days,
+            }
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     @app.get("/api/session/{session_id}/events")
     def session_events(session_id: str, limit: int = 5000) -> list[dict]:
         """Replay events from a past session's JSONL for the session picker."""

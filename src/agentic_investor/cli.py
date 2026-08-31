@@ -879,6 +879,8 @@ def _paper_loop(
     force_open: bool,
     serve_dashboard: bool,
     dashboard_port: int,
+    finbert_prefilter: bool,
+    finbert_min_delta: float,
 ) -> None:
     import logging
 
@@ -927,6 +929,8 @@ def _paper_loop(
         dry_run=dry_run,
         once=once,
         force_open=force_open,
+        finbert_prefilter_enabled=finbert_prefilter,
+        finbert_min_delta=finbert_min_delta,
     )
     broker = get_broker()
     try:
@@ -1243,6 +1247,13 @@ def main() -> None:
                          "--dashboard-port so browsers can watch the loop live")
     pl.add_argument("--dashboard-port", type=int, default=8000,
                     help="port for --serve-dashboard (default 8000)")
+    pl.add_argument("--finbert-prefilter", action="store_true",
+                    help="score each news batch with local finBERT and skip "
+                         "LLM regen when sentiment barely moves (opt-in, "
+                         "downloads a ~440MB model on first use)")
+    pl.add_argument("--finbert-min-delta", type=float, default=0.15,
+                    help="min sentiment delta (in [0,2]) needed to fire a "
+                         "regen when --finbert-prefilter is on (default 0.15)")
 
     pa = sub.add_parser("paper-attribution",
                         help="rolling analysis across all sessions: filter "
@@ -1379,6 +1390,7 @@ def main() -> None:
             args.stop_loss_pct, args.take_profit_pct, args.dry_run, args.once,
             args.log_file, args.regen_mode, args.force_open,
             args.serve_dashboard, args.dashboard_port,
+            args.finbert_prefilter, args.finbert_min_delta,
         )
     else:
         _print_config()

@@ -64,6 +64,27 @@ risk tolerance, and target, produce a paper-portfolio allocation.
   conflicting signals, forced-choice sizing. The rebalancer uses this to
   widen bands on low-confidence positions (anti-churn).
 
+# Interpreting the market regime block (when provided)
+The prompt may include "Market regime: <label> · ..." at the top-level.
+Treat it as a modifier on your default sizing:
+- bull: lean risk-on; cash near the profile floor is fine.
+- bear: lean defensive; cash toward the top of the profile range; skew
+  toward names with defensive news + low ATR.
+- high_vol (VIX >= 25): trim risk broadly, hold more cash, prefer names
+  with strongly positive news + low ATR. Reject aggressive concentration.
+- sideways / unknown: no modifier - stick to profile default.
+
+# Interpreting the PEAD block (when a ticker has one)
+Post-earnings-announcement drift: after an earnings surprise, prices
+continue drifting in the direction of the surprise for ~30-60 days. When
+a ticker's signals include a `pead` field:
+- days_since_earnings <= 30 and last_surprise_pct > +2 -> up-weight modestly
+  (~+3-5pp above what technical/news alone would suggest); the drift is a
+  real edge.
+- last_surprise_pct < -2 within 30 days -> down-weight modestly (-3-5pp);
+  the miss is still being priced in.
+- Ignore ticks with |surprise| under 2% or missing surprise data.
+
 # Interpreting breaking-news context (when provided)
 The user message may include a "Breaking-news events" section from the live
 stream. Each item is tagged HOT (fresh, price likely not yet moved) or COOKED
@@ -140,7 +161,11 @@ position; not being fully invested is a legitimate output.
 """
 
 
-def _summarize_signals(tech: list[TechnicalSignal], news: list[NewsSignal]) -> str:
+def _summarize_signals(
+    tech: list[TechnicalSignal],
+    news: list[NewsSignal],
+    snapshots: dict[str, MarketSnapshot] | None = None,
+) -> str:
     by_ticker: dict[str, dict] = {}
     for t in tech:
         by_ticker.setdefault(t.ticker, {})["technical"] = t.model_dump(
@@ -150,6 +175,18 @@ def _summarize_signals(tech: list[TechnicalSignal], news: list[NewsSignal]) -> s
         by_ticker.setdefault(n.ticker, {})["news"] = n.model_dump(
             include={"stance", "confidence", "reasoning"}
         )
+    # PEAD block: only include when we're inside the drift window. Empty
+    # otherwise so the LLM ignores it for stale tickers.
+    if snapshots:
+        for ticker, snap in snapshots.items():
+            days = getattr(snap, "days_since_earnings", None)
+            if days is None:
+                continue
+            surprise = getattr(snap, "last_earnings_surprise_pct", None)
+            by_ticker.setdefault(ticker, {})["pead"] = {
+                "days_since_earnings": days,
+                "last_surprise_pct": surprise,
+            }
     return json.dumps(by_ticker, indent=2)
 
 
@@ -208,7 +245,9 @@ def _messages(state: GraphState) -> list[dict]:
     req = state["request"]
     profile = _profile_from_state(state)
     signals = _summarize_signals(
-        state.get("technical_signals", []), state.get("news_signals", [])
+        state.get("technical_signals", []),
+        state.get("news_signals", []),
+        state.get("market_snapshots"),
     )
     batch_ctx = (state.get("news_batch_context") or "").strip()
     batch_block = (
@@ -227,6 +266,18 @@ def _messages(state: GraphState) -> list[dict]:
         )
     else:
         prev_block = ""
+
+    # Market regime block: one-line label + justification. Cached per
+    # tick-worth of time; treats yfinance blip failures as no-op.
+    regime_block = ""
+    try:
+        from agentic_investor.orchestrator.regime import detect_regime
+
+        regime = detect_regime()
+        if regime.label != "unknown":
+            regime_block = f"\nMarket regime: {regime.prompt_block()}\n"
+    except Exception:  # noqa: BLE001 - regime is best-effort
+        pass
 
     # Correlation hint: tell the LLM which pairs will trip the concentration
     # constraint so it pre-empts the violation instead of tripping it and
@@ -285,6 +336,7 @@ def _messages(state: GraphState) -> list[dict]:
             f"  target:  {req.target}\n\n"
             f"Signals (JSON, keyed by ticker):\n{signals}\n"
             f"{prev_block}"
+            f"{regime_block}"
             f"{corr_block}"
             f"{batch_block}\n"
             "Produce a valid Allocation."

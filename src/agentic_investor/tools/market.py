@@ -54,9 +54,52 @@ class MarketSnapshot(BaseModel):
     ret_6m: float | None = None
     ret_1y: float | None = None
 
+    # Post-earnings-announcement drift (PEAD). One of the most durable
+    # anomalies in academic finance: positive surprises keep drifting up for
+    # ~30-60 days, misses down. Both fields are None outside the drift window.
+    days_since_earnings: int | None = None
+    last_earnings_surprise_pct: float | None = None
+
     # Deterministic detections
     signals: list[str] = Field(default_factory=list)
     patterns: list[str] = Field(default_factory=list)
+
+
+def _pead_features(
+    ticker: str, drift_window_days: int = 30
+) -> tuple[int | None, float | None]:
+    """Return (days_since_last_earnings, last_surprise_pct) if within window.
+
+    Uses yfinance's earnings_dates (past + future rows with EPS estimate +
+    reported + surprise). Best-effort: returns (None, None) on any failure.
+    Only returns non-None when the last earnings report is within the drift
+    window - outside it, PEAD isn't a live signal.
+    """
+    try:
+        tk = yf.Ticker(ticker)
+        ed = tk.earnings_dates
+        if ed is None or ed.empty:
+            return None, None
+        # earnings_dates index is tz-aware UTC-ish timestamps; filter past only.
+        now = pd.Timestamp.utcnow()
+        try:
+            past = ed[ed.index <= now]
+        except TypeError:
+            # Fallback if the index isn't tz-aware.
+            past = ed[ed.index.tz_localize(None) <= now.tz_localize(None)]
+        if past.empty:
+            return None, None
+        last = past.iloc[0]  # rows are newest-first in yfinance
+        idx = past.index[0]
+        days = int((now - idx).days) if idx <= now else 0
+        if days > drift_window_days:
+            return None, None
+        surprise = last.get("Surprise(%)")
+        if surprise is None or pd.isna(surprise):
+            return days, None
+        return days, float(surprise)
+    except Exception:  # noqa: BLE001 - PEAD is optional; never break snapshots
+        return None, None
 
 
 def _drop_incomplete(df: pd.DataFrame) -> pd.DataFrame:
@@ -280,6 +323,9 @@ def get_market_snapshot(
         last_close, rsi_last, sma_50s, sma_200s, macd_line, signal_line,
         percent_b, adx_s, vol_vs_avg,
     )
+    days_since_earnings, last_surprise = (
+        _pead_features(ticker) if end is None else (None, None)
+    )
 
     return MarketSnapshot(
         ticker=ticker.upper(),
@@ -307,6 +353,10 @@ def get_market_snapshot(
         ret_3m=_return_over(close, 63),
         ret_6m=_return_over(close, 126),
         ret_1y=_return_over(close, 252),
+        days_since_earnings=days_since_earnings,
+        last_earnings_surprise_pct=(
+            round(last_surprise, 2) if last_surprise is not None else None
+        ),
         signals=signals,
         patterns=detect_candlestick_patterns(df),
     )

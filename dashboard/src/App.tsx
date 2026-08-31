@@ -11,6 +11,7 @@ import { TickerGrid } from "@/components/TickerGrid";
 import { EventFeed } from "@/components/EventFeed";
 import { FilterAttribution } from "@/components/FilterAttribution";
 import { CalibrationMini } from "@/components/CalibrationMini";
+import { CorrelationHeatmap } from "@/components/CorrelationHeatmap";
 import { AlertBanner } from "@/components/AlertBanner";
 import { HealthStrip } from "@/components/HealthStrip";
 import { SessionPicker } from "@/components/SessionPicker";
@@ -104,7 +105,10 @@ function App() {
             />
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_320px]">
               <PositionsTable recId={recId} />
-              <CalibrationMini />
+              <div className="space-y-4">
+                <CalibrationMini />
+                <CorrelationHeatmap />
+              </div>
             </div>
             <TickerGrid recId={recId} />
           </div>

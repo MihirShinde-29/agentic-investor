@@ -73,6 +73,14 @@ class LoopConfig:
     # Bounds prompt-size growth from wildcard news + body-ticker extraction.
     max_promotions_per_regen: int = 3
 
+    # P1 #3: finBERT sentiment pre-filter. When enabled, scores each news
+    # batch locally with finBERT and skips the full LLM regen if aggregate
+    # sentiment barely moved from the last fired batch (delta below threshold).
+    # Cheap heuristic that shaves LLM calls on quiet news. Opt-in because the
+    # model download is ~440MB.
+    finbert_prefilter_enabled: bool = False
+    finbert_min_delta: float = 0.15
+
     # Discipline layer (vetoes at the rebalancer boundary)
     cooldown_seconds: int = 900              # 0q temporal cooldown
     adverse_move_threshold_pct: float = 1.0  # 0r don't buy falling knives
@@ -121,6 +129,9 @@ class LoopState:
     last_regen_at: datetime | None = None
     # Last-rec stances, used by the (currently disabled) technical-change trigger.
     last_stances: dict[str, str] = field(default_factory=dict)
+    # P1 #3: last batch's finBERT aggregate sentiment (in [-1, 1]). Used by
+    # the pre-filter to skip regens when sentiment barely moves.
+    last_finbert_score: float | None = None
     # {ticker: (side, iso_ts)} - most-recent trade per ticker, used by the
     # temporal-cooldown veto in compute_trade_plan.
     recent_trades: dict[str, tuple[str, str]] = field(default_factory=dict)
@@ -141,6 +152,7 @@ class LoopState:
             ),
             "last_stances": dict(self.last_stances),
             "recent_trades": dict(self.recent_trades),
+            "last_finbert_score": self.last_finbert_score,
         }
 
     @classmethod
@@ -166,6 +178,7 @@ class LoopState:
                 k: (v[0], v[1]) if isinstance(v, list | tuple) else v
                 for k, v in (d.get("recent_trades") or {}).items()
             },
+            last_finbert_score=d.get("last_finbert_score"),
         )
 
 
@@ -978,6 +991,48 @@ def run_event_loop(
                         decision_state, now,
                         reaction_price_fetcher=default_reaction_price_fetcher,
                     )
+                    # P1 #3: finBERT pre-filter. Score the batch locally and
+                    # skip the LLM regen if aggregate sentiment barely moved
+                    # from the last fired batch. Fully opt-in via config.
+                    if cfg.finbert_prefilter_enabled:
+                        try:
+                            from agentic_investor.orchestrator.finbert_prefilter import (
+                                score_events,
+                            )
+                            all_events = [
+                                *(t.event for t in batch.hot),
+                                *(t.event for t in batch.cooked),
+                            ]
+                            sent = score_events(all_events)
+                            if sent is not None:
+                                prev = state.last_finbert_score
+                                if prev is not None:
+                                    delta = abs(sent.score - prev)
+                                    if delta < cfg.finbert_min_delta:
+                                        logger.info(
+                                            "finBERT pre-filter skip: sentiment "
+                                            "delta %.3f < %.3f (score=%.3f, "
+                                            "%d headlines)",
+                                            delta, cfg.finbert_min_delta,
+                                            sent.score, sent.n_headlines,
+                                        )
+                                        if session:
+                                            session.log("finbert_skip", {
+                                                "reason": reason,
+                                                "score": sent.score,
+                                                "prev_score": prev,
+                                                "delta": delta,
+                                                "threshold": cfg.finbert_min_delta,
+                                                "n_headlines": sent.n_headlines,
+                                            })
+                                        # Consume the batch (already drained
+                                        # via build_batch), skip firing.
+                                        state.pending_news_context = None
+                                        time.sleep(poll_seconds)
+                                        continue
+                                state.last_finbert_score = sent.score
+                        except Exception as e:  # noqa: BLE001
+                            logger.debug("finBERT prefilter error: %s", e)
                     ctx = render_batch_context(batch)
                     state.pending_news_context = ctx or None
                     if session:
