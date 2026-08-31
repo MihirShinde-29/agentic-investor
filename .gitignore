@@ -15,10 +15,15 @@ wheels/
 # Local data / vector store / databases / plot output
 data/
 .chroma/
-out/
+out/*
 *.db
 *.sqlite3
 *.png
+
+# Track the eval baseline so CI's regression gate has something to compare to.
+!out/eval/
+out/eval/*
+!out/eval/baseline_scorecard.json
 
 # Caches
 .pytest_cache/

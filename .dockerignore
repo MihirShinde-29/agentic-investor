@@ -1,0 +1,16 @@
+.git
+.venv
+.chroma
+.pytest_cache
+.ruff_cache
+node_modules
+dashboard/node_modules
+dashboard/dist
+out
+agentic_investor.db
+*.log
+__pycache__
+**/__pycache__
+tests
+docs
+.claude

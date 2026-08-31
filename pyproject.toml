@@ -12,6 +12,7 @@ dependencies = [
     "chromadb>=1.5.9",
     "fastapi>=0.115.0",
     "instructor>=1.15.4",
+    "langfuse>=2.60.0",
     "langgraph>=1.2.11",
     "litellm>=1.96.2",
     "matplotlib>=3.11.1",

@@ -200,6 +200,26 @@ if _track_usage not in (litellm.success_callback or []):
     litellm.success_callback = [*(litellm.success_callback or []), _track_usage]
 
 
+def _maybe_enable_langfuse() -> None:
+    """Wire LiteLLM's built-in Langfuse callback if credentials are set.
+
+    Langfuse traces every LLM call (prompts, completions, tokens, cost) into
+    a UI you can browse to debug allocator decisions. Opt-in via env vars so
+    a fresh clone with no keys still works.
+    """
+    import os
+
+    if not os.getenv("LANGFUSE_PUBLIC_KEY") or not os.getenv("LANGFUSE_SECRET_KEY"):
+        return
+    for hook in ("success_callback", "failure_callback"):
+        current = list(getattr(litellm, hook, None) or [])
+        if "langfuse" not in current:
+            setattr(litellm, hook, [*current, "langfuse"])
+
+
+_maybe_enable_langfuse()
+
+
 @retry(
     reraise=True,
     stop=stop_after_attempt(5),

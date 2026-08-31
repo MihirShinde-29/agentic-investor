@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: setup python
+        run: uv python install 3.12
+
+      - name: install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: pytest
+        run: uv run pytest
+
+  eval-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: setup python
+        run: uv python install 3.12
+
+      - name: install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: cache huggingface models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-all-MiniLM-L6-v2
+
+      - name: L1 retrieval eval + regression gate
+        run: |
+          uv run agentic-investor eval-report \
+            --skip L2 L3 \
+            --out-dir out/eval \
+            --compare-to out/eval/baseline_scorecard.json

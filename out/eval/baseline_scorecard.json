@@ -1,0 +1,766 @@
+{
+  "generated_at": "2026-08-27T04:43:59.671964+00:00",
+  "verdicts": [
+    {
+      "layer": "L1 Retrieval",
+      "status": "PASSING",
+      "summary": "NDCG@5=0.924, Hit@k=1.000, MRR=0.900 across 10 cases"
+    },
+    {
+      "layer": "L2 Agent",
+      "status": "PASSING",
+      "summary": "Stance 90%, schema 100%, fully-passing 9/10, rationale 4.47/5"
+    },
+    {
+      "layer": "L3 Backtest",
+      "status": "REPORTED",
+      "summary": "Port +91.1% (Sharpe 1.07, DD -26.2%) vs benchmark +62.9% (Sharpe 1.28), alpha +3.02%, beta 1.27"
+    }
+  ],
+  "retrieval": {
+    "k": 5,
+    "n_cases": 10,
+    "n_fixtures": 17,
+    "aggregate": {
+      "hit_at_k": 1.0,
+      "recall_at_k": 1.0,
+      "mrr": 0.9,
+      "ndcg_at_k": 0.924
+    },
+    "per_case": [
+      {
+        "case_id": "nvda-earnings-guidance",
+        "query": "quarterly earnings and revenue guidance",
+        "ticker": "NVDA",
+        "k": 5,
+        "retrieved_ids": [
+          "nvda-earn-q2-16",
+          "nvda-guid-02",
+          "nvda-earn-01",
+          "nvda-ratg-04",
+          "nvda-macr-15"
+        ],
+        "relevant_ids": [
+          "nvda-earn-01",
+          "nvda-guid-02"
+        ],
+        "metrics": {
+          "hit_at_k": 1.0,
+          "recall_at_k": 1.0,
+          "mrr": 0.5,
+          "ndcg_at_k": 0.693
+        }
+      },
+      {
+        "case_id": "nvda-new-product",
+        "query": "new GPU product launch",
+        "ticker": "NVDA",
+        "k": 5,
+        "retrieved_ids": [
+          "nvda-prod-03",
+          "nvda-legl-05",
+          "nvda-ratg-04",
+          "nvda-guid-02",
+          "nvda-earn-01"
+        ],
+        "relevant_ids": [
+          "nvda-prod-03"
+        ],
+        "metrics": {
+          "hit_at_k": 1.0,
+          "recall_at_k": 1.0,
+          "mrr": 1.0,
+          "ndcg_at_k": 1.0
+        }
+      },
+      {
+        "case_id": "nvda-regulatory",
+        "query": "regulatory or antitrust concerns",
+        "ticker": "NVDA",
+        "k": 5,
+        "retrieved_ids": [
+          "nvda-legl-05",
+          "nvda-macr-15",
+          "nvda-earn-01",
+          "nvda-earn-q2-16",
+          "nvda-ratg-04"
+        ],
+        "relevant_ids": [
+          "nvda-legl-05"
+        ],
+        "metrics": {
+          "hit_at_k": 1.0,
+          "recall_at_k": 1.0,
+          "mrr": 1.0,
+          "ndcg_at_k": 1.0
+        }
+      },
+      {
+        "case_id": "nvda-analyst-rating",
+        "query": "analyst upgrade or price target change",
+        "ticker": "NVDA",
+        "k": 5,
+        "retrieved_ids": [
+          "nvda-ratg-04",
+          "nvda-guid-02",
+          "nvda-earn-01",
+          "nvda-earn-q2-16",
+          "nvda-macr-15"
+        ],
+        "relevant_ids": [
+          "nvda-ratg-04"
+        ],
+        "metrics": {
+          "hit_at_k": 1.0,
+          "recall_at_k": 1.0,
+          "mrr": 1.0,
+          "ndcg_at_k": 1.0
+        }
+      },
+      {
+        "case_id": "aapl-china-sales",
+        "query": "China market sales and competitive pressure",
+        "ticker": "AAPL",
+        "k": 5,
+        "retrieved_ids": [
+          "aapl-chna-09",
+          "aapl-ratg-10",
+          "aapl-svcs-08",
+          "aapl-earn-06",
+          "aapl-prod-07"
+        ],
+        "relevant_ids": [
+          "aapl-chna-09"
+        ],
+        "metrics": {
+          "hit_at_k": 1.0,
+          "recall_at_k": 1.0,
+          "mrr": 1.0,
+          "ndcg_at_k": 1.0
+        }
+      },
+      {
+        "case_id": "aapl-services-growth",
+        "query": "services revenue growth",
+        "ticker": "AAPL",
+        "k": 5,
+        "retrieved_ids": [
+          "aapl-svcs-08",
+          "aapl-earn-06",
+          "aapl-chna-09",
+          "aapl-ratg-10",
+          "aapl-prod-07"
+        ],
+        "relevant_ids": [
+          "aapl-svcs-08",
+          "aapl-earn-06"
+        ],
+        "metrics": {
+          "hit_at_k": 1.0,
+          "recall_at_k": 1.0,
+          "mrr": 1.0,
+          "ndcg_at_k": 1.0
+        }
+      },
+      {
+        "case_id": "msft-ai-partnerships",
+        "query": "AI partnerships and acquisitions",
+        "ticker": "MSFT",
+        "k": 5,
+        "retrieved_ids": [
+          "msft-acqi-13",
+          "msft-ai-12",
+          "msft-copl-14",
+          "msft-earn-11",
+          "msft-cloud-old-17"
+        ],
+        "relevant_ids": [
+          "msft-ai-12",
+          "msft-acqi-13"
+        ],
+        "metrics": {
+          "hit_at_k": 1.0,
+          "recall_at_k": 1.0,
+          "mrr": 1.0,
+          "ndcg_at_k": 1.0
+        }
+      },
+      {
+        "case_id": "msft-cloud-growth",
+        "query": "Azure cloud growth and market share",
+        "ticker": "MSFT",
+        "k": 5,
+        "retrieved_ids": [
+          "msft-earn-11",
+          "msft-cloud-old-17",
+          "msft-ai-12",
+          "msft-copl-14",
+          "msft-acqi-13"
+        ],
+        "relevant_ids": [
+          "msft-earn-11"
+        ],
+        "metrics": {
+          "hit_at_k": 1.0,
+          "recall_at_k": 1.0,
+          "mrr": 1.0,
+          "ndcg_at_k": 1.0
+        }
+      },
+      {
+        "case_id": "adv-nvda-current-earnings",
+        "query": "most recent earnings and guidance",
+        "ticker": "NVDA",
+        "k": 5,
+        "retrieved_ids": [
+          "nvda-guid-02",
+          "nvda-earn-q2-16",
+          "nvda-earn-01",
+          "nvda-ratg-04",
+          "nvda-macr-15"
+        ],
+        "relevant_ids": [
+          "nvda-earn-01",
+          "nvda-guid-02"
+        ],
+        "metrics": {
+          "hit_at_k": 1.0,
+          "recall_at_k": 1.0,
+          "mrr": 1.0,
+          "ndcg_at_k": 0.92
+        }
+      },
+      {
+        "case_id": "adv-msft-latest-cloud",
+        "query": "latest quarterly cloud and Azure growth",
+        "ticker": "MSFT",
+        "k": 5,
+        "retrieved_ids": [
+          "msft-cloud-old-17",
+          "msft-earn-11",
+          "msft-ai-12",
+          "msft-copl-14",
+          "msft-acqi-13"
+        ],
+        "relevant_ids": [
+          "msft-earn-11"
+        ],
+        "metrics": {
+          "hit_at_k": 1.0,
+          "recall_at_k": 1.0,
+          "mrr": 0.5,
+          "ndcg_at_k": 0.631
+        }
+      }
+    ]
+  },
+  "agents": {
+    "n_cases": 10,
+    "n_samples_per_case": 3,
+    "schema_validity": 1.0,
+    "stance_pass_rate": 0.9,
+    "confidence_in_range_rate": 1.0,
+    "fully_passing_cases": 9,
+    "per_case": [
+      {
+        "case_id": "clear-bullish-momentum",
+        "n_samples": 3,
+        "schema_validity": 1.0,
+        "stance_pass_rate": 1.0,
+        "avg_confidence": 0.85,
+        "confidence_in_range": true,
+        "stances_seen": [
+          "bullish",
+          "bullish",
+          "bullish"
+        ],
+        "confidences_seen": [
+          0.85,
+          0.85,
+          0.85
+        ],
+        "errors": [],
+        "rationale_verdicts": [
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values such as SMA levels, ADX, MACD histogram, and OBV trend, providing a clear and logical argument for a bullish stance. It comprehensively covers trend, momentum, and volume aspects, aligning perfectly with the snapshot data."
+          },
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values such as SMA levels, ADX, MACD histogram, and returns, creating a coherent and comprehensive argument for a bullish stance."
+          },
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values such as SMA levels, ADX, RSI, and MACD, demonstrating a strong logical flow and consideration of multiple dimensions, all accurately reflecting the snapshot."
+          }
+        ],
+        "avg_rationale_overall": 5.0
+      },
+      {
+        "case_id": "clear-bearish-downtrend",
+        "n_samples": 3,
+        "schema_validity": 1.0,
+        "stance_pass_rate": 1.0,
+        "avg_confidence": 0.85,
+        "confidence_in_range": true,
+        "stances_seen": [
+          "bearish",
+          "bearish",
+          "bearish"
+        ],
+        "confidences_seen": [
+          0.85,
+          0.85,
+          0.85
+        ],
+        "errors": [],
+        "rationale_verdicts": [
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values such as SMA levels, ADX, RSI, MACD, and volume metrics, providing a clear and logical argument for a bearish stance. It comprehensively covers trend, momentum, and price structure, aligning perfectly with the snapshot data."
+          },
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values such as being below SMA50 and SMA200, ADX at 28, and mentions the bearish MACD and patterns, creating a coherent and comprehensive analysis."
+          },
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale is well-grounded in specific indicator values, logically consistent, covers all major dimensions, accurately reflects the snapshot data, and presents a strong overall argument for a bearish stance."
+          }
+        ],
+        "avg_rationale_overall": 5.0
+      },
+      {
+        "case_id": "neutral-chop-weak-trend",
+        "n_samples": 3,
+        "schema_validity": 1.0,
+        "stance_pass_rate": 1.0,
+        "avg_confidence": 0.7,
+        "confidence_in_range": true,
+        "stances_seen": [
+          "neutral",
+          "neutral",
+          "neutral"
+        ],
+        "confidences_seen": [
+          0.7,
+          0.7,
+          0.7
+        ],
+        "errors": [],
+        "rationale_verdicts": [
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively ties specific indicator values to the analysis, maintaining a logical flow throughout. It comprehensively covers trend, momentum, volatility, and volume, accurately reflecting the snapshot data."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicator values like ADX, SMA levels, and BB%B, but could improve by directly linking all claims to the snapshot values. The reasoning is logically consistent and covers major dimensions."
+          },
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values such as ADX, RSI, BB%, and SMA levels, providing a clear and logical analysis of the mixed trend and momentum. It comprehensively covers trend, momentum, volatility, and volume, accurately reflecting the snapshot data."
+          }
+        ],
+        "avg_rationale_overall": 4.67
+      },
+      {
+        "case_id": "overbought-in-uptrend",
+        "n_samples": 3,
+        "schema_validity": 1.0,
+        "stance_pass_rate": 0.0,
+        "avg_confidence": 0.817,
+        "confidence_in_range": true,
+        "stances_seen": [
+          "bearish",
+          "bearish",
+          "bearish"
+        ],
+        "confidences_seen": [
+          0.85,
+          0.8,
+          0.8
+        ],
+        "errors": [],
+        "rationale_verdicts": [
+          {
+            "groundedness": 4,
+            "coherence": 4,
+            "completeness": 4,
+            "accuracy": 5,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicator values like RSI at 82 and ADX at 35, but it could better connect the bullish signals to the bearish stance. It covers major dimensions but lacks a bit of depth in discussing volume and price structure."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 4,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like ADX, RSI, and volume, but it could improve by directly referencing the MACD values. The reasoning is mostly logical, considering both the strong trend and overbought conditions, but it could be clearer on how these factors interact."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like RSI (82), ADX (35), and Bollinger Bands (bb_percent_b 1.15), but slightly misrepresents the volume context as a 'conviction spike' without specific volume values."
+          }
+        ],
+        "avg_rationale_overall": 4.0
+      },
+      {
+        "case_id": "bearish-bounce-mixed",
+        "n_samples": 3,
+        "schema_validity": 1.0,
+        "stance_pass_rate": 1.0,
+        "avg_confidence": 0.7,
+        "confidence_in_range": true,
+        "stances_seen": [
+          "neutral",
+          "neutral",
+          "neutral"
+        ],
+        "confidences_seen": [
+          0.7,
+          0.7,
+          0.7
+        ],
+        "errors": [],
+        "rationale_verdicts": [
+          {
+            "groundedness": 4,
+            "coherence": 4,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA50, ADX, MACD, and BB% values, but it could improve by directly referencing the exact values for some indicators. The reasoning is logically consistent and covers major dimensions, though the accuracy of some cited values is slightly off."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA levels, ADX, RSI, and volatility measures, but could improve by directly referencing the exact values for clarity."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicator values such as SMA50, ADX, RSI, and bb_percent_b, but could improve by directly referencing the MACD bullish cross signal. The reasoning is logically consistent and covers major dimensions."
+          }
+        ],
+        "avg_rationale_overall": 4.0
+      },
+      {
+        "case_id": "adv-momentum-vs-trend",
+        "n_samples": 3,
+        "schema_validity": 1.0,
+        "stance_pass_rate": 1.0,
+        "avg_confidence": 0.7,
+        "confidence_in_range": true,
+        "stances_seen": [
+          "neutral",
+          "neutral",
+          "neutral"
+        ],
+        "confidences_seen": [
+          0.7,
+          0.7,
+          0.7
+        ],
+        "errors": [],
+        "rationale_verdicts": [
+          {
+            "groundedness": 4,
+            "coherence": 4,
+            "completeness": 4,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA values, ADX, RSI, and MACD, but could improve by directly linking all claims to the snapshot values. The reasoning is logically consistent and covers major dimensions, though it could be more precise in its conclusions."
+          },
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values and signals, logically connects the bullish trend with mixed momentum signals, and considers all major dimensions, resulting in a well-rounded analysis."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA levels, ADX, RSI, and MACD, but slightly misrepresents the implications of the BB%B and BB bandwidth. Overall, it presents a logical and comprehensive analysis."
+          }
+        ],
+        "avg_rationale_overall": 4.33
+      },
+      {
+        "case_id": "adv-volume-spike-fading-momentum",
+        "n_samples": 3,
+        "schema_validity": 1.0,
+        "stance_pass_rate": 1.0,
+        "avg_confidence": 0.8,
+        "confidence_in_range": true,
+        "stances_seen": [
+          "bullish",
+          "bullish",
+          "bullish"
+        ],
+        "confidences_seen": [
+          0.8,
+          0.8,
+          0.8
+        ],
+        "errors": [],
+        "rationale_verdicts": [
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values and signals, logically connects them to support a bullish stance, and considers multiple dimensions such as trend, momentum, and volume."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 4,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA levels, ADX, and volume, but it could improve by directly referencing the exact values for clarity. The reasoning is mostly logical and covers major dimensions, though the MACD's negative histogram could be more clearly tied to the overall bullish stance."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 4,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA levels, ADX, and volume, but it could improve by directly referencing the exact values of RSI and MACD. The reasoning is mostly logical and covers major dimensions, though it slightly downplays the implications of the negative MACD histogram."
+          }
+        ],
+        "avg_rationale_overall": 4.33
+      },
+      {
+        "case_id": "adv-golden-cross-in-choppy",
+        "n_samples": 3,
+        "schema_validity": 1.0,
+        "stance_pass_rate": 1.0,
+        "avg_confidence": 0.7,
+        "confidence_in_range": true,
+        "stances_seen": [
+          "neutral",
+          "neutral",
+          "neutral"
+        ],
+        "confidences_seen": [
+          0.7,
+          0.7,
+          0.7
+        ],
+        "errors": [],
+        "rationale_verdicts": [
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values such as SMA levels, ADX, RSI, and MACD, and logically connects them to the neutral stance, considering multiple dimensions of analysis."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA levels, ADX, RSI, and BB metrics, but slightly misrepresents the MACD's bullishness. It logically connects the indicators to support a neutral stance."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 4,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA levels, ADX, RSI, and MACD, but slightly misrepresents the MACD's strength. It logically connects the indicators to a neutral stance, covering major dimensions."
+          }
+        ],
+        "avg_rationale_overall": 4.33
+      },
+      {
+        "case_id": "adv-oversold-with-death-cross",
+        "n_samples": 3,
+        "schema_validity": 1.0,
+        "stance_pass_rate": 1.0,
+        "avg_confidence": 0.85,
+        "confidence_in_range": true,
+        "stances_seen": [
+          "bearish",
+          "bearish",
+          "bearish"
+        ],
+        "confidences_seen": [
+          0.85,
+          0.85,
+          0.85
+        ],
+        "errors": [],
+        "rationale_verdicts": [
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values and signals, such as being below SMA50 and SMA200, an ADX of 35, and an RSI of 22, all of which support a bearish stance. The reasoning follows a logical progression, considering multiple dimensions like trend, momentum, and volume."
+          },
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values such as SMA levels, ADX, RSI, MACD, and Bollinger Bands, all of which are accurately reflected in the snapshot. The reasoning is logically consistent, covers all major dimensions of technical analysis, and presents a strong case for a bearish stance."
+          },
+          {
+            "groundedness": 5,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 5,
+            "overall": 5,
+            "reasoning": "The rationale effectively cites specific indicator values and signals, such as being below SMA50 and SMA200, an ADX of 35, and an RSI of 22, while logically connecting these to a bearish outlook."
+          }
+        ],
+        "avg_rationale_overall": 5.0
+      },
+      {
+        "case_id": "adv-bollinger-squeeze",
+        "n_samples": 3,
+        "schema_validity": 1.0,
+        "stance_pass_rate": 1.0,
+        "avg_confidence": 0.7,
+        "confidence_in_range": true,
+        "stances_seen": [
+          "neutral",
+          "neutral",
+          "neutral"
+        ],
+        "confidences_seen": [
+          0.7,
+          0.7,
+          0.7
+        ],
+        "errors": [],
+        "rationale_verdicts": [
+          {
+            "groundedness": 4,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA50, SMA200, ADX, RSI, and volume metrics, but it misrepresents the MACD as flat without mentioning its values. The reasoning is logically consistent and covers major dimensions."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA values, ADX, RSI, and BB metrics, but slightly misrepresents the MACD as flat instead of zero. The reasoning follows a logical structure, considering multiple dimensions of analysis."
+          },
+          {
+            "groundedness": 4,
+            "coherence": 5,
+            "completeness": 5,
+            "accuracy": 4,
+            "overall": 4,
+            "reasoning": "The rationale effectively cites specific indicators like SMA values, ADX, RSI, and BB indicators, but slightly misrepresents the MACD as flat without mentioning its values. The reasoning is logically consistent and covers major dimensions."
+          }
+        ],
+        "avg_rationale_overall": 4.0
+      }
+    ],
+    "avg_rationale_overall": 4.47,
+    "judge_model": "gpt-4o-mini",
+    "brier_score": 0.1225,
+    "ece": 0.1667
+  },
+  "backtest": {
+    "start": "2024-01-02",
+    "end": "2026-07-31",
+    "n_days": 647,
+    "init_cash": 10000.0,
+    "portfolio": {
+      "total_return_pct": 91.11,
+      "cagr_pct": 28.74,
+      "sharpe": 1.07,
+      "max_drawdown_pct": -26.18,
+      "volatility_annual_pct": 26.86
+    },
+    "benchmark": {
+      "total_return_pct": 62.88,
+      "cagr_pct": 20.96,
+      "sharpe": 1.28,
+      "max_drawdown_pct": -18.77,
+      "volatility_annual_pct": 15.85
+    },
+    "alpha_annual_pct": 3.02,
+    "beta": 1.274,
+    "portfolio_final_value": 19096.95,
+    "benchmark_final_value": 16263.8,
+    "n_trades": 30,
+    "total_costs": 21.24
+  },
+  "backtest_config": {
+    "rec_id": 1,
+    "start": "2024-01-01",
+    "end": "2026-08-01",
+    "rebalance": "bands",
+    "cash_yield_annual": 0.045,
+    "tcost_bps": 10.0,
+    "slippage_bps": 5.0
+  }
+}
