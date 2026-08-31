@@ -105,22 +105,35 @@ export function TickerCard({
     price.setData(closeData);
     sma.setData(smaData);
 
-    // Buy/Sell markers via v5 primitive
+    // Buy/Sell markers via v5 primitive. Two rules to keep the chart
+    // readable when many historical trades are on file:
+    // 1. Only show markers within the visible bar range (no orphan arrows
+    //    at chart edges from trades outside the fetched window).
+    // 2. No text labels - the shape + color convey side; hover the arrow
+    //    for the exact fill price/time via lightweight-charts' own tooltip.
+    const firstBarTs = closeData[0]?.time as number | undefined;
+    const lastBarTs = closeData[closeData.length - 1]?.time as number | undefined;
     const markers = tickerTrades
       .filter((t) => t.filled_avg_price != null)
-      .map((t) => ({
-        time: Math.floor(new Date(t.submitted_at).getTime() / 1000) as UTCTimestamp,
-        position: (t.side === "buy" ? "belowBar" : "aboveBar") as
+      .map((t) => {
+        const ts = Math.floor(new Date(t.submitted_at).getTime() / 1000);
+        return { trade: t, ts };
+      })
+      .filter(({ ts }) =>
+        firstBarTs == null || lastBarTs == null
+          ? true
+          : ts >= firstBarTs && ts <= lastBarTs,
+      )
+      .map(({ trade, ts }) => ({
+        time: ts as UTCTimestamp,
+        position: (trade.side === "buy" ? "belowBar" : "aboveBar") as
           | "belowBar"
           | "aboveBar",
-        color: t.side === "buy" ? "hsl(142 71% 45%)" : "hsl(0 72% 55%)",
-        shape: (t.side === "buy" ? "arrowUp" : "arrowDown") as
+        color: trade.side === "buy" ? "hsl(142 71% 45%)" : "hsl(0 72% 55%)",
+        shape: (trade.side === "buy" ? "arrowUp" : "arrowDown") as
           | "arrowUp"
           | "arrowDown",
-        text:
-          t.side === "buy"
-            ? `BUY @ ${t.filled_avg_price?.toFixed(2)}`
-            : `SELL @ ${t.filled_avg_price?.toFixed(2)}`,
+        size: 1,
       }))
       .sort((a, b) => (a.time as number) - (b.time as number));
     createSeriesMarkers(price, markers);
