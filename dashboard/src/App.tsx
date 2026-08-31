@@ -60,15 +60,15 @@ function App() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <FilterAttribution sessionStartedAt={sessionStartedAt} />
             <span className="hidden text-xs text-muted-foreground md:inline">
               {events.length} events
             </span>
             <StatusPill status={status} />
           </div>
         </div>
-        <div className="mx-auto max-w-[1600px] space-y-2 px-6 pb-3">
+        <div className="mx-auto max-w-[1600px] px-6 pb-3">
           <HeaderStrip events={events} />
-          <FilterAttribution sessionStartedAt={sessionStartedAt} />
         </div>
       </header>
 
@@ -79,11 +79,34 @@ function App() {
             <PositionsTable recId={recId} />
             <TickerGrid recId={recId} />
           </div>
-          <div className="lg:sticky lg:top-[248px] lg:h-[calc(100vh-264px)] xl:top-[172px] xl:h-[calc(100vh-188px)]">
+          {/*
+            Empty grid cell reserves the 360px right rail so the left
+            column stays 1fr. The real EventFeed is rendered outside the
+            grid as a viewport-fixed panel (see below) so it can't ever
+            release from its pinned position, no matter how tall the
+            left column gets.
+          */}
+          <div className="hidden lg:block" aria-hidden="true" />
+        </div>
+
+        {/* Mobile fallback: below lg the feed renders inline under the graphs. */}
+        <div className="mt-4 lg:hidden">
+          <EventFeed events={events} />
+        </div>
+      </main>
+
+      {/*
+        Viewport-fixed event feed (desktop only). pointer-events-none on
+        the outer overlay lets clicks pass through the empty space to the
+        chart underneath; the inner panel re-enables events for itself.
+      */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-4 z-10 hidden lg:block lg:top-[235px] xl:top-[169px]">
+        <div className="mx-auto flex h-full max-w-[1600px] justify-end px-6">
+          <div className="pointer-events-auto w-[360px]"> 
             <EventFeed events={events} />
           </div>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

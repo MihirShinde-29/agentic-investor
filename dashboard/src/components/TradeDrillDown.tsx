@@ -266,23 +266,59 @@ export function TradeDrillDown({
                 </div>
               </section>
 
-              {data.violations.length > 0 && (
-                <section>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-warning">
-                    Guardrail violations
-                  </h3>
-                  <ul className="space-y-1">
-                    {data.violations.map((v, i) => (
-                      <li
-                        key={i}
-                        className="rounded-md border border-warning/30 bg-warning/5 px-3 py-1.5 text-xs text-warning"
-                      >
-                        {v}
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              )}
+              {(() => {
+                // Split violations into ticker-specific (mention the focused
+                // ticker as a whole word) and portfolio-wide (everything
+                // else). Without a focus we treat all as portfolio-wide.
+                const tickerRe = focused
+                  ? new RegExp(`\\b${focused}\\b`, "i")
+                  : null;
+                const tickerHits = tickerRe
+                  ? data.violations.filter((v) => tickerRe.test(v))
+                  : [];
+                const other = data.violations.filter(
+                  (v) => !tickerHits.includes(v),
+                );
+                if (tickerHits.length === 0 && other.length === 0) return null;
+                return (
+                  <section className="space-y-3">
+                    {tickerHits.length > 0 && (
+                      <div>
+                        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-warning">
+                          Violations on {focused}
+                        </h3>
+                        <ul className="space-y-1">
+                          {tickerHits.map((v, i) => (
+                            <li
+                              key={i}
+                              className="rounded-md border border-warning/30 bg-warning/5 px-3 py-1.5 text-xs text-warning"
+                            >
+                              {v}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {other.length > 0 && (
+                      <div>
+                        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                          Other portfolio violations
+                        </h3>
+                        <ul className="space-y-1">
+                          {other.map((v, i) => (
+                            <li
+                              key={i}
+                              className="rounded-md border border-border/40 bg-muted/10 px-3 py-1.5 text-xs text-muted-foreground"
+                            >
+                              {v}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </section>
+                );
+              })()}
 
               <div className="grid grid-cols-3 gap-2 border-t border-border/40 pt-3 text-[11px]">
                 <div>
