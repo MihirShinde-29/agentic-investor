@@ -188,20 +188,30 @@ def execute_trade_plan(
     day = day or datetime.now(UTC).strftime("%Y-%m-%d")
     submitted: list[PaperOrder] = []
     for p in plans:
-        if p.side == "sell" and p.target_pct == 0.0:
-            try:
-                submitted.append(broker.close_position(p.ticker))
-                continue
-            except Exception:  # noqa: BLE001 - fall back to computed-qty sell
-                pass
-        coid = _client_order_id(rec_id, p.ticker, p.side, day)
-        order = broker.submit_market_order(
-            p.ticker,
-            p.side,
-            p.qty,
-            client_order_id=coid,
-            stop_loss_pct=stop_loss_pct if p.side == "buy" else None,
-            take_profit_pct=take_profit_pct if p.side == "buy" else None,
-        )
-        submitted.append(order)
+        # Per-order try/except so one bad order (non-fractionable ticker,
+        # trading halt, etc.) doesn't sink the rest of the batch. Log the
+        # failure and continue with the next plan.
+        try:
+            if p.side == "sell" and p.target_pct == 0.0:
+                try:
+                    submitted.append(broker.close_position(p.ticker))
+                    continue
+                except Exception:  # noqa: BLE001 - fall back to computed-qty sell
+                    pass
+            coid = _client_order_id(rec_id, p.ticker, p.side, day)
+            order = broker.submit_market_order(
+                p.ticker,
+                p.side,
+                p.qty,
+                client_order_id=coid,
+                stop_loss_pct=stop_loss_pct if p.side == "buy" else None,
+                take_profit_pct=take_profit_pct if p.side == "buy" else None,
+            )
+            submitted.append(order)
+        except Exception as e:  # noqa: BLE001 - per-trade isolation
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "order rejected for %s %s %s: %s", p.side, p.qty, p.ticker, e,
+            )
+            continue
     return submitted

@@ -216,6 +216,70 @@ def check_profile_rules(
     return violations
 
 
+def repair_allocation(allocation: Allocation, profile) -> tuple[Allocation, list[str]]:
+    """Enforce position-count cap and cash floor after the LLM allocates.
+
+    The prompt asks for both, but the LLM doesn't consistently respect either
+    when a lot of tickers are in play. Drop smallest positions past the cap
+    (weight -> cash), then trim proportionally if cash is still below floor.
+    Returns (repaired, notes) so the loop can log what changed.
+    """
+    notes: list[str] = []
+    positions = list(allocation.positions)
+    cash_pct = allocation.cash_pct
+    cash_dollars = allocation.cash_dollars
+    max_positions = int(getattr(profile, "max_positions", 12))
+    cash_floor = float(getattr(profile, "cash_floor_pct", 0.0))
+
+    if len(positions) > max_positions:
+        positions.sort(key=lambda p: p.weight_pct, reverse=True)
+        dropped = positions[max_positions:]
+        positions = positions[:max_positions]
+        dropped_pct = sum(p.weight_pct for p in dropped)
+        dropped_dollars = sum(p.dollars for p in dropped)
+        cash_pct += dropped_pct
+        cash_dollars += dropped_dollars
+        notes.append(
+            f"position-cap: dropped {len(dropped)} smallest "
+            f"({', '.join(p.ticker for p in dropped)}); "
+            f"{dropped_pct:.1f}pp -> cash"
+        )
+
+    if cash_pct + 0.05 < cash_floor and positions:
+        gap_pp = cash_floor - cash_pct
+        total_pos_pct = sum(p.weight_pct for p in positions)
+        if total_pos_pct > 0:
+            scale = max(0.0, 1.0 - gap_pp / total_pos_pct)
+            trimmed_dollars = 0.0
+            for p in positions:
+                new_weight = round(p.weight_pct * scale, 2)
+                new_dollars = round(p.dollars * scale, 2)
+                trimmed_dollars += p.dollars - new_dollars
+                p.weight_pct = new_weight
+                p.dollars = new_dollars
+            cash_pct = round(cash_floor, 2)
+            cash_dollars = round(cash_dollars + trimmed_dollars, 2)
+            notes.append(
+                f"cash-floor: trimmed positions {(1 - scale) * 100:.1f}% "
+                f"to lift cash from {allocation.cash_pct:.1f}% to "
+                f"{cash_floor:.1f}%"
+            )
+
+    # Sweep any small residual into cash so weights still sum to 100.
+    total = sum(p.weight_pct for p in positions) + cash_pct
+    residual = round(100.0 - total, 2)
+    if abs(residual) > 0.01:
+        cash_pct = round(cash_pct + residual, 2)
+
+    repaired = Allocation(
+        positions=positions,
+        cash_pct=cash_pct,
+        cash_dollars=cash_dollars,
+        portfolio_rationale=allocation.portfolio_rationale,
+    )
+    return repaired, notes
+
+
 class Recommendation(BaseModel):
     request: OrchestratorRequest
     allocation: Allocation

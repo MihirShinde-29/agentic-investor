@@ -881,6 +881,10 @@ def _paper_loop(
     dashboard_port: int,
     finbert_prefilter: bool,
     finbert_min_delta: float,
+    max_single_delta_pct: float,
+    max_avg_drift_pct: float,
+    opinion_drift_threshold_pct: float,
+    big_rebalance_cooldown_seconds: int,
 ) -> None:
     import logging
 
@@ -931,6 +935,10 @@ def _paper_loop(
         force_open=force_open,
         finbert_prefilter_enabled=finbert_prefilter,
         finbert_min_delta=finbert_min_delta,
+        max_single_delta_pct=max_single_delta_pct,
+        max_avg_drift_pct=max_avg_drift_pct,
+        opinion_drift_threshold_pct=opinion_drift_threshold_pct,
+        big_rebalance_cooldown_seconds=big_rebalance_cooldown_seconds,
     )
     broker = get_broker()
     try:
@@ -1254,6 +1262,19 @@ def main() -> None:
     pl.add_argument("--finbert-min-delta", type=float, default=0.15,
                     help="min sentiment delta (in [0,2]) needed to fire a "
                          "regen when --finbert-prefilter is on (default 0.15)")
+    pl.add_argument("--big-rebalance-cooldown-seconds", type=int, default=1800,
+                    help="portfolio-level cooldown: seconds between big "
+                         "rebalances (>=5 trades) to block whipsaw "
+                         "(default 1800 = 30min)")
+    pl.add_argument("--max-single-delta-pct", type=float, default=15.0,
+                    help="opinion-drift filter: max weight change on a "
+                         "single ticker per regen (default 15pp)")
+    pl.add_argument("--max-avg-drift-pct", type=float, default=5.0,
+                    help="opinion-drift filter: max avg drift across "
+                         "positions per regen (default 5pp)")
+    pl.add_argument("--opinion-drift-threshold-pct", type=float, default=3.0,
+                    help="opinion-drift filter: min per-position drift to "
+                         "consider a regen substantive (default 3pp)")
 
     pa = sub.add_parser("paper-attribution",
                         help="rolling analysis across all sessions: filter "
@@ -1391,6 +1412,9 @@ def main() -> None:
             args.log_file, args.regen_mode, args.force_open,
             args.serve_dashboard, args.dashboard_port,
             args.finbert_prefilter, args.finbert_min_delta,
+            args.max_single_delta_pct, args.max_avg_drift_pct,
+            args.opinion_drift_threshold_pct,
+            args.big_rebalance_cooldown_seconds,
         )
     else:
         _print_config()

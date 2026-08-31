@@ -129,11 +129,14 @@ def compute_trade_outcomes(
         if not filled_price or not rec_id:
             continue
         if rec_id not in rec_cache:
-            rec = load_recommendation(int(rec_id))
-            rec_cache[rec_id] = (
-                {p.ticker.upper(): p.confidence for p in rec.allocation.positions}
-                if rec else {}
-            )
+            try:
+                rec = load_recommendation(int(rec_id))
+                rec_cache[rec_id] = (
+                    {p.ticker.upper(): p.confidence for p in rec.allocation.positions}
+                    if rec else {}
+                )
+            except Exception:  # noqa: BLE001 - legacy recs may fail schema
+                rec_cache[rec_id] = {}
         conf = rec_cache[rec_id].get(o["ticker"].upper())
         if conf is None:
             continue

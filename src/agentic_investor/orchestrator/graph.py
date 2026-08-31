@@ -33,6 +33,7 @@ from agentic_investor.orchestrator.state import (
     OrchestratorRequest,
     Recommendation,
     check_profile_rules,
+    repair_allocation,
 )
 from agentic_investor.orchestrator.strategy import StrategyProfile, get_preset
 from agentic_investor.tools.market import MarketSnapshot, get_market_snapshot
@@ -158,6 +159,61 @@ Good allocation:
 Bad allocation to avoid: forcing 30-40% into any name when signals do not
 support it just because those tickers are in the request list. Cash IS a
 position; not being fully invested is a legitimate output.
+
+# Analyst-rating interpretation (READ CAREFULLY)
+News often includes analyst updates. Do not treat coverage inits or
+target-price updates as buy signals when the rating itself is neutral.
+
+- "Buy / Outperform / Overweight" reaffirmed or initiated -> genuinely bullish
+- "Sell / Underweight / Underperform" -> genuinely bearish
+- **"Hold / Equal-Weight / Neutral / Sector Perform / Market Perform"** ->
+  **NEUTRAL**, do NOT interpret as a buy even if the price target was raised.
+  A raised target on a neutral rating means the analyst thinks the stock is
+  slightly less overvalued than before; it is NOT a buy call.
+- Target CUT while maintaining Buy -> weakly bullish, take modestly
+- Coverage init at neutral -> ignore for sizing decisions
+
+## Bad-pattern example
+Headline: "Morgan Stanley Maintains Equal-Weight on HON, Raises Price
+Target to $250"
+Wrong LLM response: open a 15-30% HON position (misreads target-raise as
+Buy).
+Right LLM response: near-zero weight change on HON. The rating is neutral;
+the target hike is a mild positive noise floor, not a conviction signal.
+
+## Rebalancing discipline (READ CAREFULLY)
+Every trade has friction (spread + slippage + implicit market impact ~
+5-20 bps per trade). Do NOT propose full-portfolio flips on every regen.
+
+- If your new opinion differs from the current allocation by <5pp across
+  all positions on average, propose only the small delta and keep the
+  rest identical. Do not restate the whole book.
+- Do NOT open >2 new positions in a single regen unless the news
+  materially changes your view of an entire sector.
+- Do NOT trade against your last decision within 15 minutes unless a
+  major catalyst (earnings, halt, guidance) hit the specific ticker.
+- Cash floor is a floor, not a target. Only breach it by going to lower
+  cash when you have HIGH-conviction (>0.7) news + technical agreement.
+
+## Concentrated conviction rebalancing (READ CAREFULLY)
+When you need to fund a new position or add to an existing one, PREFER to
+fully exit or heavily trim the WEAKEST-conviction position rather than
+shaving 1-2pp off every position in the book.
+
+- Bad: "add MSFT +3pp, trim AMGN -0.4, MRK -0.5, KO -0.6, DIS -0.5, V -0.5,
+  TRV -0.5" -- 6 trades, tiny each, all friction, no conviction expressed.
+- Good: "add MSFT +3pp, close DIS entirely (-3pp)" -- 2 trades, clear
+  conviction shift (DIS out, MSFT preferred).
+
+Rules:
+- Prefer 1-2 large trades over 5+ small trades.
+- To find the fund source: pick the position whose news+technical
+  signals are weakest (or whose thesis has decayed the most since you
+  opened it).
+- Full exits (target 0%) are fine and often correct -- they remove
+  friction from future rebalances too.
+- Only "sell a bit of everything" when you literally want equal-weight
+  rebalancing across a converged book, which should be rare.
 """
 
 
@@ -361,6 +417,19 @@ def allocate(state: GraphState) -> dict:
     return {"allocation": alloc}
 
 
+def repair(state: GraphState) -> dict:
+    """Repair pass between allocate and validate.
+
+    Applies position-count cap + cash floor so downstream rebalancing sees
+    a target that respects the profile even when the LLM doesn't.
+    """
+    profile = _profile_from_state(state)
+    repaired, notes = repair_allocation(state["allocation"], profile)
+    if notes:
+        logger.info("alloc_repair: %s", "; ".join(notes))
+    return {"allocation": repaired}
+
+
 def validate(state: GraphState) -> dict:
     profile = _profile_from_state(state)
     return {"violations": check_profile_rules(
@@ -373,10 +442,12 @@ def build_graph():
     g = StateGraph(GraphState)
     g.add_node("gather_signals", gather_signals)
     g.add_node("allocate", allocate)
+    g.add_node("repair", repair)
     g.add_node("validate", validate)
     g.add_edge(START, "gather_signals")
     g.add_edge("gather_signals", "allocate")
-    g.add_edge("allocate", "validate")
+    g.add_edge("allocate", "repair")
+    g.add_edge("repair", "validate")
     g.add_edge("validate", END)
     return g.compile()
 

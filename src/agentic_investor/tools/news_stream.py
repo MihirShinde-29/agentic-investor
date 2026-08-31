@@ -10,6 +10,7 @@ the LLM. The decision engine in loop.py owns micro-batching + phase logic.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import queue
 import re
@@ -20,6 +21,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from agentic_investor.config import get_settings
+
+# Drop repeats of the same (ticker, headline) that arrive inside this window;
+# Alpaca resends headlines minutes apart.
+_DEDUP_TTL_SECONDS = 600
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +77,8 @@ class NewsStreamer:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._stream_factory = stream_factory  # for tests
+        # (ticker, headline_hash) -> monotonic seconds; pruned by TTL.
+        self._seen: dict[str, float] = {}
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -128,10 +135,24 @@ class NewsStreamer:
             [str(s).upper() for s in symbols] + list(extra)
         ))
 
+        # Normalize before hashing so "CORRECTION:" / "UPDATE:" variants of
+        # the same headline collapse to one key.
+        norm = re.sub(r"\s+", " ", headline).strip().lower()
+        norm = re.sub(r"^(update|correction|breaking)[:\-]?\s*", "", norm)
+        h = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
+        now_mono = time.monotonic()
+        self._prune_seen(now_mono)
+
         for sym in all_symbols:
             # Non-wildcard mode: still filter to subscribed tickers.
             if not self.wildcard and self.tickers and sym not in self.tickers:
                 continue
+            key = f"{sym}|{h}"
+            prev = self._seen.get(key)
+            if prev is not None and (now_mono - prev) < _DEDUP_TTL_SECONDS:
+                logger.debug("news dedup drop: %s | %s", sym, headline[:60])
+                continue
+            self._seen[key] = now_mono
             evt = NewsEvent(
                 ticker=sym,
                 headline=headline,
@@ -142,3 +163,10 @@ class NewsStreamer:
                 source=source,
             )
             self.event_queue.put(evt)
+
+    def _prune_seen(self, now_mono: float) -> None:
+        """Drop dedup entries older than the TTL. Called opportunistically."""
+        cutoff = now_mono - _DEDUP_TTL_SECONDS
+        stale = [k for k, ts in self._seen.items() if ts < cutoff]
+        for k in stale:
+            self._seen.pop(k, None)

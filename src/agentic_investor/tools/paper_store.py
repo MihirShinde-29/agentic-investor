@@ -152,7 +152,11 @@ def reconcile_orders(broker, *, limit: int = 200, url: str | None = None) -> int
     asynchronously. This closes the gap so paper-report shows real fill
     prices instead of "-".
 
-    Returns count of rows updated. Safe to call periodically from the loop.
+    Returns count of rows whose state ACTUALLY changed. SQLite's UPDATE
+    rowcount counts matched-rows not changed-rows, so we add IS-NOT-DISTINCT
+    guards to only touch a row when at least one field would differ.
+    Otherwise every reconcile "updated" every mirrored order, spamming the
+    dashboard once per poll with a fake count of 96.
     """
     updated = 0
     try:
@@ -166,19 +170,27 @@ def reconcile_orders(broker, *, limit: int = 200, url: str | None = None) -> int
             coid = getattr(o, "client_order_id", None) or ""
             if not coid:
                 continue
+            new_status = getattr(o, "status", None)
+            new_filled_at = getattr(o, "filled_at", None)
+            new_price = getattr(o, "filled_avg_price", None)
+            new_id = getattr(o, "id", None)
             cur = conn.execute(
                 """
                 UPDATE paper_orders SET
                     status = ?, filled_at = ?, filled_avg_price = ?,
                     broker_order_id = COALESCE(NULLIF(broker_order_id, ''), ?)
                 WHERE client_order_id = ?
+                  AND (
+                    status IS NOT ?
+                    OR filled_at IS NOT ?
+                    OR filled_avg_price IS NOT ?
+                    OR (broker_order_id IS NULL OR broker_order_id = '')
+                  )
                 """,
                 (
-                    getattr(o, "status", None),
-                    getattr(o, "filled_at", None),
-                    getattr(o, "filled_avg_price", None),
-                    getattr(o, "id", None),
+                    new_status, new_filled_at, new_price, new_id,
                     coid,
+                    new_status, new_filled_at, new_price,
                 ),
             )
             if cur.rowcount > 0:

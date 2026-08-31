@@ -81,6 +81,15 @@ class LoopConfig:
     finbert_prefilter_enabled: bool = False
     finbert_min_delta: float = 0.15
 
+    # Portfolio-level trade cooldown: after any rebalance with >= N trades,
+    # require >= Y seconds before another N-trade rebalance can execute.
+    # Blocks the whole-portfolio flip-flop pattern (rec #105->#106->#107 and
+    # rec #132's diversified->concentrated reversal on 2026-08-31 live
+    # session). 30 min matches the observed 15-20 min flip-flop cadence
+    # with margin to catch the immediate counter-reaction too.
+    big_rebalance_min_trades: int = 5
+    big_rebalance_cooldown_seconds: int = 1800
+
     # Discipline layer (vetoes at the rebalancer boundary)
     cooldown_seconds: int = 900              # 0q temporal cooldown
     adverse_move_threshold_pct: float = 1.0  # 0r don't buy falling knives
@@ -132,6 +141,9 @@ class LoopState:
     # P1 #3: last batch's finBERT aggregate sentiment (in [-1, 1]). Used by
     # the pre-filter to skip regens when sentiment barely moves.
     last_finbert_score: float | None = None
+    # Portfolio-level cooldown: when the last big rebalance (>=N trades)
+    # happened, so a subsequent big rebalance is blocked until Y seconds pass.
+    last_big_rebalance_at: datetime | None = None
     # {ticker: (side, iso_ts)} - most-recent trade per ticker, used by the
     # temporal-cooldown veto in compute_trade_plan.
     recent_trades: dict[str, tuple[str, str]] = field(default_factory=dict)
@@ -153,6 +165,10 @@ class LoopState:
             "last_stances": dict(self.last_stances),
             "recent_trades": dict(self.recent_trades),
             "last_finbert_score": self.last_finbert_score,
+            "last_big_rebalance_at": (
+                self.last_big_rebalance_at.isoformat()
+                if self.last_big_rebalance_at else None
+            ),
         }
 
     @classmethod
@@ -179,6 +195,10 @@ class LoopState:
                 for k, v in (d.get("recent_trades") or {}).items()
             },
             last_finbert_score=d.get("last_finbert_score"),
+            last_big_rebalance_at=(
+                datetime.fromisoformat(d["last_big_rebalance_at"])
+                if isinstance(d.get("last_big_rebalance_at"), str) else None
+            ),
         )
 
 
@@ -484,10 +504,17 @@ def run_tick(
             return
         after = get_call_stats()
         cost = after.estimated_cost_usd - stats_before.estimated_cost_usd
+        prompt_delta = after.prompt_tokens - stats_before.prompt_tokens
+        cached_delta = after.cached_tokens - stats_before.cached_tokens
         session.log("tick_cost", {
             "tick_at": tick_at,
             "llm_calls": after.n_calls - stats_before.n_calls,
-            "prompt_tokens": after.prompt_tokens - stats_before.prompt_tokens,
+            "prompt_tokens": prompt_delta,
+            "cached_tokens": cached_delta,
+            "cache_hit_pct": (
+                round(cached_delta / prompt_delta * 100, 1)
+                if prompt_delta else 0
+            ),
             "completion_tokens": after.completion_tokens - stats_before.completion_tokens,
             "cost_usd": f"${cost:.4f}",
         })
@@ -518,19 +545,27 @@ def run_tick(
         # 0w: news-body beneficiary promotion. Extract every ticker named in
         # the batch (both Alpaca-tagged and body-extracted, per 0p fan-out),
         # subtract anything already in the pick set, cap at N to bound prompt
-        # size. Works on first-day too.
+        # size. Filtered to the sp500 large-cap whitelist so micro-cap punts
+        # from single news headlines (BRVE, SLI, GPRO, WBUY, ATTO, RCBC-style)
+        # don't reach the allocator.
         promoted: list[str] = []
         if batch_ctx:
+            from agentic_investor.universes import is_actionable_ticker
+
             already = set()
             if pre_picked:
                 already.update(x.upper() for x in pre_picked)
             if cfg.tickers:
                 already.update(x.upper() for x in cfg.tickers)
             for t in _extract_tickers_from_batch_ctx(batch_ctx):
-                if t.upper() not in already and t not in promoted:
-                    promoted.append(t)
-                    if len(promoted) >= cfg.max_promotions_per_regen:
-                        break
+                up = t.upper()
+                if up in already or up in {p.upper() for p in promoted}:
+                    continue
+                if not is_actionable_ticker(up):
+                    continue  # micro-cap filter (0w hardening)
+                promoted.append(up)
+                if len(promoted) >= cfg.max_promotions_per_regen:
+                    break
 
         # Delta-form prompt anchor (non-first-day only).
         prev_rec_for_prompt = None
@@ -630,46 +665,87 @@ def run_tick(
                         "max_single_delta_pp": cfg.max_single_delta_pct,
                         "deltas": {t: round(d, 2) for t, d in deltas.items()},
                     })
-                _log_tick_cost()
-                return TickResult(
-                    tick_at=tick_at, rec_id=state.last_rec_id,
-                    regenerated_rec=False, plan_count=0,
-                    submitted=[], equity=broker.get_account().equity,
-                )
-        rec_id = save_rec(rec)
-        state.last_rec_id = rec_id
-        state.last_rec_date = today
-        state.frozen_picker_tickers = tickers_used  # cache for subsequent regens
-        state.pending_news_context = None  # consume it - next tick reuses rec
-        state.last_regen_at = now
-        # Record baseline prices + stances for the price-move + technical
-        # triggers to compare against on subsequent ticks. Reuse the
-        # injected price_fetcher so tests can supply deterministic prices.
-        state.baseline_prices = {}
-        for p in rec.allocation.positions:
+                # Stable opinion doesn't mean the book matches the target -
+                # earlier orders may have failed or been cooldown-blocked.
+                # Fall through to drift-vs-book against the prior rec.
+                # avg-drift-too-high / max-delta-unjustified are noise skips
+                # and still bail here.
+                if skip_reason == "barely-moved" and prev_rec is not None:
+                    rec = prev_rec
+                    regenerated = False
+                else:
+                    _log_tick_cost()
+                    return TickResult(
+                        tick_at=tick_at, rec_id=state.last_rec_id,
+                        regenerated_rec=False, plan_count=0,
+                        submitted=[], equity=broker.get_account().equity,
+                    )
+            else:
+                rec_id = save_rec(rec)
+                state.last_rec_id = rec_id
+                state.last_rec_date = today
+                state.frozen_picker_tickers = tickers_used
+                state.pending_news_context = None
+                state.last_regen_at = now
+                state.baseline_prices = {}
+                for p in rec.allocation.positions:
+                    try:
+                        state.baseline_prices[p.ticker.upper()] = float(
+                            price_fetcher(p.ticker.upper())
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("baseline price capture failed for %s: %s",
+                                       p.ticker, e)
+                state.last_stances = {
+                    s.ticker.upper(): s.stance for s in rec.technical_signals
+                }
+                regenerated = True
+                try:
+                    from agentic_investor.tools.paper_store import save_loop_state
+                    save_loop_state(state.to_dict())
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("save_loop_state failed: %s", e)
+                if session:
+                    session.log("regen_done", {
+                        "rec_id": rec_id,
+                        "targets": {p.ticker: p.weight_pct for p in rec.allocation.positions},
+                        "cash_pct": rec.allocation.cash_pct,
+                        "trigger": reason,
+                    })
+        else:
+            # First-ever regen or new-day reset: no prior rec to compare
+            # against, so the drift filter can't fire. Save straight through.
+            rec_id = save_rec(rec)
+            state.last_rec_id = rec_id
+            state.last_rec_date = today
+            state.frozen_picker_tickers = tickers_used
+            state.pending_news_context = None
+            state.last_regen_at = now
+            state.baseline_prices = {}
+            for p in rec.allocation.positions:
+                try:
+                    state.baseline_prices[p.ticker.upper()] = float(
+                        price_fetcher(p.ticker.upper())
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("baseline price capture failed for %s: %s",
+                                   p.ticker, e)
+            state.last_stances = {
+                s.ticker.upper(): s.stance for s in rec.technical_signals
+            }
+            regenerated = True
             try:
-                state.baseline_prices[p.ticker.upper()] = float(
-                    price_fetcher(p.ticker.upper())
-                )
+                from agentic_investor.tools.paper_store import save_loop_state
+                save_loop_state(state.to_dict())
             except Exception as e:  # noqa: BLE001
-                logger.warning("baseline price capture failed for %s: %s",
-                               p.ticker, e)
-        state.last_stances = {
-            s.ticker.upper(): s.stance for s in rec.technical_signals
-        }
-        regenerated = True
-        try:
-            from agentic_investor.tools.paper_store import save_loop_state
-            save_loop_state(state.to_dict())
-        except Exception as e:  # noqa: BLE001 - persistence must not crash loop
-            logger.warning("save_loop_state failed: %s", e)
-        if session:
-            session.log("regen_done", {
-                "rec_id": rec_id,
-                "targets": {p.ticker: p.weight_pct for p in rec.allocation.positions},
-                "cash_pct": rec.allocation.cash_pct,
-                "trigger": reason,
-            })
+                logger.warning("save_loop_state failed: %s", e)
+            if session:
+                session.log("regen_done", {
+                    "rec_id": rec_id,
+                    "targets": {p.ticker: p.weight_pct for p in rec.allocation.positions},
+                    "cash_pct": rec.allocation.cash_pct,
+                    "trigger": reason,
+                })
     else:
         from agentic_investor.orchestrator.store import load_recommendation
 
@@ -762,6 +838,58 @@ def run_tick(
             submitted=[], equity=acct.equity,
         )
 
+    # Cooldown on big rebalances. Direction-aware: a plan that drops as many
+    # or more names than it opens (with <= 2 new) is treated as the LLM
+    # cleaning up an over-diversified book and passes; adding more names
+    # than it drops is the whipsaw pattern we're trying to block.
+    if (
+        len(plans) >= cfg.big_rebalance_min_trades
+        and state.last_big_rebalance_at is not None
+    ):
+        secs = (now - state.last_big_rebalance_at).total_seconds()
+        if secs < cfg.big_rebalance_cooldown_seconds:
+            target_tickers = {p.ticker.upper() for p in rec.allocation.positions}
+            current_tickers = set(positions_dollars.keys())
+            n_new = len(target_tickers - current_tickers)
+            n_dropped = len(current_tickers - target_tickers)
+            is_concentration = n_new <= n_dropped and n_new <= 2
+            if is_concentration:
+                logger.info(
+                    "tick %s: cooldown bypass (concentration reshape) "
+                    "new=%d dropped=%d plan=%d",
+                    tick_at, n_new, n_dropped, len(plans),
+                )
+                if session:
+                    session.log("big_rebalance_cooldown_bypass", {
+                        "rec_id": state.last_rec_id,
+                        "plan_count": len(plans),
+                        "n_new_positions": n_new,
+                        "n_dropped_positions": n_dropped,
+                        "seconds_since_last": secs,
+                    })
+            else:
+                logger.info(
+                    "tick %s: big-rebalance cooldown blocking %d trades "
+                    "(last was %.0fs ago, need %ds; new=%d dropped=%d)",
+                    tick_at, len(plans), secs,
+                    cfg.big_rebalance_cooldown_seconds, n_new, n_dropped,
+                )
+                if session:
+                    session.log("big_rebalance_cooldown_skip", {
+                        "rec_id": state.last_rec_id,
+                        "plan_count": len(plans),
+                        "seconds_since_last": secs,
+                        "cooldown_seconds": cfg.big_rebalance_cooldown_seconds,
+                        "n_new_positions": n_new,
+                        "n_dropped_positions": n_dropped,
+                    })
+                _log_tick_cost()
+                return TickResult(
+                    tick_at=tick_at, rec_id=state.last_rec_id,
+                    regenerated_rec=regenerated, plan_count=len(plans),
+                    submitted=[], equity=acct.equity,
+                )
+
     if session:
         session.log("trade_plan", {
             "rec_id": state.last_rec_id,
@@ -786,6 +914,18 @@ def run_tick(
                 "client_order_id": o.client_order_id,
             })
     state.orders_submitted += len(submitted)
+    # Stamp the portfolio-level cooldown when this counts as a big rebalance.
+    if len(submitted) >= cfg.big_rebalance_min_trades:
+        state.last_big_rebalance_at = now
+    # Persist post-execution state so cooldown timing + recent_trades survive
+    # restart. Without this, `last_big_rebalance_at` is only saved via the
+    # earlier post-regen save which runs BEFORE trade execution, so a restart
+    # loses the most recent big-rebalance timestamp.
+    try:
+        from agentic_investor.tools.paper_store import save_loop_state as _sls
+        _sls(state.to_dict())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("save_loop_state post-execute failed: %s", e)
     _log_tick_cost()
     return TickResult(
         tick_at=tick_at, rec_id=state.last_rec_id,
@@ -850,6 +990,19 @@ def run_event_loop(
                 "last_rec_date": state.last_rec_date,
                 "ticks_run": state.ticks_run,
             })
+        # Invalidate stale baselines on restart: without this, the first tick
+        # after a restart compares CURRENT market prices against baselines
+        # from the last session (often minutes-to-hours old), and the
+        # price-move trigger fires spuriously against a stale reference.
+        # Wipe them so the first successful regen re-captures fresh baselines.
+        if state.baseline_prices:
+            n_wiped = len(state.baseline_prices)
+            state.baseline_prices = {}
+            logger.info(
+                "invalidated %d stale baseline prices on restart", n_wiped,
+            )
+            if session:
+                session.log("baselines_invalidated", {"count": n_wiped})
     decision_state = DecisionState()
     event_q: _q.Queue = _q.Queue()
 
@@ -872,6 +1025,7 @@ def run_event_loop(
     # would sit idle for `interval_seconds` before exiting.
     from datetime import timedelta as _td
     last_interval_tick = _dt.now(_UTC) - _td(seconds=cfg.interval_seconds)
+    last_reconcile_at: _dt | None = None
     try:
         while True:
             try:
@@ -891,15 +1045,22 @@ def run_event_loop(
                 continue
 
             now = _dt.now(_UTC)
-            # Poll broker for order fill updates; cheap (one REST call), keeps
-            # paper_orders mirror in sync with actual Alpaca state.
-            try:
-                from agentic_investor.tools.paper_store import reconcile_orders
-                n_updated = reconcile_orders(broker)
-                if n_updated and session:
-                    session.log("orders_reconciled", {"updated": n_updated})
-            except Exception as e:  # noqa: BLE001
-                logger.warning("reconcile_orders failed: %s", e)
+            # Poll broker for order fill updates; keeps paper_orders mirror
+            # in sync with real Alpaca state. Throttled to every 60s so the
+            # dashboard event feed doesn't fill with reconcile pings when
+            # nothing actually changed.
+            if (
+                last_reconcile_at is None
+                or (now - last_reconcile_at).total_seconds() >= 60
+            ):
+                try:
+                    from agentic_investor.tools.paper_store import reconcile_orders
+                    n_updated = reconcile_orders(broker)
+                    if n_updated and session:
+                        session.log("orders_reconciled", {"updated": n_updated})
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("reconcile_orders failed: %s", e)
+                last_reconcile_at = now
             new_events = drain_queue(event_q)
             if new_events and session:
                 for e in new_events:

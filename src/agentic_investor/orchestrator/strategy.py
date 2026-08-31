@@ -44,6 +44,9 @@ class StrategyProfile(BaseModel):
     # Guardrails enforced by the validator + orchestrator
     max_single_pct: float = Field(35.0, ge=0.0, le=100.0)
     cash_floor_pct: float = Field(10.0, ge=0.0, le=100.0)
+    # Past ~15 the LLM drifts toward over-diversified books that just track
+    # SPY; excess names get dropped smallest-first, weight goes to cash.
+    max_positions: int = Field(12, ge=1, le=50)
     drawdown_stop_pct: float | None = None  # e.g. -25.0 halts on -25% DD
     # Vol-scaled max weight: effective cap = max_single * min(1, ref/atr).
     # High-vol tickers get proportionally smaller caps (Kelly-inspired).

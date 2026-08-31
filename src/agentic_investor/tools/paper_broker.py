@@ -117,6 +117,26 @@ class AlpacaPaperBroker:
                 paper=s.alpaca_paper,
             )
         self._client = client
+        # Cache of ticker -> fractionable? so submit_market_order's asset
+        # lookup runs once per symbol per process, not on every trade.
+        self._fractionable_cache: dict[str, bool] = {}
+
+    def _is_fractionable(self, ticker: str) -> bool:
+        """Return True when Alpaca accepts fractional-share orders for the
+        ticker. Cached in-process. Defaults to True on any lookup failure so
+        we don't over-block; a real submit failure is still caught upstream.
+        """
+        key = ticker.upper()
+        cached = self._fractionable_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            asset = self._client.get_asset(key)
+            frac = bool(getattr(asset, "fractionable", True))
+        except Exception:  # noqa: BLE001
+            frac = True
+        self._fractionable_cache[key] = frac
+        return frac
 
     def get_account(self) -> PaperAccount:
         a = self._client.get_account()
@@ -184,6 +204,23 @@ class AlpacaPaperBroker:
 
         if side.lower() not in {"buy", "sell"}:
             raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
+
+        # Fractionable check: some Alpaca assets (e.g. PS) only accept whole
+        # shares. Round the qty down when the asset isn't fractionable so we
+        # don't get 40310000 rejections. Cached on the broker instance so we
+        # don't repay the get_asset() cost on every order.
+        try:
+            fractionable = self._is_fractionable(ticker)
+            if not fractionable:
+                whole = int(qty)
+                if whole == 0:
+                    raise ValueError(
+                        f"{ticker} isn't fractionable and qty {qty} rounds to 0"
+                    )
+                qty = float(whole)
+        except Exception as _e:  # noqa: BLE001 - fractionable check is best-effort
+            logger.debug("fractionable check failed for %s: %s", ticker, _e)
+
         # We own the client_order_id so retries stay idempotent. Alpaca rejects
         # duplicate ids so an accidentally re-submitted order errors instead of
         # double-filling.
