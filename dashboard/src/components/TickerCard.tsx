@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import {
   AreaSeries,
@@ -13,15 +13,19 @@ import type { BarsResp, PositionResp, TradeResp } from "@/lib/api";
 import { fetcher } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { TradeDrillDown } from "@/components/TradeDrillDown";
 import { cn, formatPct, formatUSD } from "@/lib/utils";
 
 export function TickerCard({
   position,
   trades,
+  recId,
 }: {
   position: PositionResp;
   trades: TradeResp[];
+  recId: number | null;
 }) {
+  const [drillOpen, setDrillOpen] = useState(false);
   const { data: bars } = useSWR<BarsResp>(
     `/api/bars/${position.ticker}?period=1d&interval=5m`,
     fetcher,
@@ -129,9 +133,16 @@ export function TickerCard({
     <Card>
       <CardHeader>
         <div className="flex items-center gap-2">
-          <Badge variant="primary" className="font-mono">
-            {position.ticker}
-          </Badge>
+          <button
+            type="button"
+            onClick={() => setDrillOpen(true)}
+            className="inline-flex items-center rounded-md focus:outline-none focus:ring-2 focus:ring-primary/40"
+            title="Show why this position was sized this way"
+          >
+            <Badge variant="primary" className="cursor-pointer font-mono hover:brightness-110">
+              {position.ticker}
+            </Badge>
+          </button>
           <CardTitle className="text-muted-foreground">
             {position.qty.toFixed(4)} sh · entry {formatUSD(position.avg_entry_price)}
           </CardTitle>
@@ -154,6 +165,12 @@ export function TickerCard({
           aria-label={`${position.ticker} chart`}
         />
       </CardContent>
+      <TradeDrillDown
+        open={drillOpen}
+        onOpenChange={setDrillOpen}
+        recId={recId}
+        focusTicker={position.ticker}
+      />
     </Card>
   );
 }

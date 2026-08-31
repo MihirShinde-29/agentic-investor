@@ -3,7 +3,7 @@ import type { PositionResp, TradeResp } from "@/lib/api";
 import { fetcher } from "@/lib/api";
 import { TickerCard } from "@/components/TickerCard";
 
-export function TickerGrid() {
+export function TickerGrid({ recId }: { recId: number | null }) {
   const { data: positions } = useSWR<PositionResp[]>(
     "/api/positions",
     fetcher,
@@ -26,7 +26,12 @@ export function TickerGrid() {
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
       {positions.map((p) => (
-        <TickerCard key={p.ticker} position={p} trades={trades ?? []} />
+        <TickerCard
+          key={p.ticker}
+          position={p}
+          trades={trades ?? []}
+          recId={recId}
+        />
       ))}
     </div>
   );

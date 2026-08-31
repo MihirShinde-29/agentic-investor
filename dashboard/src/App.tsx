@@ -1,11 +1,13 @@
 import { TrendingUp } from "lucide-react";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
+import { useLatestRecId, useSessionStartedAt } from "@/hooks/useLatestRecId";
 import { cn } from "@/lib/utils";
 import { HeaderStrip } from "@/components/HeaderStrip";
 import { PortfolioChart } from "@/components/PortfolioChart";
 import { PositionsTable } from "@/components/PositionsTable";
 import { TickerGrid } from "@/components/TickerGrid";
 import { EventFeed } from "@/components/EventFeed";
+import { FilterAttribution } from "@/components/FilterAttribution";
 
 function StatusPill({ status }: { status: "connecting" | "open" | "closed" }) {
   const color =
@@ -37,10 +39,12 @@ function StatusPill({ status }: { status: "connecting" | "open" | "closed" }) {
 
 function App() {
   const { events, status } = useLiveEvents(500);
+  const recId = useLatestRecId(events);
+  const sessionStartedAt = useSessionStartedAt(events);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <header className="sticky top-0 z-10 border-b border-border/50 bg-background/85 backdrop-blur">
+      <header className="sticky top-0 z-20 border-b border-border/50 bg-background/90 backdrop-blur">
         <div className="mx-auto flex max-w-[1600px] items-center justify-between px-6 py-3">
           <div className="flex items-center gap-3">
             <div className="grid size-9 place-items-center rounded-lg bg-primary/15 text-primary ring-1 ring-primary/30">
@@ -62,18 +66,20 @@ function App() {
             <StatusPill status={status} />
           </div>
         </div>
+        <div className="mx-auto max-w-[1600px] space-y-2 px-6 pb-3">
+          <HeaderStrip events={events} />
+          <FilterAttribution sessionStartedAt={sessionStartedAt} />
+        </div>
       </header>
 
-      <main className="mx-auto max-w-[1600px] space-y-4 px-6 py-6">
-        <HeaderStrip events={events} />
-
+      <main className="mx-auto max-w-[1600px] px-6 py-6">
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
           <div className="space-y-4">
             <PortfolioChart />
-            <PositionsTable />
-            <TickerGrid />
+            <PositionsTable recId={recId} />
+            <TickerGrid recId={recId} />
           </div>
-          <div className="lg:sticky lg:top-[80px] lg:h-[calc(100vh-100px)]">
+          <div className="lg:sticky lg:top-[248px] lg:h-[calc(100vh-264px)] xl:top-[172px] xl:h-[calc(100vh-188px)]">
             <EventFeed events={events} />
           </div>
         </div>

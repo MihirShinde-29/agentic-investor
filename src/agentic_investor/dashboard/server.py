@@ -178,7 +178,9 @@ def create_app() -> FastAPI:
 
     @app.get("/api/rec/{rec_id}")
     def rec(rec_id: int) -> dict:
-        """Recommendation details for the trade drill-down."""
+        """Recommendation details for the trade drill-down: allocation +
+        per-ticker technical/news signals + violations. All the reasoning
+        the LLM used, so the frontend can show 'why did we trade?'"""
         from agentic_investor.orchestrator.store import load_recommendation
 
         r = load_recommendation(rec_id)
@@ -188,6 +190,8 @@ def create_app() -> FastAPI:
             "rec_id": rec_id,
             "amount": r.request.amount,
             "risk": r.request.risk,
+            "tickers": r.request.tickers,
+            "target": r.request.target,
             "positions": [
                 {
                     "ticker": p.ticker,
@@ -201,7 +205,34 @@ def create_app() -> FastAPI:
             "cash_pct": r.allocation.cash_pct,
             "cash_dollars": r.allocation.cash_dollars,
             "portfolio_rationale": r.allocation.portfolio_rationale,
+            "technical_signals": [
+                {
+                    "ticker": s.ticker,
+                    "stance": s.stance,
+                    "confidence": s.confidence,
+                    "reasoning": s.reasoning,
+                    "key_drivers": list(getattr(s, "key_drivers", []) or []),
+                }
+                for s in (r.technical_signals or [])
+            ],
+            "news_signals": [
+                {
+                    "ticker": s.ticker,
+                    "stance": s.stance,
+                    "confidence": s.confidence,
+                    "reasoning": s.reasoning,
+                }
+                for s in (r.news_signals or [])
+            ],
+            "violations": list(r.violations or []),
         }
+
+    @app.get("/api/filter-skips")
+    def filter_skips(limit: int = 50) -> list[dict]:
+        """Recent opinion-drift-filter skips for the attribution counter."""
+        from agentic_investor.tools.paper_store import list_filter_skips
+
+        return list_filter_skips(limit=limit)
 
     @app.websocket("/ws/live")
     async def live(ws: WebSocket) -> None:

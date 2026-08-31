@@ -85,7 +85,7 @@ export function EventFeed({ events }: { events: LiveEvent[] }) {
           {shown.length} of {events.length}
         </span>
       </CardHeader>
-      <div className="max-h-[calc(100vh-260px)] flex-1 overflow-y-auto p-3">
+      <div className="max-h-[calc(100vh)] flex-1 overflow-y-auto p-3">
         {shown.length === 0 && (
           <p className="px-2 py-8 text-center text-xs text-muted-foreground">
             no events yet

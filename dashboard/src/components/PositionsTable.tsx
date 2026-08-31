@@ -5,6 +5,7 @@ import type { PortfolioResp, PositionResp } from "@/lib/api";
 import { fetcher } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { TradeDrillDown } from "@/components/TradeDrillDown";
 import { cn, formatPct, formatUSD } from "@/lib/utils";
 
 type SortKey =
@@ -16,7 +17,7 @@ type SortKey =
   | "unrealized_pl_pct"
   | "weight";
 
-export function PositionsTable() {
+export function PositionsTable({ recId }: { recId: number | null }) {
   const { data: positions } = useSWR<PositionResp[]>(
     "/api/positions",
     fetcher,
@@ -28,6 +29,7 @@ export function PositionsTable() {
 
   const [sortKey, setSortKey] = useState<SortKey>("market_value");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [drillTicker, setDrillTicker] = useState<string | null>(null);
 
   const equity = portfolio?.equity ?? 0;
   const rows = (positions ?? []).map((p) => ({
@@ -108,7 +110,9 @@ export function PositionsTable() {
                   return (
                     <tr
                       key={r.ticker}
-                      className="border-b border-border/30 last:border-b-0 hover:bg-muted/10"
+                      className="cursor-pointer border-b border-border/30 last:border-b-0 transition-colors hover:bg-primary/5"
+                      onClick={() => setDrillTicker(r.ticker)}
+                      title={recId != null ? `Click for rec #${recId} rationale` : ""}
                     >
                       <td className="px-3 py-2">
                         <Badge variant="primary" className="font-mono">
@@ -151,6 +155,12 @@ export function PositionsTable() {
           </div>
         )}
       </CardContent>
+      <TradeDrillDown
+        open={drillTicker != null}
+        onOpenChange={(v) => !v && setDrillTicker(null)}
+        recId={recId}
+        focusTicker={drillTicker ?? undefined}
+      />
     </Card>
   );
 }
