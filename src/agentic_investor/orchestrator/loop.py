@@ -579,6 +579,17 @@ def run_tick(
                 # last_regen_at MUST update on skip too - otherwise force-regen
                 # returns True on every poll and re-fires the LLM in a loop.
                 state.last_regen_at = now
+                # Reset baseline prices on skip too. Without this, the
+                # price-move trigger re-fires on every poll because baseline
+                # never updates (stuck at pre-restart values), producing an
+                # endless regen -> skip cascade at ~5 LLM calls per 14s.
+                try:
+                    for p in rec.allocation.positions:
+                        state.baseline_prices[p.ticker.upper()] = float(
+                            price_fetcher(p.ticker.upper())
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("baseline reset on skip failed: %s", e)
                 try:
                     from agentic_investor.tools.paper_store import save_loop_state
                     save_loop_state(state.to_dict())

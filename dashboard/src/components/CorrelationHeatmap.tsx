@@ -14,15 +14,19 @@ type CorrelationResp = {
 /**
  * Map a correlation value in [-1, 1] to a CSS background color.
  * Positive: blue (concentration risk). Negative: teal (hedges).
+ *
+ * Note: uses the classic comma-form `hsla(h, s%, l%, a)` -- mixing modern
+ * space-form HSL with a comma alpha is invalid CSS and produces
+ * transparent cells in most browsers.
  */
 function cellStyle(v: number): React.CSSProperties {
   const clamped = Math.max(-1, Math.min(1, v));
   const alpha = Math.abs(clamped);
-  // Positive → primary blue; negative → success teal.
-  const hue = clamped >= 0 ? "217 92% 60%" : "142 71% 45%";
+  const [h, s, l] =
+    clamped >= 0 ? [217, 92, 60] : [142, 71, 45];
   return {
-    backgroundColor: `hsla(${hue}, ${alpha * 0.85})`,
-    color: alpha > 0.5 ? "white" : "hsl(240 5% 64.9%)",
+    backgroundColor: `hsla(${h}, ${s}%, ${l}%, ${(alpha * 0.85).toFixed(2)})`,
+    color: alpha > 0.5 ? "white" : "hsl(240, 5%, 90%)",
   };
 }
 
@@ -95,16 +99,16 @@ export function CorrelationHeatmap() {
               </tbody>
             </table>
             <div className="mt-2 flex items-center justify-between text-[10px] text-muted-foreground">
-              <span>
+              <span className="inline-flex items-center gap-1">
                 <span
-                  className="mr-1 inline-block size-2 rounded-sm"
+                  className="inline-block size-2 rounded-sm"
                   style={{ background: "hsla(217, 92%, 60%, 0.85)" }}
                 />
                 positive = concentration
               </span>
-              <span>
+              <span className="inline-flex items-center gap-1">
                 <span
-                  className="mr-1 inline-block size-2 rounded-sm"
+                  className="inline-block size-2 rounded-sm"
                   style={{ background: "hsla(142, 71%, 45%, 0.85)" }}
                 />
                 negative = hedge

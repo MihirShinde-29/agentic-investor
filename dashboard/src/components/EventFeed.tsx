@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Radio } from "lucide-react";
 import type { LiveEvent } from "@/hooks/useLiveEvents";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
@@ -71,19 +72,61 @@ function relTime(ts: string): string {
   return `${Math.floor(secs / 3600)}h ago`;
 }
 
+type Filter = "important" | "trades" | "news" | "all";
+
+const IMPORTANT_KINDS: Set<Kind> = new Set(["news", "regen", "trade", "fill", "skip"]);
+const TRADE_KINDS: Set<Kind> = new Set(["trade", "fill"]);
+const NEWS_KINDS: Set<Kind> = new Set(["news"]);
+
+const FILTERS: { key: Filter; label: string }[] = [
+  { key: "important", label: "Important" },
+  { key: "trades", label: "Trades" },
+  { key: "news", label: "News" },
+  { key: "all", label: "All" },
+];
+
 export function EventFeed({ events }: { events: LiveEvent[] }) {
-  const shown = [...events].reverse().slice(0, 60);
+  const [filter, setFilter] = useState<Filter>("important");
+
+  const filtered = events.filter((evt) => {
+    const kind = EVENT_TO_KIND[evt.event] ?? "info";
+    if (filter === "all") return true;
+    if (filter === "important") return IMPORTANT_KINDS.has(kind);
+    if (filter === "trades") return TRADE_KINDS.has(kind);
+    if (filter === "news") return NEWS_KINDS.has(kind);
+    return true;
+  });
+  const shown = [...filtered].reverse().slice(0, 60);
 
   return (
     <Card className="flex h-full flex-col">
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <Radio className="size-4 text-primary" />
-          <CardTitle>Live event feed</CardTitle>
+      <CardHeader className="flex-col items-stretch gap-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Radio className="size-4 text-primary" />
+            <CardTitle>Live event feed</CardTitle>
+          </div>
+          <span className="text-xs text-muted-foreground">
+            {shown.length}/{filtered.length} shown · {events.length} total
+          </span>
         </div>
-        <span className="text-xs text-muted-foreground">
-          {shown.length} of {events.length}
-        </span>
+        <div className="flex items-center gap-1">
+          {FILTERS.map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              onClick={() => setFilter(f.key)}
+              className={cn(
+                "rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors",
+                filter === f.key
+                  ? "bg-primary/20 text-primary ring-1 ring-primary/40"
+                  : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
+              )}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
       </CardHeader>
       <div className="max-h-[calc(100vh)] flex-1 overflow-y-auto p-3">
         {shown.length === 0 && (
@@ -98,21 +141,21 @@ export function EventFeed({ events }: { events: LiveEvent[] }) {
             return (
               <li
                 key={`${evt.ts}-${i}`}
-                className="rounded-md border border-border/40 bg-background/40 p-2.5 text-xs"
+                className="overflow-hidden rounded-md border border-border/40 bg-background/40 p-2.5 text-xs"
               >
                 <div className="flex items-start justify-between gap-2">
-                  <div className="flex min-w-0 items-center gap-2">
+                  <div className="flex min-w-0 flex-1 items-center gap-2">
                     <span className={cn("size-1.5 shrink-0 rounded-full", style.dot)} />
                     <Badge variant={style.variant}>{style.label}</Badge>
-                    <span className="truncate font-mono text-[11px] text-muted-foreground">
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
                       {evt.event}
                     </span>
                   </div>
-                  <span className="whitespace-nowrap text-[10px] text-muted-foreground">
+                  <span className="shrink-0 whitespace-nowrap text-[10px] text-muted-foreground">
                     {relTime(evt.ts)}
                   </span>
                 </div>
-                <div className="mt-1 pl-3.5 text-[11px] leading-snug text-foreground/85">
+                <div className="mt-1 line-clamp-3 break-words pl-3.5 text-[11px] leading-snug text-foreground/85">
                   {summarize(evt)}
                 </div>
               </li>

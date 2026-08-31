@@ -93,11 +93,17 @@ function App() {
       </header>
 
       <main className="mx-auto max-w-[1600px] space-y-4 px-6 py-6">
-        <AlertBanner
-          events={events}
-          dismissed={dismissedAlerts}
-          onDismiss={dismissAlert}
-        />
+        {/*
+          Right-pad on desktop so the banner clears the fixed event feed
+          (360px panel + 16px gap = 376px).
+        */}
+        <div className="lg:pr-[376px]">
+          <AlertBanner
+            events={events}
+            dismissed={dismissedAlerts}
+            onDismiss={dismissAlert}
+          />
+        </div>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
           <div className="space-y-4">
             <PortfolioChart
