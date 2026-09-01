@@ -13,15 +13,18 @@ you a single production URL to hit.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import mimetypes
+import os
+import secrets
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from agentic_investor.dashboard.events import get_bus
@@ -48,6 +51,43 @@ async def _lifespan(app: FastAPI):
     yield
 
 
+def _check_basic_creds(authorization_header: str) -> bool:
+    """Match the Basic-auth header against DASHBOARD_USER / DASHBOARD_PASS.
+
+    Returns True when creds match, False otherwise. Returns True when the
+    env vars aren't set (dev mode — no auth). Uses constant-time compare
+    so it doesn't leak timing info about which of user/pass was wrong.
+    """
+    user = os.getenv("DASHBOARD_USER")
+    pw = os.getenv("DASHBOARD_PASS")
+    if not user or not pw:
+        return True
+    if not authorization_header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(authorization_header[6:]).decode("utf-8", "ignore")
+    except Exception:  # noqa: BLE001
+        return False
+    got_user, _, got_pw = decoded.partition(":")
+    return secrets.compare_digest(got_user, user) and secrets.compare_digest(
+        got_pw, pw
+    )
+
+
+def _basic_auth_guard(request: Request) -> Response | None:
+    """HTTP middleware helper: 401 on bad creds, None to let request through.
+    Health endpoint stays open so uptime pings don't need creds.
+    """
+    if request.url.path == "/api/health":
+        return None
+    if _check_basic_creds(request.headers.get("authorization", "")):
+        return None
+    return Response(
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="agentic-investor"'},
+    )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Agentic Investor dashboard",
@@ -61,6 +101,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _auth(request: Request, call_next):
+        blocked = _basic_auth_guard(request)
+        if blocked is not None:
+            return blocked
+        return await call_next(request)
 
     @app.get("/api/health")
     def health() -> dict:
@@ -511,6 +558,11 @@ def create_app() -> FastAPI:
 
     @app.websocket("/ws/live")
     async def live(ws: WebSocket) -> None:
+        # WebSocket upgrades bypass the HTTP middleware; re-check the same
+        # Basic creds the browser sends on the upgrade request.
+        if not _check_basic_creds(ws.headers.get("authorization", "")):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         q = get_bus().subscribe()
         try:
