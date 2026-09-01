@@ -100,7 +100,7 @@ def test_allocator_prompt_includes_profile_caps_and_signals(monkeypatch):
         "news_signals": [_news("AAPL")],
     }
     msgs = g._messages(state)
-    user = msgs[1]["content"]
+    user = "".join(b["text"] for b in msgs[1]["content"])
     assert "conservative" in user
     assert "20%" in user  # conservative caps: max_single 20%, cash floor 20%
     assert "AAPL" in user

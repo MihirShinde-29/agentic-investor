@@ -297,10 +297,31 @@ def gather_signals(state: GraphState) -> dict:
     return {"technical_signals": tech, "news_signals": news, "market_snapshots": snapshots}
 
 
+USER_PREAMBLE = """\
+# Portfolio allocation task
+
+Below in this order you will find:
+  1. Request metadata (tickers, amount, risk profile, target horizon)
+  2. Market regime signal
+  3. Correlation hints for the current universe
+  4. Per-ticker signals (JSON)
+  5. Current allocation (previous decision) if any
+  6. Breaking-news events if any
+
+Read them all, then emit a valid Allocation object per the schema in the
+system message. Weights (positions + cash_pct) must sum to 100. Cite
+specific tickers or values in each rationale; do not invent data.
+"""
+
+
 def _messages(state: GraphState) -> list[dict]:
-    """Build allocator prompt. Static prefix in system message enables
-    OpenAI auto-prompt-caching (~50% discount on cached input tokens) and
-    Anthropic explicit caching via cache_control.
+    """Build the allocator prompt as [stable prefix | volatile tail].
+
+    Stable prefix = system message + USER_PREAMBLE, both marked with
+    cache_control for Anthropic. Volatile tail (request, regime,
+    correlation, signals, previous allocation, news batch) sits below
+    the second marker so a change high in the tail can't invalidate any
+    of the cached tokens above it.
     """
     req = state["request"]
     profile = _profile_from_state(state)
@@ -309,35 +330,22 @@ def _messages(state: GraphState) -> list[dict]:
         state.get("news_signals", []),
         state.get("market_snapshots"),
     )
-    batch_ctx = (state.get("news_batch_context") or "").strip()
-    batch_block = (
-        f"\nBreaking-news events (from live stream):\n{batch_ctx}\n"
-        if batch_ctx else ""
-    )
-    prev_alloc = state.get("previous_allocation")
-    if prev_alloc is not None:
-        prev_lines = [
-            f"  {p.ticker}: {p.weight_pct:.1f}%" for p in prev_alloc.positions
-        ]
-        prev_lines.append(f"  cash: {prev_alloc.cash_pct:.1f}%")
-        prev_block = (
-            "\nCurrent allocation (your previous decision):\n"
-            + "\n".join(prev_lines) + "\n"
-        )
-    else:
-        prev_block = ""
 
-    # Market regime block: pre-computed by run_orchestrator so the profile-
-    # adjustment layer sees the same signal we show the LLM.
-    regime_block = ""
+    sections: list[str] = []
+    sections.append(
+        "## 1. Request\n"
+        f"  amount:  ${req.amount:,.2f}\n"
+        f"  risk:    {req.risk} (profile '{profile.name}': max single "
+        f"{profile.max_single_pct:.0f}%, cash floor "
+        f"{profile.cash_floor_pct:.0f}%)\n"
+        f"  target:  {req.target}\n"
+        f"  tickers: {', '.join(req.tickers)}"
+    )
+
     macro_pb = state.get("macro_prompt_block")
     if macro_pb:
-        regime_block = f"\nMarket regime: {macro_pb}\n"
+        sections.append(f"## 2. Market regime\n{macro_pb}")
 
-    # Correlation hint: tell the LLM which pairs will trip the concentration
-    # constraint so it pre-empts the violation instead of tripping it and
-    # producing a rec that fails guardrail check.
-    corr_block = ""
     if getattr(profile, "correlation_enabled", False) and req.tickers:
         try:
             from agentic_investor.orchestrator.correlation import (
@@ -355,17 +363,37 @@ def _messages(state: GraphState) -> list[dict]:
                 cap = getattr(
                     profile, "max_joint_correlated_weight_pct", 50.0
                 )
-                corr_block = (
-                    "\nHighly-correlated pairs in this universe (60d daily "
-                    "returns):\n"
+                sections.append(
+                    "## 3. Correlation hints (60d daily returns)\n"
                     + "\n".join(corr_lines)
                     + f"\nJoint weight of any pair above the correlation "
-                    f"threshold cannot exceed {cap:.0f}% -- these are one bet "
-                    "under the hood, not diversification. If you want big "
-                    "exposure, pick the higher-conviction name.\n"
+                    f"threshold cannot exceed {cap:.0f}% -- these are one "
+                    "bet under the hood, not diversification. If you want "
+                    "big exposure, pick the higher-conviction name."
                 )
         except Exception:  # noqa: BLE001 - hint is best-effort
             pass
+
+    sections.append(f"## 4. Signals (JSON, keyed by ticker)\n{signals}")
+
+    prev_alloc = state.get("previous_allocation")
+    if prev_alloc is not None:
+        prev_lines = [
+            f"  {p.ticker}: {p.weight_pct:.1f}%" for p in prev_alloc.positions
+        ]
+        prev_lines.append(f"  cash: {prev_alloc.cash_pct:.1f}%")
+        sections.append(
+            "## 5. Current allocation (your previous decision)\n"
+            + "\n".join(prev_lines)
+        )
+
+    batch_ctx = (state.get("news_batch_context") or "").strip()
+    if batch_ctx:
+        sections.append(
+            f"## 6. Breaking-news events (from live stream)\n{batch_ctx}"
+        )
+
+    volatile = "\n\n".join(sections) + "\n\nProduce a valid Allocation."
 
     # cache_control marker: Anthropic caches everything up to and including
     # the marker. OpenAI ignores the field and auto-caches by prefix match.
@@ -381,21 +409,14 @@ def _messages(state: GraphState) -> list[dict]:
     }
     user_msg = {
         "role": "user",
-        "content": (
-            f"Request:\n"
-            f"  tickers: {', '.join(req.tickers)}\n"
-            f"  amount:  ${req.amount:,.2f}\n"
-            f"  risk:    {req.risk} (profile '{profile.name}': max single "
-            f"{profile.max_single_pct:.0f}%, cash floor "
-            f"{profile.cash_floor_pct:.0f}%)\n"
-            f"  target:  {req.target}\n\n"
-            f"Signals (JSON, keyed by ticker):\n{signals}\n"
-            f"{prev_block}"
-            f"{regime_block}"
-            f"{corr_block}"
-            f"{batch_block}\n"
-            "Produce a valid Allocation."
-        ),
+        "content": [
+            {
+                "type": "text",
+                "text": USER_PREAMBLE,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"type": "text", "text": volatile},
+        ],
     }
     return [system_msg, user_msg]
 
