@@ -1,46 +1,44 @@
-# Fly.io app config. Deploy with: fly launch (first time) / fly deploy (updates).
-# Secrets set via `fly secrets set KEY=value ...` — never commit them here.
+# fly.toml app configuration file generated for agentic-investor on 2026-08-31T23:49:16-04:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "agentic-investor"
-primary_region = "iad"  # us-east; change if you're in another region
+app = 'agentic-investor'
+primary_region = 'iad'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  # SQLite mirror + chroma + session artifacts land on the mounted volume so
-  # they survive restarts. Path matches [mounts] below.
-  DATABASE_URL = "sqlite:////data/agentic_investor.db"
-  CHROMA_DIR = "/data/.chroma"
-  DATA_DIR = "/data"
+  CHROMA_DIR = '/data/.chroma'
+  DATABASE_URL = 'sqlite:////data/agentic_investor.db'
+  DATA_DIR = '/data'
 
 [[mounts]]
-  source = "agentic_data"
-  destination = "/data"
+  source = 'agentic_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8000
   force_https = true
-  auto_stop_machines = false   # loop must keep running through the trading day
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]
+  processes = ['app']
 
   [http_service.concurrency]
-    type = "requests"
+    type = 'requests'
     hard_limit = 200
     soft_limit = 100
 
   [[http_service.checks]]
-    interval = "30s"
-    timeout = "5s"
-    grace_period = "30s"
-    method = "GET"
-    path = "/api/health"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '30s'
+    method = 'GET'
+    path = '/api/health'
 
 [[vm]]
-  # finBERT + sentence-transformers + chroma need memory headroom;
-  # 256MB OOMs on model load. 1GB is the smallest that runs comfortably.
-  cpu_kind = "shared"
-  cpus = 1
-  memory_mb = 1024
+  cpu_kind = 'shared'
+  cpus = 2
+  memory_mb = 4096
