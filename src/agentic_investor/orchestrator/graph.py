@@ -35,7 +35,11 @@ from agentic_investor.orchestrator.state import (
     check_profile_rules,
     repair_allocation,
 )
-from agentic_investor.orchestrator.strategy import StrategyProfile, get_preset
+from agentic_investor.orchestrator.strategy import (
+    StrategyProfile,
+    get_preset,
+    regime_adjusted_profile,
+)
 from agentic_investor.tools.market import MarketSnapshot, get_market_snapshot
 
 logger = logging.getLogger(__name__)
@@ -323,17 +327,12 @@ def _messages(state: GraphState) -> list[dict]:
     else:
         prev_block = ""
 
-    # Market regime block: one-line label + justification. Cached per
-    # tick-worth of time; treats yfinance blip failures as no-op.
+    # Market regime block: pre-computed by run_orchestrator so the profile-
+    # adjustment layer sees the same signal we show the LLM.
     regime_block = ""
-    try:
-        from agentic_investor.orchestrator.regime import detect_regime
-
-        regime = detect_regime()
-        if regime.label != "unknown":
-            regime_block = f"\nMarket regime: {regime.prompt_block()}\n"
-    except Exception:  # noqa: BLE001 - regime is best-effort
-        pass
+    macro_pb = state.get("macro_prompt_block")
+    if macro_pb:
+        regime_block = f"\nMarket regime: {macro_pb}\n"
 
     # Correlation hint: tell the LLM which pairs will trip the concentration
     # constraint so it pre-empts the violation instead of tripping it and
@@ -480,9 +479,30 @@ def run_orchestrator(
     rather than re-conceiving the portfolio from scratch. Prevents baseline
     LLM-variance churn (whipsaw pattern observed 2026-08-28 live session).
     """
-    initial: dict = {"request": request}
-    if profile is not None:
-        initial["profile"] = profile
+    effective_profile = profile if profile is not None else get_preset(request.risk)
+    # Macro signal is best-effort: yfinance blips fall back to the untouched
+    # profile so we never take a network hiccup as a reason to widen risk.
+    macro_block = ""
+    macro_label = "unknown"
+    try:
+        from agentic_investor.agents.macro import analyze_macro
+
+        signal = analyze_macro()
+        macro_label = signal.regime
+        macro_block = signal.prompt_block
+        effective_profile, notes = regime_adjusted_profile(
+            effective_profile, macro_label
+        )
+        if notes:
+            logger.info("regime_adjust: %s", "; ".join(notes))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("macro signal skipped: %s", e)
+
+    initial: dict = {"request": request, "profile": effective_profile}
+    if macro_block:
+        initial["macro_prompt_block"] = macro_block
+    if macro_label:
+        initial["macro_regime"] = macro_label
     if news_batch_context:
         initial["news_batch_context"] = news_batch_context
     if previous_allocation is not None:

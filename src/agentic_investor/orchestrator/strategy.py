@@ -139,6 +139,59 @@ def apply_overrides(profile: StrategyProfile, **overrides) -> StrategyProfile:
     return profile.model_copy(update=filtered)
 
 
+def regime_adjusted_profile(
+    profile: StrategyProfile, regime_label: str
+) -> tuple[StrategyProfile, list[str]]:
+    """Return a copy of profile with knobs adjusted for the current regime.
+
+    high_vol tightens across the board (more cash, fewer names, smaller
+    single caps, wider drift bands). bear leans defensive. bull loosens the
+    cash floor slightly. sideways/unknown leave the profile alone.
+
+    Returns (adjusted, notes) so the caller can log what changed.
+    """
+    notes: list[str] = []
+    updates: dict = {}
+    if regime_label == "high_vol":
+        new_cash = min(profile.cash_floor_pct + 10.0, 40.0)
+        new_max_pos = max(int(profile.max_positions) - 3, 5)
+        new_max_single = max(profile.max_single_pct - 10.0, 15.0)
+        new_band = profile.band_abs_pct + 2.0
+        updates = {
+            "cash_floor_pct": new_cash,
+            "max_positions": new_max_pos,
+            "max_single_pct": new_max_single,
+            "band_abs_pct": new_band,
+        }
+        notes.append(
+            f"high_vol: cash_floor {profile.cash_floor_pct:.0f}->{new_cash:.0f}%, "
+            f"max_positions {profile.max_positions}->{new_max_pos}, "
+            f"max_single {profile.max_single_pct:.0f}->{new_max_single:.0f}%, "
+            f"band_abs {profile.band_abs_pct:.0f}->{new_band:.0f}pp"
+        )
+    elif regime_label == "bear":
+        new_cash = min(profile.cash_floor_pct + 5.0, 40.0)
+        new_max_single = max(profile.max_single_pct - 5.0, 15.0)
+        updates = {
+            "cash_floor_pct": new_cash,
+            "max_single_pct": new_max_single,
+        }
+        notes.append(
+            f"bear: cash_floor {profile.cash_floor_pct:.0f}->{new_cash:.0f}%, "
+            f"max_single {profile.max_single_pct:.0f}->{new_max_single:.0f}%"
+        )
+    elif regime_label == "bull":
+        new_cash = max(profile.cash_floor_pct - 3.0, 0.0)
+        if new_cash != profile.cash_floor_pct:
+            updates = {"cash_floor_pct": new_cash}
+            notes.append(
+                f"bull: cash_floor {profile.cash_floor_pct:.0f}->{new_cash:.0f}%"
+            )
+    if not updates:
+        return profile, notes
+    return profile.model_copy(update=updates), notes
+
+
 def load_profile(name_or_path: str) -> StrategyProfile:
     """Resolve a profile from a preset name OR a TOML file path.
 

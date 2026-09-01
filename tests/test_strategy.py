@@ -12,6 +12,7 @@ from agentic_investor.orchestrator.strategy import (
     apply_overrides,
     get_preset,
     load_profile,
+    regime_adjusted_profile,
 )
 
 
@@ -80,6 +81,51 @@ def test_load_profile_returns_preset_by_name():
 def test_load_profile_raises_for_missing_file():
     with pytest.raises(FileNotFoundError):
         load_profile("nonexistent-preset-name")
+
+
+def test_regime_adjusted_profile_high_vol_tightens_everything():
+    p = get_preset("moderate")
+    adj, notes = regime_adjusted_profile(p, "high_vol")
+    assert adj.cash_floor_pct == p.cash_floor_pct + 10.0
+    assert adj.max_positions == p.max_positions - 3
+    assert adj.max_single_pct == p.max_single_pct - 10.0
+    assert adj.band_abs_pct == p.band_abs_pct + 2.0
+    assert notes and "high_vol" in notes[0]
+
+
+def test_regime_adjusted_profile_bear_lifts_cash_and_trims_caps():
+    p = get_preset("moderate")
+    adj, notes = regime_adjusted_profile(p, "bear")
+    assert adj.cash_floor_pct == p.cash_floor_pct + 5.0
+    assert adj.max_single_pct == p.max_single_pct - 5.0
+    assert adj.max_positions == p.max_positions  # unchanged
+    assert notes and "bear" in notes[0]
+
+
+def test_regime_adjusted_profile_bull_relaxes_cash_only():
+    p = get_preset("moderate")
+    adj, notes = regime_adjusted_profile(p, "bull")
+    assert adj.cash_floor_pct == p.cash_floor_pct - 3.0
+    assert adj.max_positions == p.max_positions
+    assert adj.max_single_pct == p.max_single_pct
+
+
+def test_regime_adjusted_profile_sideways_and_unknown_are_noops():
+    p = get_preset("moderate")
+    for label in ("sideways", "unknown", "", "wat"):
+        adj, notes = regime_adjusted_profile(p, label)
+        assert adj.model_dump() == p.model_dump()
+        assert notes == []
+
+
+def test_regime_adjusted_profile_clamps_lower_bounds():
+    # Custom tight profile: verify caps don't go below the floor.
+    p = StrategyProfile(
+        name="tight", max_single_pct=18.0, cash_floor_pct=0.0, max_positions=6,
+    )
+    adj, _ = regime_adjusted_profile(p, "high_vol")
+    assert adj.max_single_pct >= 15.0
+    assert adj.max_positions >= 5
 
 
 def test_load_profile_reads_toml_file(tmp_path):

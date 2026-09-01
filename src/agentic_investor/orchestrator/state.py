@@ -306,3 +306,8 @@ class GraphState(TypedDict, total=False):
     # existing weights and propose delta-form changes instead of re-conceiving
     # the portfolio from a blank slate. Prevents baseline churn / whipsaw.
     previous_allocation: Allocation
+    # Pre-rendered macro/regime block for the allocator prompt.
+    macro_prompt_block: str
+    # Current regime label ("bull"/"bear"/"sideways"/"high_vol"/"unknown"),
+    # used by repair/validate to know why the profile was tightened.
+    macro_regime: str
