@@ -29,6 +29,10 @@ out/eval/*
 .pytest_cache/
 .ruff_cache/
 
+# Local flyctl/session log dumps (created for offline analysis).
+session_*.log
+logs_*.txt
+
 # Frontend build artifacts + deps
 dashboard/node_modules/
 dashboard/dist/
