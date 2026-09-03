@@ -383,6 +383,84 @@ def create_app() -> FastAPI:
                 status_code=500,
             )
 
+    @app.get("/api/watchlist")
+    def watchlist() -> dict:
+        """Shadow book: held / recent_exits / on_deck.
+
+        held        - current Alpaca positions
+        recent_exits - tickers we sold to zero in the last 24h
+        on_deck     - tickers in the latest rec's target that aren't held
+        """
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from agentic_investor.orchestrator.store import (
+            list_recommendations,
+            load_recommendation,
+        )
+        from agentic_investor.tools.paper_broker import (
+            get_broker,
+            get_latest_price,
+        )
+        from agentic_investor.tools.paper_store import (
+            recent_sold_tickers,
+        )
+
+        broker = get_broker()
+        try:
+            positions = broker.get_positions()
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": str(e)}, status_code=500)
+        held_set = {p.ticker.upper() for p in positions}
+        held = [
+            {
+                "ticker": p.ticker,
+                "qty": p.qty,
+                "market_value": p.market_value,
+                "unrealized_pl_pct": p.unrealized_pl_pct,
+            }
+            for p in positions
+        ]
+
+        since = str(_dt.now(_UTC) - _td(hours=24))
+        exit_tickers = [
+            t for t in recent_sold_tickers(since_iso=since) if t not in held_set
+        ]
+        recent_exits = []
+        for t in exit_tickers[:20]:
+            price = None
+            try:
+                price = float(get_latest_price(t))
+            except Exception:  # noqa: BLE001
+                pass
+            recent_exits.append({"ticker": t, "current_price": price})
+
+        on_deck = []
+        recs = list_recommendations(limit=1)
+        if recs:
+            latest_rec_id = recs[0][0]
+            latest = load_recommendation(latest_rec_id)
+            if latest:
+                for p in latest.allocation.positions:
+                    tk = p.ticker.upper()
+                    if tk in held_set:
+                        continue
+                    price = None
+                    try:
+                        price = float(get_latest_price(tk))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    on_deck.append({
+                        "ticker": tk,
+                        "target_weight_pct": p.weight_pct,
+                        "target_dollars": p.dollars,
+                        "confidence": p.confidence,
+                        "current_price": price,
+                    })
+
+        return {"held": held, "recent_exits": recent_exits, "on_deck": on_deck}
+
     @app.get("/api/rec/{rec_id}")
     def rec(rec_id: int) -> dict:
         """Recommendation details for the trade drill-down: allocation +

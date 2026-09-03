@@ -187,9 +187,16 @@ export function TickerCard({
     chart.timeScale().fitContent();
   }, [bars, tickerTrades, timeframe]);
 
-  // Live price is shown in the header pill (green pulsing badge). No
-  // on-chart overlay - the dashed line was noisy and the pill's already
-  // enough for at-a-glance price awareness.
+  // Feed the live-price pill's value into the last bar's close so the
+  // chart moves between minute-bar rolls. series.update() updates the last
+  // point in-place when the time matches - no new bar added.
+  useEffect(() => {
+    const price = priceSeriesRef.current;
+    if (!price || !bars?.bars?.length || latest?.price == null) return;
+    const lastBar = bars.bars[bars.bars.length - 1];
+    const t = Math.floor(new Date(lastBar.t).getTime() / 1000) as UTCTimestamp;
+    price.update({ time: t, value: latest.price });
+  }, [latest, bars]);
 
   const gain = position.unrealized_pl >= 0;
   const livePrice = latest?.price ?? null;

@@ -49,6 +49,14 @@ export function PortfolioChart({ sessionId }: { sessionId?: string }) {
     fetcher,
     { refreshInterval: sessionId ? 0 : tf.refreshMs },
   );
+  // Live-tail: poll current equity every 10s and append a temporary point
+  // at the chart tip so the line moves between snapshot writes (which only
+  // happen ~1 per loop tick, ~3-5 min apart).
+  const { data: livePortfolio } = useSWR<{ equity: number } | null>(
+    sessionId ? null : "/api/portfolio",
+    fetcher,
+    { refreshInterval: sessionId ? 0 : 10_000 },
+  );
 
   const { data, portfolioReturn, spyReturn, alpha } = useMemo(() => {
     if (!snaps || snaps.length === 0) {
@@ -85,10 +93,28 @@ export function PortfolioChart({ sessionId }: { sessionId?: string }) {
       });
     }
 
-    const pRet = portfolioSeries[portfolioSeries.length - 1]?.pct ?? 0;
+    // Live-tail: if we have a fresh /api/portfolio equity newer than the
+    // last snapshot, append it as a temporary chart tip. Uses the last
+    // known SPY value so the two lines stay aligned in time.
+    const livePct = livePortfolio && openEq > 0
+      ? (livePortfolio.equity / openEq - 1) * 100
+      : null;
+    if (livePct !== null && points.length > 0) {
+      const nowTs = Date.now();
+      const lastTs = points[points.length - 1].ts;
+      if (nowTs > lastTs) {
+        points.push({
+          ts: nowTs,
+          portfolio: livePct,
+          spy: points[points.length - 1].spy,
+        });
+      }
+    }
+
+    const pRet = livePct ?? portfolioSeries[portfolioSeries.length - 1]?.pct ?? 0;
     const sRet = spySeries[spySeries.length - 1]?.pct ?? 0;
     return { data: points, portfolioReturn: pRet, spyReturn: sRet, alpha: pRet - sRet };
-  }, [snaps, spy]);
+  }, [snaps, spy, livePortfolio]);
 
   const alphaVariant =
     alpha > 0.05 ? "success" : alpha < -0.05 ? "danger" : "muted";

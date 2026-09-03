@@ -152,6 +152,11 @@ class LoopState:
     # {ticker: (side, iso_ts)} - most-recent trade per ticker, used by the
     # temporal-cooldown veto in compute_trade_plan.
     recent_trades: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # Fingerprint of the news-batch context that drove the last saved rec.
+    # If the next tick's batch fingerprint matches, we reuse the prior rec
+    # instead of firing the LLM again - same input, same output, save the
+    # ~$0.008 per skip.
+    last_batch_fingerprint: str | None = None
 
     def to_dict(self) -> dict:
         """Serialize for SQLite persistence."""
@@ -174,6 +179,7 @@ class LoopState:
                 self.last_big_rebalance_at.isoformat()
                 if self.last_big_rebalance_at else None
             ),
+            "last_batch_fingerprint": self.last_batch_fingerprint,
         }
 
     @classmethod
@@ -204,6 +210,7 @@ class LoopState:
                 datetime.fromisoformat(d["last_big_rebalance_at"])
                 if isinstance(d.get("last_big_rebalance_at"), str) else None
             ),
+            last_batch_fingerprint=d.get("last_batch_fingerprint"),
         )
 
 
@@ -572,18 +579,52 @@ def run_tick(
                 if len(promoted) >= cfg.max_promotions_per_regen:
                     break
 
-        # Delta-form prompt anchor (non-first-day only).
-        prev_rec_for_prompt = None
-        if not is_new_day and state.last_rec_id is not None:
-            from agentic_investor.orchestrator.store import (
-                load_recommendation as _load_for_anchor,
-            )
-            prev_rec_for_prompt = _load_for_anchor(state.last_rec_id)
-        rec, tickers_used = _generate_recommendation(
-            cfg, news_batch_context=batch_ctx, pre_picked_tickers=pre_picked,
-            previous_rec=prev_rec_for_prompt,
-            extra_tickers=promoted or None,
+        # Deterministic pre-check: if the news batch fingerprint matches the
+        # one that drove the last saved rec, the LLM would see identical
+        # input and produce the same output. Reuse the prior rec, skip the
+        # LLM call, and fall through to drift-vs-book below.
+        import hashlib as _hashlib
+
+        batch_fp = (
+            _hashlib.sha1(batch_ctx.encode("utf-8")).hexdigest()[:16]
+            if batch_ctx else None
         )
+        pre_check_skipped = (
+            batch_fp is not None
+            and batch_fp == state.last_batch_fingerprint
+            and not is_new_day
+            and state.last_rec_id is not None
+        )
+        if pre_check_skipped:
+            logger.info(
+                "tick %s: pre-check skip (batch unchanged since rec #%d)",
+                tick_at, state.last_rec_id,
+            )
+            if session:
+                session.log("pre_check_skip", {
+                    "rec_id": state.last_rec_id,
+                    "batch_fingerprint": batch_fp,
+                })
+            from agentic_investor.orchestrator.store import (
+                load_recommendation as _load_prev,
+            )
+            rec = _load_prev(state.last_rec_id)
+            regenerated = False
+            tickers_used = state.frozen_picker_tickers or []
+        else:
+            # Delta-form prompt anchor (non-first-day only).
+            prev_rec_for_prompt = None
+            if not is_new_day and state.last_rec_id is not None:
+                from agentic_investor.orchestrator.store import (
+                    load_recommendation as _load_for_anchor,
+                )
+                prev_rec_for_prompt = _load_for_anchor(state.last_rec_id)
+            rec, tickers_used = _generate_recommendation(
+                cfg, news_batch_context=batch_ctx, pre_picked_tickers=pre_picked,
+                previous_rec=prev_rec_for_prompt,
+                extra_tickers=promoted or None,
+            )
+            state.last_batch_fingerprint = batch_fp
 
         # Opinion-drift filter: compare new rec to previous; skip on LLM
         # noise (barely-moved) or over-swing (avg-drift / max-delta).

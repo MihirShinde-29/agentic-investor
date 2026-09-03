@@ -15,6 +15,7 @@ import { CorrelationHeatmap } from "@/components/CorrelationHeatmap";
 import { AlertBanner } from "@/components/AlertBanner";
 import { HealthStrip } from "@/components/HealthStrip";
 import { SessionPicker } from "@/components/SessionPicker";
+import { WatchlistPanel } from "@/components/WatchlistPanel";
 
 function StatusPill({ status }: { status: "connecting" | "open" | "closed" }) {
   const color =
@@ -109,6 +110,7 @@ function App() {
             <PortfolioChart
               sessionId={selectedSession === "live" ? undefined : selectedSession}
             />
+            <WatchlistPanel />
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_320px]">
               <PositionsTable recId={recId} />
               <div className="space-y-4">
