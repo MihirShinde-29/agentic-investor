@@ -19,6 +19,18 @@ export const TIMEFRAMES: Record<
   "1Y": { period: "1y",  interval: "1d",  refreshMs: 30 * 60_000 },
 };
 
+// Seconds per bar for each timeframe. Trade markers must snap to their
+// containing bar boundary or lightweight-charts places them on the nearest
+// bar, which visibly misaligns on 15m/1h/1d intervals.
+export const BAR_SECONDS: Record<Timeframe, number> = {
+  "1D": 60,
+  "3D": 15 * 60,
+  "1W": 60 * 60,
+  "1M": 60 * 60,
+  "3M": 24 * 60 * 60,
+  "1Y": 24 * 60 * 60,
+};
+
 export const TIMEFRAME_ORDER: Timeframe[] = [
   "1D",
   "3D",

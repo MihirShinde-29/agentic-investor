@@ -125,11 +125,13 @@ function Section({
         ? "border-rose-500/30"
         : "border-border";
   return (
-    <div className={`rounded-md border ${tint} p-2`}>
+    <div className={`flex h-64 flex-col rounded-md border ${tint} p-2`}>
       <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
         {title}
       </div>
-      <div className="flex flex-col gap-1">{children}</div>
+      <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1">
+        {children}
+      </div>
     </div>
   );
 }

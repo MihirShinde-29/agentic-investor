@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
-import { TIMEFRAMES, type Timeframe } from "@/lib/timeframe";
+import { BAR_SECONDS, TIMEFRAMES, type Timeframe } from "@/lib/timeframe";
 import {
   AreaSeries,
   createChart,
@@ -8,6 +8,8 @@ import {
   LineSeries,
   type IChartApi,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
 import type { BarsResp, PositionResp, TradeResp } from "@/lib/api";
@@ -47,6 +49,10 @@ export function TickerCard({
   const priceSeriesRef = useRef<ISeriesApi<"Area"> | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const smaSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  // v5 createSeriesMarkers attaches a fresh primitive every call - without
+  // holding a ref and reusing setMarkers, switching timeframes accumulates
+  // duplicate marker layers on the chart.
+  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
 
   const tickerTrades = useMemo(
     () =>
@@ -146,10 +152,14 @@ export function TickerCard({
     //    for the exact fill price/time via lightweight-charts' own tooltip.
     const firstBarTs = closeData[0]?.time as number | undefined;
     const lastBarTs = closeData[closeData.length - 1]?.time as number | undefined;
+    const bucket = BAR_SECONDS[timeframe];
     const markers = tickerTrades
       .filter((t) => t.filled_avg_price != null)
       .map((t) => {
-        const ts = Math.floor(new Date(t.submitted_at).getTime() / 1000);
+        const rawTs = Math.floor(
+          new Date(t.filled_at ?? t.submitted_at).getTime() / 1000,
+        );
+        const ts = Math.floor(rawTs / bucket) * bucket;
         return { trade: t, ts };
       })
       .filter(({ ts }) =>
@@ -169,7 +179,11 @@ export function TickerCard({
         size: 1,
       }))
       .sort((a, b) => (a.time as number) - (b.time as number));
-    createSeriesMarkers(price, markers);
+    if (markersRef.current) {
+      markersRef.current.setMarkers(markers);
+    } else {
+      markersRef.current = createSeriesMarkers(price, markers);
+    }
     // Refit on every bars update so the whole timeframe stays visible from
     // its start (e.g. 9:30 for 1D) with no cropping on the left.
     chart.timeScale().fitContent();

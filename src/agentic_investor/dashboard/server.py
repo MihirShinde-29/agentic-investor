@@ -442,28 +442,47 @@ def create_app() -> FastAPI:
                 pass
             recent_exits.append({"ticker": t, "current_price": price})
 
+        # On-deck = picker's frozen candidate set minus what we already
+        # hold. Was previously "latest rec's positions minus held", but the
+        # loop executes trades immediately so that gap was almost always
+        # empty. The picker's top-N is the real "considered but not
+        # deployed" set - the true watchlist meaning.
         on_deck = []
+        latest = None
         recs = list_recommendations(limit=1)
         if recs:
-            latest_rec_id = recs[0][0]
-            latest = load_recommendation(latest_rec_id)
-            if latest:
-                for p in latest.allocation.positions:
-                    tk = p.ticker.upper()
-                    if tk in held_set:
-                        continue
-                    price = None
-                    try:
-                        price = float(get_latest_price(tk))
-                    except Exception:  # noqa: BLE001
-                        pass
-                    on_deck.append({
-                        "ticker": tk,
-                        "target_weight_pct": p.weight_pct,
-                        "target_dollars": p.dollars,
-                        "confidence": p.confidence,
-                        "current_price": price,
-                    })
+            latest = load_recommendation(recs[0][0])
+        target_by_ticker = {}
+        if latest is not None:
+            target_by_ticker = {
+                p.ticker.upper(): p for p in latest.allocation.positions
+            }
+        try:
+            from agentic_investor.tools.paper_store import (
+                load_loop_state as _load_state,
+            )
+            loop_state = _load_state() or {}
+        except Exception:  # noqa: BLE001
+            loop_state = {}
+        picker_tickers = [
+            t.upper() for t in (loop_state.get("frozen_picker_tickers") or [])
+        ]
+        for tk in picker_tickers:
+            if tk in held_set:
+                continue
+            price = None
+            try:
+                price = float(get_latest_price(tk))
+            except Exception:  # noqa: BLE001
+                pass
+            p = target_by_ticker.get(tk)
+            on_deck.append({
+                "ticker": tk,
+                "target_weight_pct": p.weight_pct if p else 0.0,
+                "target_dollars": p.dollars if p else 0.0,
+                "confidence": p.confidence if p else None,
+                "current_price": price,
+            })
 
         return {"held": held, "recent_exits": recent_exits, "on_deck": on_deck}
 
@@ -584,8 +603,10 @@ def create_app() -> FastAPI:
     ) -> dict:
         """Pairwise 60-day return correlation matrix for the heatmap widget.
 
-        When ?tickers=... isn't given, uses current open positions from the
-        broker so the widget "just works" without config.
+        When ?tickers=... isn't given, unions three sets so the heatmap shows
+        the whole "shadow book" the allocator considers:
+          held  ∪  on-deck (latest rec's targets)  ∪  recent exits (24h)
+        Matches the correlation universe the LLM prompt already sees.
         """
         from agentic_investor.orchestrator.correlation import (
             compute_correlation_matrix,
@@ -594,12 +615,43 @@ def create_app() -> FastAPI:
         if tickers:
             symbols = [t.strip().upper() for t in tickers.split(",") if t.strip()]
         else:
+            symbol_set: set[str] = set()
             try:
                 from agentic_investor.tools.paper_broker import get_broker
 
-                symbols = [p.ticker for p in get_broker().get_positions()]
+                for p in get_broker().get_positions():
+                    symbol_set.add(p.ticker.upper())
             except Exception:  # noqa: BLE001
-                symbols = []
+                pass
+            try:
+                from agentic_investor.orchestrator.store import (
+                    list_recommendations,
+                    load_recommendation,
+                )
+
+                recs = list_recommendations(limit=1)
+                if recs:
+                    latest = load_recommendation(recs[0][0])
+                    if latest:
+                        for p in latest.allocation.positions:
+                            symbol_set.add(p.ticker.upper())
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                from datetime import UTC as _UTC
+                from datetime import datetime as _dt
+                from datetime import timedelta as _td
+
+                from agentic_investor.tools.paper_store import (
+                    recent_sold_tickers,
+                )
+
+                since = str(_dt.now(_UTC) - _td(hours=24))
+                for t in recent_sold_tickers(since_iso=since):
+                    symbol_set.add(t)
+            except Exception:  # noqa: BLE001
+                pass
+            symbols = sorted(symbol_set)
         if len(symbols) < 2:
             return {"tickers": symbols, "matrix": [], "window_days": window_days}
         try:
