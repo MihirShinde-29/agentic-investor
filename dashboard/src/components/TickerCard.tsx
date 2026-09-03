@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
+import { TIMEFRAMES, type Timeframe } from "@/lib/timeframe";
 import {
   AreaSeries,
   createChart,
@@ -16,31 +17,18 @@ import { Badge } from "@/components/ui/badge";
 import { TradeDrillDown } from "@/components/TradeDrillDown";
 import { cn, formatPct, formatUSD } from "@/lib/utils";
 
-type Timeframe = "1D" | "3D" | "1W" | "1M" | "3M" | "1Y";
-
-// yfinance interval caps: 1m ≤ 7d, 5m/15m/30m ≤ 60d, 1h ≤ 730d, 1d unlimited.
-// 1D uses 1-minute bars so the chart fills up minute-by-minute during the
-// session instead of showing just a handful of 5-min bars near open.
-const TIMEFRAMES: Record<Timeframe, { period: string; interval: string; refreshMs: number }> = {
-  "1D": { period: "1d",  interval: "1m",  refreshMs: 30_000 },
-  "3D": { period: "3d",  interval: "15m", refreshMs: 60_000 },
-  "1W": { period: "1w",  interval: "1h",  refreshMs: 5 * 60_000 },
-  "1M": { period: "1mo", interval: "1h",  refreshMs: 5 * 60_000 },
-  "3M": { period: "3mo", interval: "1d",  refreshMs: 15 * 60_000 },
-  "1Y": { period: "1y",  interval: "1d",  refreshMs: 30 * 60_000 },
-};
-
 export function TickerCard({
   position,
   trades,
   recId,
+  timeframe,
 }: {
   position: PositionResp;
   trades: TradeResp[];
   recId: number | null;
+  timeframe: Timeframe;
 }) {
   const [drillOpen, setDrillOpen] = useState(false);
-  const [timeframe, setTimeframe] = useState<Timeframe>("1D");
   const tf = TIMEFRAMES[timeframe];
   const { data: bars } = useSWR<BarsResp>(
     `/api/bars/${position.ticker}?period=${tf.period}&interval=${tf.interval}`,
@@ -240,23 +228,6 @@ export function TickerCard({
         </div>
       </CardHeader>
       <CardContent className="p-2">
-        <div className="mb-1.5 flex items-center justify-end gap-0.5 px-1">
-          {(Object.keys(TIMEFRAMES) as Timeframe[]).map((tfKey) => (
-            <button
-              key={tfKey}
-              type="button"
-              onClick={() => setTimeframe(tfKey)}
-              className={cn(
-                "rounded-md px-1.5 py-0.5 text-[10px] font-medium tabular transition-colors",
-                timeframe === tfKey
-                  ? "bg-primary/15 text-primary ring-1 ring-primary/30"
-                  : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
-              )}
-            >
-              {tfKey}
-            </button>
-          ))}
-        </div>
         <div
           ref={containerRef}
           className="h-52 w-full"

@@ -1,5 +1,5 @@
 import useSWR from "swr";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   Area,
   AreaChart,
@@ -14,25 +14,18 @@ import type { BarsResp, SnapshotResp } from "@/lib/api";
 import { fetcher } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { cn, formatPct } from "@/lib/utils";
+import { formatPct } from "@/lib/utils";
+import { TIMEFRAMES, type Timeframe } from "@/lib/timeframe";
 
 type Point = { ts: number; portfolio: number | null; spy: number | null };
 
-type Timeframe = "1D" | "3D" | "1W" | "1M" | "3M" | "1Y";
-
-// Match TickerCard: 1D uses 1-minute bars so the intraday chart fills up
-// throughout the session instead of showing just a few 5-min bars at open.
-const TIMEFRAMES: Record<Timeframe, { period: string; interval: string; refreshMs: number }> = {
-  "1D": { period: "1d",  interval: "1m", refreshMs: 30_000 },
-  "3D": { period: "3d",  interval: "15m", refreshMs: 60_000 },
-  "1W": { period: "1w",  interval: "1h", refreshMs: 5 * 60_000 },
-  "1M": { period: "1mo", interval: "1h", refreshMs: 5 * 60_000 },
-  "3M": { period: "3mo", interval: "1d", refreshMs: 15 * 60_000 },
-  "1Y": { period: "1y",  interval: "1d", refreshMs: 30 * 60_000 },
-};
-
-export function PortfolioChart({ sessionId }: { sessionId?: string }) {
-  const [timeframe, setTimeframe] = useState<Timeframe>("1D");
+export function PortfolioChart({
+  sessionId,
+  timeframe,
+}: {
+  sessionId?: string;
+  timeframe: Timeframe;
+}) {
   const tf = TIMEFRAMES[timeframe];
   // Session picker overrides the timeframe: replay always shows the session window.
   const snapshotsUrl = sessionId
@@ -139,26 +132,6 @@ export function PortfolioChart({ sessionId }: { sessionId?: string }) {
             <Badge variant={alphaVariant}>Alpha {formatPct(alpha)}</Badge>
           </div>
         </div>
-        {/* Timeframe pills; hidden in session-replay mode since the window is fixed. */}
-        {!sessionId && (
-          <div className="flex items-center justify-end gap-0.5">
-            {(Object.keys(TIMEFRAMES) as Timeframe[]).map((tfKey) => (
-              <button
-                key={tfKey}
-                type="button"
-                onClick={() => setTimeframe(tfKey)}
-                className={cn(
-                  "rounded-md px-1.5 py-0.5 text-[10px] font-medium tabular transition-colors",
-                  timeframe === tfKey
-                    ? "bg-primary/15 text-primary ring-1 ring-primary/30"
-                    : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
-                )}
-              >
-                {tfKey}
-              </button>
-            ))}
-          </div>
-        )}
       </CardHeader>
       <CardContent className="p-2">
         {data.length < 2 ? (

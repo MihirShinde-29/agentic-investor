@@ -16,6 +16,8 @@ import { AlertBanner } from "@/components/AlertBanner";
 import { HealthStrip } from "@/components/HealthStrip";
 import { SessionPicker } from "@/components/SessionPicker";
 import { WatchlistPanel } from "@/components/WatchlistPanel";
+import { TimeframeSelector } from "@/components/TimeframeSelector";
+import type { Timeframe } from "@/lib/timeframe";
 
 function StatusPill({ status }: { status: "connecting" | "open" | "closed" }) {
   const color =
@@ -49,6 +51,7 @@ function App() {
   const { events: liveEvents, status } = useLiveEvents(500);
   const [selectedSession, setSelectedSession] = useState<string | "live">("live");
   const [dismissedAlerts, setDismissedAlerts] = useState<Set<string>>(new Set());
+  const [timeframe, setTimeframe] = useState<Timeframe>("1D");
   const replayEvents = useReplayEvents(selectedSession);
   const events = replayEvents ?? liveEvents;
   const recId = useLatestRecId(events);
@@ -107,8 +110,12 @@ function App() {
         </div>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
           <div className="space-y-4">
+            <div className="flex items-center justify-end">
+              <TimeframeSelector value={timeframe} onChange={setTimeframe} />
+            </div>
             <PortfolioChart
               sessionId={selectedSession === "live" ? undefined : selectedSession}
+              timeframe={timeframe}
             />
             <WatchlistPanel />
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_320px]">
@@ -118,7 +125,7 @@ function App() {
                 <CorrelationHeatmap />
               </div>
             </div>
-            <TickerGrid recId={recId} />
+            <TickerGrid recId={recId} timeframe={timeframe} />
           </div>
           {/*
             Empty grid cell reserves the 360px right rail so the left

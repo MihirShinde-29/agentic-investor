@@ -2,8 +2,15 @@ import useSWR from "swr";
 import type { PositionResp, TradeResp } from "@/lib/api";
 import { fetcher } from "@/lib/api";
 import { TickerCard } from "@/components/TickerCard";
+import type { Timeframe } from "@/lib/timeframe";
 
-export function TickerGrid({ recId }: { recId: number | null }) {
+export function TickerGrid({
+  recId,
+  timeframe,
+}: {
+  recId: number | null;
+  timeframe: Timeframe;
+}) {
   const { data: positions } = useSWR<PositionResp[]>(
     "/api/positions",
     fetcher,
@@ -31,6 +38,7 @@ export function TickerGrid({ recId }: { recId: number | null }) {
           position={p}
           trades={trades ?? []}
           recId={recId}
+          timeframe={timeframe}
         />
       ))}
     </div>
