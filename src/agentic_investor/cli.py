@@ -614,6 +614,79 @@ def _compare_allocators(
 # Paper trading (M7)
 
 
+def _healthcheck() -> int:
+    """Verify every external dep the paper-loop needs is reachable.
+
+    Returns 0 if all checks pass, 1 otherwise. Meant to be run manually
+    before `paper-loop --auto` so a broken key or unreachable service
+    fails fast instead of showing up mid-market.
+    """
+    checks: list[tuple[str, bool, str]] = []
+
+    # Alpaca broker
+    try:
+        from agentic_investor.tools.paper_broker import get_broker
+        clock = get_broker().get_clock()
+        checks.append(("Alpaca broker", True, f"market {'open' if clock.is_open else 'closed'}"))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("Alpaca broker", False, str(e)))
+
+    # OpenAI (or configured LLM provider) via a 1-token completion
+    try:
+        from pydantic import BaseModel
+
+        from agentic_investor.llm.client import structured_complete
+
+        class _Ping(BaseModel):
+            ok: bool
+
+        r = structured_complete(
+            _Ping,
+            [{"role": "user", "content": "Respond with {\"ok\": true}"}],
+            timeout=15.0,
+        )
+        checks.append(("LLM provider", bool(r.ok), "1-token roundtrip"))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("LLM provider", False, str(e)))
+
+    # yfinance
+    try:
+        from agentic_investor.tools.market import fetch_ohlcv
+        df = fetch_ohlcv("AAPL", period="5d", timeout=10.0)
+        checks.append(("yfinance / OHLCV", not df.empty, f"{len(df)} bars"))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("yfinance / OHLCV", False, str(e)))
+
+    # finBERT loads (only downloaded on demand, so this triggers the pull
+    # if it's missing — worth catching before market open)
+    try:
+        from agentic_investor.orchestrator.finbert_prefilter import score_headlines
+        s = score_headlines(["Apple beats earnings estimates"])
+        checks.append(("finBERT model", s is not None, "loaded + scored"))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("finBERT model", False, str(e)))
+
+    # Chroma
+    try:
+        from agentic_investor.tools.news import get_collection
+        get_collection().count()
+        checks.append(("Chroma store", True, "reachable"))
+    except Exception as e:  # noqa: BLE001
+        checks.append(("Chroma store", False, str(e)))
+
+    print("\nHealthcheck")
+    print("  " + "-" * 60)
+    ok = True
+    for name, passed, note in checks:
+        marker = "PASS" if passed else "FAIL"
+        print(f"  [{marker}] {name:<20} {note}")
+        if not passed:
+            ok = False
+    print("  " + "-" * 60)
+    print(f"  Result: {'all pass' if ok else 'FAIL - see above'}\n")
+    return 0 if ok else 1
+
+
 def _paper_status() -> None:
     from agentic_investor.tools.paper_broker import get_broker
     from agentic_investor.tools.paper_store import record_snapshot
@@ -885,6 +958,7 @@ def _paper_loop(
     max_avg_drift_pct: float,
     opinion_drift_threshold_pct: float,
     big_rebalance_cooldown_seconds: int,
+    max_positions: int | None,
 ) -> None:
     import logging
 
@@ -939,6 +1013,7 @@ def _paper_loop(
         max_avg_drift_pct=max_avg_drift_pct,
         opinion_drift_threshold_pct=opinion_drift_threshold_pct,
         big_rebalance_cooldown_seconds=big_rebalance_cooldown_seconds,
+        max_positions_override=max_positions,
     )
     broker = get_broker()
     try:
@@ -1168,6 +1243,8 @@ def main() -> None:
                          "(defaults to --start if omitted, eliminating look-ahead)")
 
     # Paper trading (M7)
+    sub.add_parser("healthcheck",
+                   help="verify Alpaca/LLM/yfinance/finBERT/Chroma reachable")
     sub.add_parser("paper-status",
                    help="show Alpaca paper account balance + open positions")
 
@@ -1275,6 +1352,10 @@ def main() -> None:
     pl.add_argument("--opinion-drift-threshold-pct", type=float, default=3.0,
                     help="opinion-drift filter: min per-position drift to "
                          "consider a regen substantive (default 3pp)")
+    pl.add_argument("--max-positions", type=int, default=None,
+                    help="override profile max_positions cap (moderate "
+                         "default 12); repair pass drops smallest names "
+                         "past this")
 
     pa = sub.add_parser("paper-attribution",
                         help="rolling analysis across all sessions: filter "
@@ -1363,6 +1444,9 @@ def main() -> None:
             args.start, args.end, args.benchmark, args.out, args.no_baseline,
             args.auto, args.universe, args.top_n, args.exclude, args.as_of,
         )
+    elif args.cmd == "healthcheck":
+        import sys as _sys
+        _sys.exit(_healthcheck())
     elif args.cmd == "paper-status":
         _paper_status()
     elif args.cmd == "paper-orders":
@@ -1415,6 +1499,7 @@ def main() -> None:
             args.max_single_delta_pct, args.max_avg_drift_pct,
             args.opinion_drift_threshold_pct,
             args.big_rebalance_cooldown_seconds,
+            args.max_positions,
         )
     else:
         _print_config()

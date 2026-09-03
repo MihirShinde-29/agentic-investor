@@ -89,6 +89,10 @@ class LoopConfig:
     # with margin to catch the immediate counter-reaction too.
     big_rebalance_min_trades: int = 5
     big_rebalance_cooldown_seconds: int = 1800
+    # CLI override for profile.max_positions. None = use profile default (12
+    # for moderate). Exposed as --max-positions so we can A/B without editing
+    # a TOML.
+    max_positions_override: int | None = None
     # Even a "concentration reshape" (n_new <= n_dropped) gets blocked
     # during cooldown if the total notional of the plan exceeds this
     # share of NAV. Catches the CRWD-style $2.5k re-open on a book that
@@ -441,6 +445,8 @@ def _generate_recommendation(
     from agentic_investor.orchestrator.strategy import load_profile
 
     profile = load_profile(cfg.profile_name)
+    if cfg.max_positions_override is not None:
+        profile = profile.model_copy(update={"max_positions": cfg.max_positions_override})
     tickers = list(cfg.tickers)
     if pre_picked_tickers is not None:
         tickers = list(pre_picked_tickers)
@@ -605,6 +611,9 @@ def run_tick(
                     "rec_id": state.last_rec_id,
                     "batch_fingerprint": batch_fp,
                 })
+                session.log("knob_fired", {
+                    "name": "pre_check", "reason": "batch-unchanged",
+                })
             from agentic_investor.orchestrator.store import (
                 load_recommendation as _load_prev,
             )
@@ -710,6 +719,9 @@ def run_tick(
                         "max_avg_drift_pp": cfg.max_avg_drift_pct,
                         "max_single_delta_pp": cfg.max_single_delta_pct,
                         "deltas": {t: round(d, 2) for t, d in deltas.items()},
+                    })
+                    session.log("knob_fired", {
+                        "name": "opinion_drift", "reason": skip_reason,
                     })
                 # Stable opinion doesn't mean the book matches the target -
                 # earlier orders may have failed or been cooldown-blocked.
@@ -922,6 +934,9 @@ def run_tick(
                         "notional_pct": round(notional_pct, 2),
                         "seconds_since_last": secs,
                     })
+                    session.log("knob_fired", {
+                        "name": "big_rebalance_cooldown", "reason": "bypass",
+                    })
             else:
                 logger.info(
                     "tick %s: big-rebalance cooldown blocking %d trades "
@@ -940,6 +955,9 @@ def run_tick(
                         "n_new_positions": n_new,
                         "n_dropped_positions": n_dropped,
                         "notional_pct": round(notional_pct, 2),
+                    })
+                    session.log("knob_fired", {
+                        "name": "big_rebalance_cooldown", "reason": "block",
                     })
                 _log_tick_cost()
                 return TickResult(
@@ -1254,6 +1272,10 @@ def run_event_loop(
                                                 "delta": delta,
                                                 "threshold": cfg.finbert_min_delta,
                                                 "n_headlines": sent.n_headlines,
+                                            })
+                                            session.log("knob_fired", {
+                                                "name": "finbert_prefilter",
+                                                "reason": "sentiment-flat",
                                             })
                                         # Consume the batch (already drained
                                         # via build_batch), skip firing.
