@@ -43,23 +43,63 @@ class CorrelatedPair:
 def _fetch_daily_closes(
     tickers: list[str], window_days: int
 ) -> pd.DataFrame | None:
-    """Fetch daily closes over the last N days. Returns None on total failure."""
+    """Fetch daily closes over the last N days. Returns None on total failure.
+
+    Reads from the paper_store daily_bars cache first; only hits the provider
+    when the cache doesn't already cover the requested window with enough
+    rows. Past-day rows are immutable so caching them saves hundreds of
+    provider calls per session (correlation recomputes on every regen).
+    """
     if not tickers:
         return None
     try:
         from agentic_investor.tools.market import fetch_ohlcv
+        from agentic_investor.tools.paper_store import (
+            load_cached_daily_closes,
+            save_daily_closes,
+        )
     except ImportError:
         return None
 
     # Pull a bit more than window_days worth of trading days.
     period = f"{max(window_days + 10, 30)}d"
+    today = pd.Timestamp.now(tz="UTC").normalize()
+    # Cache lookup window: reach back enough calendar days to cover ~window_days
+    # trading days plus a buffer for weekends/holidays.
+    lookup_start = (today - pd.Timedelta(days=window_days + 20)).strftime("%Y-%m-%d")
+    lookup_end = today.strftime("%Y-%m-%d")
+    # A ticker's cache is considered "warm" when it has at least this many rows
+    # in the range. Correlation on 55-of-60 days is indistinguishable from the
+    # true 60-day correlation for our threshold-crossing use case.
+    min_cached_rows = max(window_days - 5, 20)
+
     frames: dict[str, pd.Series] = {}
     for t in tickers:
+        tkr = t.upper()
+        cached: dict[str, float] = {}
+        try:
+            cached = load_cached_daily_closes(tkr, lookup_start, lookup_end)
+        except Exception as e:  # noqa: BLE001 - cache miss shouldn't sink the run
+            logger.debug("correlation: cache read failed for %s: %s", tkr, e)
+        if len(cached) >= min_cached_rows:
+            frames[tkr] = pd.Series(
+                {pd.Timestamp(d): v for d, v in cached.items()},
+                dtype=float,
+            ).sort_index()
+            continue
         try:
             df = fetch_ohlcv(t, period=period, interval="1d")
             if df is None or df.empty:
                 continue
-            frames[t.upper()] = df["Close"].astype(float)
+            closes = df["Close"].astype(float)
+            frames[tkr] = closes
+            try:
+                save_daily_closes(
+                    tkr,
+                    {ts.strftime("%Y-%m-%d"): float(v) for ts, v in closes.items()},
+                )
+            except Exception as e:  # noqa: BLE001 - cache write shouldn't sink the run
+                logger.debug("correlation: cache write failed for %s: %s", tkr, e)
         except Exception as e:  # noqa: BLE001 - one bad ticker mustn't sink the run
             logger.debug("correlation: fetch failed for %s: %s", t, e)
             continue

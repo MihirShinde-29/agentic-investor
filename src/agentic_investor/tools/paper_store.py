@@ -74,6 +74,20 @@ def _connect(url: str) -> sqlite3.Connection:
         )
         """
     )
+    # Daily bar cache: past-day rows are immutable, so we keep them forever
+    # and only refetch today's row (still moving) + any gaps. Correlation
+    # compute pulls the same 60d history per ticker on every regen without
+    # this table.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_bars (
+            ticker TEXT NOT NULL,
+            date TEXT NOT NULL,
+            close REAL NOT NULL,
+            PRIMARY KEY (ticker, date)
+        )
+        """
+    )
     # Attribution log: every filter skip records the would-be allocation so
     # we can later simulate the counterfactual and measure false-positive rate.
     conn.execute(
@@ -391,3 +405,45 @@ def list_snapshots(*, limit: int = 100, url: str | None = None) -> list[dict]:
         d["positions"] = json.loads(d.pop("positions_json"))
         out.append(d)
     return out
+
+
+def load_cached_daily_closes(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    *,
+    url: str | None = None,
+) -> dict[str, float]:
+    """Return {YYYY-MM-DD: close} for a ticker over an inclusive date range.
+
+    Empty dict if nothing cached. Caller is responsible for filling gaps
+    from the provider and calling save_daily_closes to persist new bars.
+    """
+    with _connect(_resolve_url(url)) as conn:
+        rows = conn.execute(
+            "SELECT date, close FROM daily_bars "
+            "WHERE ticker = ? AND date >= ? AND date <= ? "
+            "ORDER BY date",
+            (ticker.upper(), start_date, end_date),
+        ).fetchall()
+    return {r[0]: float(r[1]) for r in rows}
+
+
+def save_daily_closes(
+    ticker: str,
+    closes: dict[str, float],
+    *,
+    url: str | None = None,
+) -> int:
+    """Upsert (ticker, date, close) rows. Returns row count written."""
+    if not closes:
+        return 0
+    rows = [(ticker.upper(), d, float(c)) for d, c in closes.items()]
+    with _connect(_resolve_url(url)) as conn:
+        conn.executemany(
+            "INSERT INTO daily_bars (ticker, date, close) VALUES (?, ?, ?) "
+            "ON CONFLICT(ticker, date) DO UPDATE SET close = excluded.close",
+            rows,
+        )
+        conn.commit()
+    return len(rows)
