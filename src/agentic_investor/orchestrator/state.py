@@ -36,7 +36,7 @@ class OrchestratorRequest(BaseModel):
 
 class Position(BaseModel):
     ticker: str
-    weight_pct: float = Field(ge=0.0, le=100.0)
+    weight_pct: float = Field(gt=0.0, le=100.0)
     dollars: float = Field(ge=0.0)
     rationale: str
     # LLM conviction for this weight; drives confidence-adaptive rebalance
@@ -64,15 +64,27 @@ class Allocation(BaseModel):
         def _field(p, name):
             return p.get(name) if isinstance(p, dict) else getattr(p, name, None)
 
-        cash_labels = {"cash", "$", "usd"}
+        # LLM variants observed: bare "cash", "$", "usd", plus the mistake
+        # where it names the Position after the sibling field "cash_pct" or
+        # "cash_dollars" and stuffs the cash allocation there.
+        cash_labels = {"cash", "$", "usd", "cash_pct", "cash_dollars"}
         real_positions = []
         pseudo_cash_pct = 0.0
         pseudo_cash_dollars = 0.0
+        dropped_phantom = False
         for p in positions:
             ticker = (_field(p, "ticker") or "").strip().lower()
+            weight = float(_field(p, "weight_pct") or 0.0)
             if ticker in cash_labels or ticker == "":
-                pseudo_cash_pct += float(_field(p, "weight_pct") or 0.0)
+                pseudo_cash_pct += weight
                 pseudo_cash_dollars += float(_field(p, "dollars") or 0.0)
+                continue
+            # Position.weight_pct is Field(gt=0). LLMs still emit 0pp
+            # "phantom" positions (acknowledgement without conviction). Drop
+            # them here so Instructor doesn't ValidationError on the whole
+            # rec and lose the regen entirely - real allocations survive.
+            if weight <= 0.0:
+                dropped_phantom = True
                 continue
             real_positions.append(p)
         if pseudo_cash_pct or pseudo_cash_dollars:
@@ -95,6 +107,8 @@ class Allocation(BaseModel):
                 "cash_pct": merged_cash_pct,
                 "cash_dollars": merged_cash_dollars,
             }
+        elif dropped_phantom:
+            data = {**data, "positions": real_positions}
         return data
 
     @model_validator(mode="after")

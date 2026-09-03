@@ -38,11 +38,16 @@ def compute_trade_plan(
     *,
     prices: dict[str, float],  # ticker -> latest price for qty sizing
     min_trade_dollars: float = 25.0,
+    min_open_dollars: float | None = None,
+    min_add_dollars: float | None = None,
+    min_trim_dollars: float | None = None,
     recent_trades: dict[str, tuple[str, datetime]] | None = None,
     cooldown_seconds: int = 900,
     now: datetime | None = None,
     news_batch_tickers: set[str] | None = None,
     news_bypass_cooldown: bool = True,
+    news_source_counts: dict[str, int] | None = None,
+    min_bypass_sources: int = 1,
     ticker_recent_moves: dict[str, float] | None = None,
     adverse_move_threshold_pct: float = 1.0,
     avg_entry_prices: dict[str, float] | None = None,
@@ -72,8 +77,18 @@ def compute_trade_plan(
     now = now or datetime.now(UTC)
     recent_trades = recent_trades or {}
     news_batch_tickers = news_batch_tickers or set()
+    # Explicit None marker so callers not passing source counts get the legacy
+    # "any in-news ticker bypasses" behavior. If the dict is supplied (even
+    # empty), the stricter multi-source path activates.
+    source_counts_supplied = news_source_counts is not None
+    news_source_counts = news_source_counts or {}
     ticker_recent_moves = ticker_recent_moves or {}
     avg_entry_prices = avg_entry_prices or {}
+    # Category-specific floors default to the legacy single knob so callers
+    # not passing them get the old behavior exactly.
+    open_floor = min_open_dollars if min_open_dollars is not None else min_trade_dollars
+    add_floor = min_add_dollars if min_add_dollars is not None else min_trade_dollars
+    trim_floor = min_trim_dollars if min_trim_dollars is not None else min_trade_dollars
     target_dollars = {
         p.ticker: total_equity * (p.weight_pct / 100.0) for p in rec.allocation.positions
     }
@@ -83,7 +98,18 @@ def compute_trade_plan(
         cur_d = float(current_positions.get(t, 0.0))
         tgt_d = float(target_dollars.get(t, 0.0))
         delta = tgt_d - cur_d
-        if abs(delta) < min_trade_dollars:
+        # Full close (target 0 on a held name) always passes the floor - we
+        # don't want to strand a partial position because the last chunk is
+        # under the trim floor.
+        if tgt_d <= 0 and cur_d > 0:
+            floor = 0.0
+        elif cur_d <= 0 and delta > 0:
+            floor = open_floor
+        elif delta > 0:
+            floor = add_floor
+        else:
+            floor = trim_floor
+        if abs(delta) < floor:
             continue
         price = prices.get(t)
         if not price or price <= 0:
@@ -103,7 +129,18 @@ def compute_trade_plan(
             recent_side, recent_ts = recent
             age = (now - recent_ts).total_seconds()
             in_news = t.upper() in news_batch_tickers
-            bypassed = news_bypass_cooldown and in_news
+            # When source counts are supplied, gate the bypass on distinct-URL
+            # convergence: single-note re-flips stay blocked, multi-broker
+            # stories on the same name get through. Without source counts,
+            # fall back to the older any-in-news bypass.
+            if source_counts_supplied:
+                source_count = news_source_counts.get(t.upper(), 0)
+                bypassed = (
+                    news_bypass_cooldown
+                    and source_count >= min_bypass_sources
+                )
+            else:
+                bypassed = news_bypass_cooldown and in_news
             if recent_side != side and age < cooldown_seconds and not bypassed:
                 continue
 
@@ -172,9 +209,13 @@ def compute_trade_plan(
     return plans
 
 
-def _client_order_id(rec_id: int, ticker: str, side: str, day: str) -> str:
-    # Stable per (rec_id, ticker, side, day) so retries within a day are no-ops.
-    key = f"rec{rec_id}:{ticker}:{side}:{day}".encode()
+def _client_order_id(rec_id: int, ticker: str, side: str, day: str, qty: float) -> str:
+    # Stable per (rec_id, ticker, side, day, qty). Including qty lets the
+    # mechanical fall-through drift-vs-book fire multiple times against the
+    # same rec baseline without colliding on client_order_id at Alpaca (which
+    # 409-rejects duplicates and drops the walk-back). True same-batch retries
+    # at the same qty still collapse to a single idempotent order.
+    key = f"rec{rec_id}:{ticker}:{side}:{day}:qty{qty:.4f}".encode()
     return "ai-" + hashlib.sha1(key).hexdigest()[:20]
 
 
@@ -205,7 +246,7 @@ def execute_trade_plan(
                     continue
                 except Exception:  # noqa: BLE001 - fall back to computed-qty sell
                     pass
-            coid = _client_order_id(rec_id, p.ticker, p.side, day)
+            coid = _client_order_id(rec_id, p.ticker, p.side, day, p.qty)
             order = broker.submit_market_order(
                 p.ticker,
                 p.side,

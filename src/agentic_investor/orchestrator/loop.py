@@ -56,6 +56,12 @@ class LoopConfig:
     # 25%-target position stays at the full 5pp abs band. 0 disables.
     band_rel_pct: float = 20.0
     min_trade_dollars: float = 50.0
+    # Category-specific floors override min_trade_dollars when set. Splitting
+    # by trade type stops the LLM from ladder-adding a name in five sub-floor
+    # chunks that each pass a single loose threshold. Closes always execute.
+    min_open_dollars: float = 200.0
+    min_add_dollars: float = 500.0
+    min_trim_dollars: float = 200.0
 
     # Triggers
     price_move_threshold_pct: float = 2.0
@@ -100,7 +106,13 @@ class LoopConfig:
     big_rebalance_max_bypass_notional_pct: float = 15.0
 
     # Discipline layer (vetoes at the rebalancer boundary)
-    cooldown_seconds: int = 900              # 0q temporal cooldown
+    cooldown_seconds: int = 1500             # 25min per-ticker flip lockout
+    # News-convergence bypass: waive the per-ticker cooldown only when at
+    # least N distinct news URLs on the same ticker landed in the window
+    # below. Blocks single-note re-flips; lets convergent multi-broker
+    # stories through.
+    news_convergence_min_sources: int = 2
+    news_convergence_window_sec: int = 900   # 15min rolling window
     adverse_move_threshold_pct: float = 1.0  # 0r don't buy falling knives
     halt_buys_drawdown_pct: float = 5.0      # 0r don't average down on losers
     small_drawdown_hold_pct: float = 3.0     # 0g don't sell into bounces
@@ -161,6 +173,10 @@ class LoopState:
     # instead of firing the LLM again - same input, same output, save the
     # ~$0.008 per skip.
     last_batch_fingerprint: str | None = None
+    # {ticker: [(url, iso_ts), ...]} - distinct news URLs seen per ticker in
+    # the recent past. Used to grant per-ticker cooldown bypass only when
+    # >= N distinct sources converge on the same name (see #94).
+    news_source_urls: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Serialize for SQLite persistence."""
@@ -184,6 +200,9 @@ class LoopState:
                 if self.last_big_rebalance_at else None
             ),
             "last_batch_fingerprint": self.last_batch_fingerprint,
+            "news_source_urls": {
+                k: [list(t) for t in v] for k, v in self.news_source_urls.items()
+            },
         }
 
     @classmethod
@@ -215,6 +234,10 @@ class LoopState:
                 if isinstance(d.get("last_big_rebalance_at"), str) else None
             ),
             last_batch_fingerprint=d.get("last_batch_fingerprint"),
+            news_source_urls={
+                k: [(t[0], t[1]) for t in v]
+                for k, v in (d.get("news_source_urls") or {}).items()
+            },
         )
 
 
@@ -540,6 +563,12 @@ def run_tick(
     # Two-tier: regenerate the recommendation once per day OR when the event
     # loop pushed news batch context onto state; reuse otherwise.
     regenerated = False
+    # Set True when we're using a prior rec because opinion_drift said
+    # "barely-moved". In that mode the LLM offered no fresh conviction, so
+    # only walk-back (REDUCE-direction) trades execute - blocks silent-drift
+    # ADD trades from sneaking through when the LLM's target drifts upward
+    # imperceptibly across several skipped regens.
+    fall_through_reduce_only = False
     batch_ctx = state.pending_news_context
     if (
         state.last_rec_date != today
@@ -731,6 +760,7 @@ def run_tick(
                 if skip_reason == "barely-moved" and prev_rec is not None:
                     rec = prev_rec
                     regenerated = False
+                    fall_through_reduce_only = True
                 else:
                     _log_tick_cost()
                     return TickResult(
@@ -860,6 +890,31 @@ def run_tick(
         _extract_tickers_from_batch_ctx(batch_ctx)
     ) if batch_ctx else set()
 
+    # Distinct-source count per ticker over the convergence window. Prune
+    # stale entries in place so state doesn't grow unbounded.
+    conv_window = int(getattr(cfg, "news_convergence_window_sec", 900))
+    cutoff = now - timedelta(seconds=conv_window)
+    news_source_counts: dict[str, int] = {}
+    empty_keys: list[str] = []
+    for ticker_up, entries in state.news_source_urls.items():
+        kept: list[tuple[str, str]] = []
+        for url_key, ts_iso in entries:
+            try:
+                ts_dt = datetime.fromisoformat(ts_iso)
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=UTC)
+            except Exception:  # noqa: BLE001
+                continue
+            if ts_dt >= cutoff:
+                kept.append((url_key, ts_iso))
+        if kept:
+            state.news_source_urls[ticker_up] = kept
+            news_source_counts[ticker_up] = len(kept)
+        else:
+            empty_keys.append(ticker_up)
+    for k in empty_keys:
+        state.news_source_urls.pop(k, None)
+
     # Discipline layer inputs: recent price moves + avg entry prices per ticker.
     ticker_recent_moves: dict[str, float] = {}
     avg_entry_prices: dict[str, float] = {p.ticker.upper(): float(p.avg_entry_price)
@@ -876,10 +931,15 @@ def run_tick(
     plans = compute_trade_plan(
         rec, positions_dollars, allocation_base,
         prices=prices, min_trade_dollars=cfg.min_trade_dollars,
+        min_open_dollars=cfg.min_open_dollars,
+        min_add_dollars=cfg.min_add_dollars,
+        min_trim_dollars=cfg.min_trim_dollars,
         recent_trades=recent_typed,
         cooldown_seconds=getattr(cfg, "cooldown_seconds", 900),
         now=now,
         news_batch_tickers=batch_tickers_for_cooldown,
+        news_source_counts=news_source_counts,
+        min_bypass_sources=int(getattr(cfg, "news_convergence_min_sources", 1)),
         ticker_recent_moves=ticker_recent_moves,
         adverse_move_threshold_pct=cfg.adverse_move_threshold_pct,
         avg_entry_prices=avg_entry_prices,
@@ -887,6 +947,23 @@ def run_tick(
         small_drawdown_hold_pct=cfg.small_drawdown_hold_pct,
         force_loss_cut_pct=cfg.force_loss_cut_pct,
     )
+
+    # On barely-moved fall-through the LLM offered no fresh conviction, so
+    # ADDs would be silent-drift executions of accumulated small target
+    # bumps across skipped regens. Keep only trims/closes.
+    if fall_through_reduce_only and plans:
+        n_before = len(plans)
+        plans = [p for p in plans if p.side == "sell"]
+        n_dropped = n_before - len(plans)
+        if n_dropped and session:
+            session.log("fall_through_add_blocked", {
+                "rec_id": state.last_rec_id,
+                "n_dropped": n_dropped,
+                "n_kept": len(plans),
+            })
+            session.log("knob_fired", {
+                "name": "fall_through", "reason": "reduce_only",
+            })
 
     if cfg.dry_run or not plans:
         _log_tick_cost()
@@ -1144,6 +1221,19 @@ def run_event_loop(
                         "ticker": e.ticker,
                         "headline": e.headline[:120],
                     })
+            # Track distinct news URLs per ticker for the convergence bypass.
+            # Same URL fanned out across many tickers still counts as one
+            # signal per ticker.
+            if new_events:
+                ts_iso = now.isoformat()
+                for e in new_events:
+                    key = (e.ticker or "").upper()
+                    if not key:
+                        continue
+                    url_key = e.url or e.headline[:80]
+                    entries = state.news_source_urls.setdefault(key, [])
+                    if not any(u == url_key for u, _ in entries):
+                        entries.append((url_key, ts_iso))
             ingest(decision_state, new_events, now)
 
             fire, reason = should_fire(decision_state, now)

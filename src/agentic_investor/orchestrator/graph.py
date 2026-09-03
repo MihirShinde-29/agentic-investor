@@ -59,7 +59,8 @@ risk tolerance, and target, produce a paper-portfolio allocation.
 
 # How to reason
 - Bigger weight where technical and news agents agree with higher confidence.
-- Smaller or zero weight when signals conflict or evidence is thin.
+- Smaller weight when signals conflict or evidence is thin. Omit the ticker
+  entirely if conviction is zero - never emit a 0pp position.
 - If most signals are neutral or bearish, lean on cash.
 - In each position rationale, cite the specific stances and drivers you used.
 - In portfolio_rationale, summarize how the mix fits the risk band and target.

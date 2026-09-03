@@ -86,6 +86,108 @@ def test_position_no_longer_in_target_gets_fully_sold():
     assert tsla.dollars == 3000
 
 
+def test_add_floor_blocks_ladder_add_that_passes_legacy_floor():
+    # Currently hold AAPL at $3900, target $4000. Delta = $100 (an ADD to an
+    # existing position). Legacy threshold $50 would let it through, but the
+    # add-floor at $500 blocks the nano-add. NVDA is at target (no trade).
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 3900, "NVDA": 4000},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=50.0,
+        min_add_dollars=500.0,
+    )
+    assert not any(p.ticker == "AAPL" for p in plans)
+
+
+def test_open_floor_gates_first_entry_separately_from_add():
+    # NVDA target $4000, currently 0. Delta = $4000 (an OPEN). Set the open
+    # floor low to allow it but the add floor high to prove they're independent.
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 4000},  # AAPL already at target
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_open_dollars=100.0,
+        min_add_dollars=10_000.0,
+    )
+    tickers = {p.ticker for p in plans}
+    assert "NVDA" in tickers
+    assert "AAPL" not in tickers
+
+
+def test_close_always_passes_regardless_of_trim_floor():
+    # TSLA is held but not in the target rec, and the current value ($150) is
+    # under the trim floor ($500). It should still be fully sold - we never
+    # want to strand a partial position because the last chunk is small.
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 4000, "NVDA": 4000, "TSLA": 150},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200, "TSLA": 250},
+        min_trim_dollars=500.0,
+    )
+    tsla = next(p for p in plans if p.ticker == "TSLA")
+    assert tsla.side == "sell"
+    assert tsla.dollars == 150
+
+
+def test_trim_floor_blocks_nano_trim_but_allows_bigger_reduction():
+    # AAPL at $4700, target $4000 -> $700 trim (well above floor). NVDA at
+    # $4050, target $4000 -> $50 trim (under $200 floor -> skipped).
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 4700, "NVDA": 4050},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trim_dollars=200.0,
+    )
+    tickers = {p.ticker: p for p in plans}
+    assert "AAPL" in tickers and tickers["AAPL"].side == "sell"
+    assert "NVDA" not in tickers
+
+
+def test_multi_source_bypass_requires_min_sources():
+    # AAPL held at $8000, target $4000 (a REDUCE-side trade, direction is
+    # sell). Cooldown says we just BOUGHT AAPL 60s ago - opposite side, so
+    # cooldown blocks the sell... unless enough news sources converged. One
+    # source alone (min=2) doesn't cut it.
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    recent = {"AAPL": ("buy", now - timedelta(seconds=60))}
+    plans = compute_trade_plan(
+        _rec(), current_positions={"AAPL": 8000}, total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200}, min_trade_dollars=1.0,
+        recent_trades=recent, cooldown_seconds=900,
+        news_batch_tickers={"AAPL"},
+        news_source_counts={"AAPL": 1},
+        min_bypass_sources=2,
+        now=now,
+    )
+    assert not any(p.ticker == "AAPL" for p in plans)
+
+
+def test_multi_source_bypass_fires_at_threshold():
+    # Same setup, but now 2 distinct URLs on AAPL - meets convergence threshold.
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    recent = {"AAPL": ("buy", now - timedelta(seconds=60))}
+    plans = compute_trade_plan(
+        _rec(), current_positions={"AAPL": 8000}, total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200}, min_trade_dollars=1.0,
+        recent_trades=recent, cooldown_seconds=900,
+        news_batch_tickers={"AAPL"},
+        news_source_counts={"AAPL": 2},
+        min_bypass_sources=2,
+        now=now,
+    )
+    aapl = next(p for p in plans if p.ticker == "AAPL")
+    assert aapl.side == "sell"
+
+
 def test_missing_price_skips_ticker_gracefully():
     plans = compute_trade_plan(
         _rec(), current_positions={}, total_equity=10_000,
@@ -96,11 +198,21 @@ def test_missing_price_skips_ticker_gracefully():
 
 
 def test_client_order_id_is_stable_across_same_day_retries():
-    a = _client_order_id(1, "AAPL", "buy", "2026-08-27")
-    b = _client_order_id(1, "AAPL", "buy", "2026-08-27")
+    a = _client_order_id(1, "AAPL", "buy", "2026-08-27", 5.0)
+    b = _client_order_id(1, "AAPL", "buy", "2026-08-27", 5.0)
     assert a == b
-    c = _client_order_id(1, "AAPL", "buy", "2026-08-28")
+    c = _client_order_id(1, "AAPL", "buy", "2026-08-28", 5.0)
     assert a != c
+
+
+def test_client_order_id_differs_when_fall_through_qty_differs():
+    # Same rec, ticker, side, day but a different qty must produce a distinct
+    # id, or Alpaca 409-rejects the second submission as a duplicate and the
+    # walk-back silently disappears. This bit us when the mechanical
+    # fall-through fired a second time against the same rec baseline.
+    a = _client_order_id(1, "SNOW", "buy", "2026-09-03", 4.02)
+    b = _client_order_id(1, "SNOW", "buy", "2026-09-03", 0.2243)
+    assert a != b
 
 
 class _FakeBroker:

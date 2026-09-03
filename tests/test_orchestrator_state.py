@@ -55,6 +55,35 @@ def test_position_rejects_confidence_outside_range():
         Position(ticker="AAPL", weight_pct=40, dollars=4000, rationale="x", confidence=1.5)
 
 
+def test_position_rejects_zero_weight_phantom():
+    # LLMs like to list tickers at weight_pct=0.0 as acknowledgement without
+    # conviction. Reject at the field level so the fold-and-drop in the
+    # Allocation validator has to run.
+    with pytest.raises(ValidationError):
+        Position(ticker="MSFT", weight_pct=0.0, dollars=0.0, rationale="x")
+
+
+def test_allocation_silently_drops_zero_weight_phantoms():
+    # Belt-and-suspenders to the Position-level rejection above: on an
+    # Allocation, silently drop 0pp phantoms in the pre-validator so
+    # Instructor sees a valid rec and doesn't lose the whole regen on the
+    # LLM's phantom-listing habit. Real allocations survive.
+    a = Allocation.model_validate({
+        "positions": [
+            {"ticker": "MSFT", "weight_pct": 60, "dollars": 6000, "rationale": "x"},
+            {"ticker": "AAPL", "weight_pct": 30, "dollars": 3000, "rationale": "x"},
+            {"ticker": "TSLA", "weight_pct": 0,  "dollars": 0,    "rationale": "x"},
+            {"ticker": "NVDA", "weight_pct": 0,  "dollars": 0,    "rationale": "x"},
+        ],
+        "cash_pct": 10,
+        "cash_dollars": 1000,
+        "portfolio_rationale": "x",
+    })
+    tickers = [p.ticker for p in a.positions]
+    assert tickers == ["MSFT", "AAPL"]
+    assert a.cash_pct == 10
+
+
 def test_allocation_accepts_weights_summing_to_100():
     a = Allocation(
         positions=[_pos("AAPL", 40), _pos("NVDA", 40)],
@@ -94,6 +123,24 @@ def test_allocation_folds_cash_pseudo_position_deduping_with_cash_pct():
     assert [p.ticker for p in a.positions] == ["MSFT", "AAPL", "MRK", "WMT"]
     total = sum(p.weight_pct for p in a.positions) + a.cash_pct
     assert 99.5 <= total <= 100.5
+
+
+def test_allocation_folds_cash_pct_named_pseudo_position():
+    # LLMs occasionally emit a Position with ticker set to the sibling field
+    # name (cash_pct or cash_dollars) instead of "cash", stuffing the cash
+    # allocation there. Downstream price fetches then hit yfinance/Alpaca
+    # with a bogus symbol every regen. Fold it.
+    a = Allocation.model_validate({
+        "positions": [
+            {"ticker": "MSFT",     "weight_pct": 70, "dollars": 7000, "rationale": "x"},
+            {"ticker": "cash_pct", "weight_pct": 30, "dollars": 3000, "rationale": "x"},
+        ],
+        "cash_pct": 0,
+        "cash_dollars": 0,
+        "portfolio_rationale": "x",
+    })
+    assert [p.ticker for p in a.positions] == ["MSFT"]
+    assert a.cash_pct == 30
 
 
 def test_allocation_folds_cash_pseudo_position_summing_when_no_cash_pct():

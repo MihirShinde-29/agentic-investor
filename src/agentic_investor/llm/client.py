@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 import instructor
 import litellm
 from dotenv import load_dotenv
+from instructor.core import InstructorRetryException
+from pydantic import BaseModel, ValidationError
 
 # LiteLLM logs every completion call at INFO twice ("LiteLLM completion()..."
 # once from litellm.utils, once from Wrapper: Completed Call). Fills the Fly
@@ -23,8 +25,7 @@ from dotenv import load_dotenv
 if os.getenv("LITELLM_LOG") is None:
     for _name in ("LiteLLM", "LiteLLM Proxy", "litellm"):
         logging.getLogger(_name).setLevel(logging.WARNING)
-from pydantic import BaseModel
-from tenacity import (
+from tenacity import (  # noqa: E402
     retry,
     retry_if_exception,
     stop_after_attempt,
@@ -260,11 +261,71 @@ def structured_complete[T: BaseModel](
     response can't freeze the whole loop while tenacity waits for it.
     """
     s = get_settings()
-    return _client.chat.completions.create(
-        model=model or s.llm_model,
-        messages=messages,
-        response_model=response_model,
-        temperature=s.llm_temperature if temperature is None else temperature,
-        max_retries=max_retries,
-        timeout=timeout,
+    try:
+        return _client.chat.completions.create(
+            model=model or s.llm_model,
+            messages=messages,
+            response_model=response_model,
+            temperature=s.llm_temperature if temperature is None else temperature,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
+    except InstructorRetryException as exc:
+        _log_instructor_failure(exc, response_model, messages)
+        raise
+
+
+def _log_instructor_failure(
+    exc: InstructorRetryException,
+    response_model: type[BaseModel],
+    messages: list[dict],
+) -> None:
+    """Dump every failed attempt with field-level validation errors and the
+    LLM's raw output so we can see WHICH field the model keeps mangling.
+    Instructor's default message truncates at "1 validation error for X",
+    which is useless for diagnosis.
+    """
+    log = logging.getLogger(__name__)
+    total_msg_chars = sum(len(str(m.get("content", ""))) for m in messages)
+    log.error(
+        "instructor_failed: model=%s attempts=%d messages=%d prompt_chars=%d",
+        response_model.__name__,
+        len(exc.failed_attempts or []),
+        len(messages),
+        total_msg_chars,
     )
+    for att in exc.failed_attempts or []:
+        cause = att.exception
+        if isinstance(cause, ValidationError):
+            for err in cause.errors():
+                loc = ".".join(str(p) for p in err.get("loc", ()))
+                log.error(
+                    "  attempt=%d field=%s type=%s msg=%s input=%r",
+                    att.attempt_number,
+                    loc,
+                    err.get("type", "?"),
+                    err.get("msg", "?"),
+                    _truncate(err.get("input"), 200),
+                )
+        else:
+            log.error(
+                "  attempt=%d non_validation_error=%s: %s",
+                att.attempt_number,
+                type(cause).__name__,
+                _truncate(str(cause), 500),
+            )
+        try:
+            content = att.completion.choices[0].message.content
+        except (AttributeError, IndexError, TypeError):
+            content = None
+        if content:
+            log.error(
+                "  attempt=%d raw_completion=%s",
+                att.attempt_number,
+                _truncate(content, 800),
+            )
+
+
+def _truncate(v, n: int) -> str:
+    s = repr(v) if not isinstance(v, str) else v
+    return s if len(s) <= n else s[:n] + f"...<+{len(s) - n} chars>"
