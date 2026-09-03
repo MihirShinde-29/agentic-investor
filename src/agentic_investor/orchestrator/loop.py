@@ -345,6 +345,31 @@ def _material_ticker_set(state, broker) -> set[str]:
     return material
 
 
+_HIGH_SIGNAL_TOKENS = (
+    "price target",       # "Raises Price Target", "Lowers Price Target", etc.
+    "upgrades",           # explicit rating upgrade
+    "downgrades",         # explicit rating downgrade
+    "initiates coverage", # new analyst coverage
+    "reinstates",         # reinstated coverage
+)
+
+
+def _is_high_signal_headline(headline: str) -> bool:
+    """Return True when a headline looks like an analyst rating action.
+
+    Materiality filter drops non-book news to avoid burning LLM budget on
+    tickers we don't track. But a fresh upgrade on a ticker we don't yet
+    hold IS actionable - it should reach the LLM so the picker's next
+    universe pass can consider it, and so the current LLM run can flag
+    the ticker in its rationale. Keyword-based classification is coarse
+    but catches the analyst-note pattern that drove SNOW today.
+    """
+    if not headline:
+        return False
+    h = headline.lower()
+    return any(t in h for t in _HIGH_SIGNAL_TOKENS)
+
+
 def _snapshot_pairs(matrix) -> dict[str, float]:
     """Flatten a correlation DataFrame into {'A|B': corr} with A<B sorted."""
     out: dict[str, float] = {}
@@ -1358,7 +1383,9 @@ def run_event_loop(
             # Materiality gate: drop news-batch fires whose tickers don't
             # intersect with the tickers we care about (held + on-deck +
             # recent exits). Non-material news mostly produced barely-moved
-            # skips - burn LLM budget, learn nothing.
+            # skips - burn LLM budget, learn nothing. A high-signal analyst
+            # action on a non-material ticker bypasses the drop so we don't
+            # miss actionable upgrades on names outside the current universe.
             if fire and cfg.materiality_filter_enabled and decision_state.unprocessed:
                 material = _material_ticker_set(state, broker)
                 batch_tickers = {
@@ -1366,20 +1393,35 @@ def run_event_loop(
                 }
                 overlap = batch_tickers & material
                 if not overlap:
-                    if session:
-                        session.log("materiality_skip", {
-                            "batch_tickers": sorted(batch_tickers),
-                            "material_count": len(material),
-                        })
-                        session.log("knob_fired", {
-                            "name": "materiality", "reason": "non-material",
-                        })
-                    # Clear the batch so it doesn't accumulate and eventually
-                    # fire on its own without any material follow-up.
-                    decision_state.unprocessed = []
-                    decision_state.last_fire_at = now
-                    fire = False
-                    reason = ""
+                    high_signal_events = [
+                        e for e in decision_state.unprocessed
+                        if _is_high_signal_headline(e.headline or "")
+                    ]
+                    if high_signal_events:
+                        if session:
+                            session.log("materiality_bypass", {
+                                "reason": "high_signal_news",
+                                "tickers": sorted({
+                                    (e.ticker or "").upper()
+                                    for e in high_signal_events
+                                }),
+                                "n_events": len(high_signal_events),
+                            })
+                    else:
+                        if session:
+                            session.log("materiality_skip", {
+                                "batch_tickers": sorted(batch_tickers),
+                                "material_count": len(material),
+                            })
+                            session.log("knob_fired", {
+                                "name": "materiality", "reason": "non-material",
+                            })
+                        # Clear the batch so it doesn't accumulate and eventually
+                        # fire on its own without any material follow-up.
+                        decision_state.unprocessed = []
+                        decision_state.last_fire_at = now
+                        fire = False
+                        reason = ""
             interval_due = (
                 (now - last_interval_tick).total_seconds() >= cfg.interval_seconds
             )
