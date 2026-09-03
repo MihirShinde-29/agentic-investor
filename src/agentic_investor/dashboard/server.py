@@ -603,10 +603,13 @@ def create_app() -> FastAPI:
     ) -> dict:
         """Pairwise 60-day return correlation matrix for the heatmap widget.
 
-        When ?tickers=... isn't given, unions three sets so the heatmap shows
-        the whole "shadow book" the allocator considers:
-          held  ∪  on-deck (latest rec's targets)  ∪  recent exits (24h)
-        Matches the correlation universe the LLM prompt already sees.
+        When ?tickers=... isn't given, unions four sets so the heatmap shows
+        the whole shadow book the allocator considers:
+          held  ∪  picker on-deck (frozen top-N)  ∪  latest-rec targets
+                ∪  recent exits (24h)
+        Trades execute immediately so "latest-rec targets minus held" is
+        usually empty; the picker's frozen top-N is what actually keeps
+        the on-deck candidates visible on the heatmap.
         """
         from agentic_investor.orchestrator.correlation import (
             compute_correlation_matrix,
@@ -635,6 +638,16 @@ def create_app() -> FastAPI:
                     if latest:
                         for p in latest.allocation.positions:
                             symbol_set.add(p.ticker.upper())
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                from agentic_investor.tools.paper_store import (
+                    load_loop_state as _load_state,
+                )
+
+                loop_state = _load_state() or {}
+                for t in (loop_state.get("frozen_picker_tickers") or []):
+                    symbol_set.add(t.upper())
             except Exception:  # noqa: BLE001
                 pass
             try:
