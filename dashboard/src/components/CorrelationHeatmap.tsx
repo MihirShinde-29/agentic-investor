@@ -60,44 +60,75 @@ export function CorrelationHeatmap() {
             </div>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-[10px]">
-              <thead>
-                <tr>
-                  <th className="p-1" />
-                  {tickers.map((t) => (
-                    <th
-                      key={t}
-                      className="p-1 text-center font-mono font-medium text-muted-foreground"
-                    >
-                      {t}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {matrix.map((row, i) => (
-                  <tr key={tickers[i]}>
-                    <th className="p-1 text-right font-mono font-medium text-muted-foreground">
-                      {tickers[i]}
-                    </th>
-                    {row.map((v, j) => (
-                      <td
-                        key={`${tickers[i]}-${tickers[j]}`}
-                        className={cn(
-                          "border border-background/70 p-1 text-center font-mono tabular",
-                          i === j && "opacity-40",
-                        )}
-                        style={cellStyle(v)}
-                        title={`${tickers[i]} vs ${tickers[j]}: ${v.toFixed(3)}`}
-                      >
-                        {v.toFixed(2)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <>
+            {/*
+              Auto-size: `table-fixed w-full` divides the container width
+              evenly across columns, so cells shrink as the universe grows
+              instead of overflowing into the event feed area. Font size
+              drops in tiers so labels stay legible from 5 to 30+ tickers
+              without scroll. Values themselves hide beyond ~20 tickers -
+              hover title still shows the exact figure.
+            */}
+            {(() => {
+              const n = tickers.length;
+              const showValues = n <= 20;
+              const cellFont =
+                n <= 10 ? "text-[10px]" : n <= 18 ? "text-[9px]" : "text-[8px]";
+              const labelFont =
+                n <= 10 ? "text-[10px]" : n <= 18 ? "text-[9px]" : "text-[8px]";
+              return (
+                <div className="w-full max-w-full">
+                  <table className={cn("w-full table-fixed border-separate border-spacing-0", cellFont)}>
+                    <thead>
+                      <tr>
+                        <th className={cn("w-10 p-0.5", labelFont)} />
+                        {tickers.map((t) => (
+                          <th
+                            key={t}
+                            className={cn(
+                              "p-0.5 text-center font-mono font-medium text-muted-foreground",
+                              labelFont,
+                            )}
+                          >
+                            {t}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {matrix.map((row, i) => (
+                        <tr key={tickers[i]}>
+                          <th
+                            className={cn(
+                              "p-0.5 text-right font-mono font-medium text-muted-foreground",
+                              labelFont,
+                            )}
+                          >
+                            {tickers[i]}
+                          </th>
+                          {row.map((v, j) => (
+                            <td
+                              key={`${tickers[i]}-${tickers[j]}`}
+                              className={cn(
+                                "border border-background/70 p-0 text-center font-mono tabular leading-none",
+                                i === j && "opacity-40",
+                              )}
+                              style={{
+                                ...cellStyle(v),
+                                aspectRatio: "1 / 1",
+                              }}
+                              title={`${tickers[i]} vs ${tickers[j]}: ${v.toFixed(3)}`}
+                            >
+                              {showValues ? v.toFixed(2) : ""}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
             <div className="mt-2 flex items-center justify-between text-[10px] text-muted-foreground">
               <span className="inline-flex items-center gap-1">
                 <span
@@ -114,7 +145,7 @@ export function CorrelationHeatmap() {
                 negative = hedge
               </span>
             </div>
-          </div>
+          </>
         )}
       </CardContent>
     </Card>
