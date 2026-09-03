@@ -118,11 +118,9 @@ function App() {
             <WatchlistPanel />
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_320px]">
               <PositionsTable recId={recId} />
-              <div className="space-y-4">
-                <CalibrationMini />
-                <CorrelationHeatmap />
-              </div>
+              <CalibrationMini />
             </div>
+            <CorrelationHeatmap />
             <TickerGrid recId={recId} timeframe={timeframe} />
           </div>
           {/*
