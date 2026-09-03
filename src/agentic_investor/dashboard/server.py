@@ -239,7 +239,7 @@ def create_app() -> FastAPI:
                     open_et = open_et - _td(days=1)
                 window = (open_et.astimezone(_UTC), now)
             else:
-                days_map = {"1mo": 31, "3mo": 93, "1y": 366}
+                days_map = {"3d": 3, "1w": 7, "1mo": 31, "3mo": 93, "1y": 366}
                 n = days_map.get(p)
                 if n:
                     window = (now - _td(days=n), now)
@@ -333,7 +333,13 @@ def create_app() -> FastAPI:
             if df is None:
                 from agentic_investor.tools.market import fetch_ohlcv
 
-                df = fetch_ohlcv(ticker.upper(), period=period, interval=interval)
+                # yfinance doesn't accept "3d" / "1w" directly - the Alpaca
+                # path handles them via _period_to_days, but the yfinance
+                # fallback needs the nearest keyword it does recognise.
+                yf_period_alias = {"3d": "5d", "1w": "5d"}.get(period, period)
+                df = fetch_ohlcv(
+                    ticker.upper(), period=yf_period_alias, interval=interval,
+                )
 
             if df is None or df.empty:
                 return {"ticker": ticker.upper(), "bars": []}

@@ -66,6 +66,10 @@ export function HealthStrip({
     return undefined;
   }, [events]);
 
+  // Any event, so during quiet stretches (no news, no ticks) we still see
+  // that the WS is alive and the loop is doing something.
+  const lastEvent = events.length > 0 ? events[events.length - 1].ts : undefined;
+
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/40 bg-card/40 px-3 py-2 text-[11px]">
       <div className="flex flex-wrap items-center gap-4">
@@ -96,6 +100,11 @@ export function HealthStrip({
           <Activity className="size-3.5 text-muted-foreground" />
           <span className="text-muted-foreground">Last tick</span>
           <span className="font-medium">{humanSecs(relSecs(lastTick))}</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Activity className="size-3.5 text-muted-foreground" />
+          <span className="text-muted-foreground">Last event</span>
+          <span className="font-medium">{humanSecs(relSecs(lastEvent))}</span>
         </div>
       </div>
       <div

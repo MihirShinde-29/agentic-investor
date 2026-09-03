@@ -114,8 +114,8 @@ def _drop_incomplete(df: pd.DataFrame) -> pd.DataFrame:
 def _period_to_days(period: str) -> int:
     """Approximate calendar days per yfinance period keyword."""
     return {
-        "5d": 7, "1mo": 32, "3mo": 95, "6mo": 190, "1y": 366,
-        "2y": 732, "5y": 1830, "10y": 3660, "max": 7500,
+        "3d": 5, "5d": 7, "1w": 9, "1mo": 32, "3mo": 95, "6mo": 190,
+        "1y": 366, "2y": 732, "5y": 1830, "10y": 3660, "max": 7500,
     }.get(period, 732)
 
 

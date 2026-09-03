@@ -18,12 +18,14 @@ import { cn, formatPct } from "@/lib/utils";
 
 type Point = { ts: number; portfolio: number | null; spy: number | null };
 
-type Timeframe = "1D" | "1M" | "3M" | "1Y";
+type Timeframe = "1D" | "3D" | "1W" | "1M" | "3M" | "1Y";
 
 // Match TickerCard: 1D uses 1-minute bars so the intraday chart fills up
 // throughout the session instead of showing just a few 5-min bars at open.
 const TIMEFRAMES: Record<Timeframe, { period: string; interval: string; refreshMs: number }> = {
   "1D": { period: "1d",  interval: "1m", refreshMs: 30_000 },
+  "3D": { period: "3d",  interval: "15m", refreshMs: 60_000 },
+  "1W": { period: "1w",  interval: "1h", refreshMs: 5 * 60_000 },
   "1M": { period: "1mo", interval: "1h", refreshMs: 5 * 60_000 },
   "3M": { period: "3mo", interval: "1d", refreshMs: 15 * 60_000 },
   "1Y": { period: "1y",  interval: "1d", refreshMs: 30 * 60_000 },
