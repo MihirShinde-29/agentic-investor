@@ -89,6 +89,11 @@ class LoopConfig:
     # with margin to catch the immediate counter-reaction too.
     big_rebalance_min_trades: int = 5
     big_rebalance_cooldown_seconds: int = 1800
+    # Even a "concentration reshape" (n_new <= n_dropped) gets blocked
+    # during cooldown if the total notional of the plan exceeds this
+    # share of NAV. Catches the CRWD-style $2.5k re-open on a book that
+    # already had CRWD - low position-count delta, high dollar delta.
+    big_rebalance_max_bypass_notional_pct: float = 15.0
 
     # Discipline layer (vetoes at the rebalancer boundary)
     cooldown_seconds: int = 900              # 0q temporal cooldown
@@ -852,12 +857,20 @@ def run_tick(
             current_tickers = set(positions_dollars.keys())
             n_new = len(target_tickers - current_tickers)
             n_dropped = len(current_tickers - target_tickers)
-            is_concentration = n_new <= n_dropped and n_new <= 2
-            if is_concentration:
+            plan_notional = sum(float(p.dollars or 0) for p in plans)
+            notional_pct = (
+                plan_notional / acct.equity * 100.0 if acct.equity else 0.0
+            )
+            is_small_reshape = (
+                n_new <= n_dropped
+                and n_new <= 2
+                and notional_pct <= cfg.big_rebalance_max_bypass_notional_pct
+            )
+            if is_small_reshape:
                 logger.info(
                     "tick %s: cooldown bypass (concentration reshape) "
-                    "new=%d dropped=%d plan=%d",
-                    tick_at, n_new, n_dropped, len(plans),
+                    "new=%d dropped=%d plan=%d notional=%.1f%%",
+                    tick_at, n_new, n_dropped, len(plans), notional_pct,
                 )
                 if session:
                     session.log("big_rebalance_cooldown_bypass", {
@@ -865,14 +878,17 @@ def run_tick(
                         "plan_count": len(plans),
                         "n_new_positions": n_new,
                         "n_dropped_positions": n_dropped,
+                        "notional_pct": round(notional_pct, 2),
                         "seconds_since_last": secs,
                     })
             else:
                 logger.info(
                     "tick %s: big-rebalance cooldown blocking %d trades "
-                    "(last was %.0fs ago, need %ds; new=%d dropped=%d)",
+                    "(last was %.0fs ago, need %ds; new=%d dropped=%d "
+                    "notional=%.1f%%)",
                     tick_at, len(plans), secs,
-                    cfg.big_rebalance_cooldown_seconds, n_new, n_dropped,
+                    cfg.big_rebalance_cooldown_seconds,
+                    n_new, n_dropped, notional_pct,
                 )
                 if session:
                     session.log("big_rebalance_cooldown_skip", {
@@ -882,6 +898,7 @@ def run_tick(
                         "cooldown_seconds": cfg.big_rebalance_cooldown_seconds,
                         "n_new_positions": n_new,
                         "n_dropped_positions": n_dropped,
+                        "notional_pct": round(notional_pct, 2),
                     })
                 _log_tick_cost()
                 return TickResult(

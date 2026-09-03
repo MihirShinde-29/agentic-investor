@@ -7,12 +7,22 @@ tracker (calls, tokens, estimated cost) so every CLI command can print an LLM
 usage summary.
 """
 
+import logging
+import os
 import threading
 from dataclasses import dataclass, field
 
 import instructor
 import litellm
 from dotenv import load_dotenv
+
+# LiteLLM logs every completion call at INFO twice ("LiteLLM completion()..."
+# once from litellm.utils, once from Wrapper: Completed Call). Fills the Fly
+# log buffer and drowns real events. Quiet it unless the user opted in via
+# LITELLM_LOG.
+if os.getenv("LITELLM_LOG") is None:
+    for _name in ("LiteLLM", "LiteLLM Proxy", "litellm"):
+        logging.getLogger(_name).setLevel(logging.WARNING)
 from pydantic import BaseModel
 from tenacity import (
     retry,

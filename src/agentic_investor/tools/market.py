@@ -111,6 +111,70 @@ def _drop_incomplete(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna(subset=["Open", "High", "Low", "Close"])
 
 
+def _period_to_days(period: str) -> int:
+    """Approximate calendar days per yfinance period keyword."""
+    return {
+        "5d": 7, "1mo": 32, "3mo": 95, "6mo": 190, "1y": 366,
+        "2y": 732, "5y": 1830, "10y": 3660, "max": 7500,
+    }.get(period, 732)
+
+
+def _fetch_ohlcv_alpaca(
+    ticker: str, period: str, interval: str, end: str | None,
+) -> pd.DataFrame | None:
+    """Try to fetch OHLCV from Alpaca's IEX bars. Returns None on any failure.
+
+    Preferred over yfinance because Alpaca rate-limits per API-key, not per
+    IP - a shared cloud egress IP won't get throttled by unrelated traffic.
+    """
+    if interval != "1d":
+        return None  # only daily bars supported for now
+    try:
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        from agentic_investor.config import get_settings
+
+        s = get_settings()
+        if not s.alpaca_api_key or not s.alpaca_api_secret:
+            return None
+        # IEX free tier delays 15 min; asking for anything more recent 403s.
+        end_dt = pd.Timestamp(end).to_pydatetime() if end else (
+            _dt.now(_UTC) - _td(minutes=16)
+        )
+        start_dt = end_dt - _td(days=_period_to_days(period))
+        client = StockHistoricalDataClient(
+            api_key=s.alpaca_api_key, secret_key=s.alpaca_api_secret,
+        )
+        req = StockBarsRequest(
+            symbol_or_symbols=ticker.upper(),
+            timeframe=TimeFrame.Day,
+            start=start_dt,
+            end=end_dt,
+            feed="iex",
+        )
+        resp = client.get_stock_bars(req)
+        df = resp.df
+        if df is None or df.empty:
+            return None
+        # Alpaca returns MultiIndex (symbol, timestamp) when multi-symbol; single
+        # symbol still gives a plain DatetimeIndex. Normalise columns to
+        # yfinance's naming so downstream indicators work unchanged.
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.xs(ticker.upper(), level=0)
+        rename = {"open": "Open", "high": "High", "low": "Low",
+                  "close": "Close", "volume": "Volume"}
+        df = df.rename(columns=rename)[["Open", "High", "Low", "Close", "Volume"]]
+        return df
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def fetch_ohlcv(
     ticker: str,
     period: str = "2y",
@@ -120,6 +184,9 @@ def fetch_ohlcv(
 ) -> pd.DataFrame:
     """Download OHLCV bars for one ticker as a clean, single-index DataFrame.
 
+    Tries Alpaca IEX bars first (per-API-key rate limits, immune to
+    shared-IP throttling); falls back to yfinance on any Alpaca miss.
+
     When `end` is provided (point-in-time mode), fetches [end - period, end]
     instead of [today - period, today]. Used by the --as-of picker to eliminate
     look-ahead bias when backtesting a historical strategy.
@@ -127,6 +194,11 @@ def fetch_ohlcv(
     `timeout` bounds the yfinance HTTP call. Yahoo's public endpoint hangs
     under IP throttling; without a bound, one stuck fetch freezes the loop.
     """
+    df = _fetch_ohlcv_alpaca(ticker, period, interval, end)
+    if df is not None and not df.empty:
+        df = _drop_incomplete(df)
+        if not df.empty:
+            return df
     if end is None:
         df = yf.Ticker(ticker).history(
             period=period, interval=interval, auto_adjust=True, timeout=timeout,

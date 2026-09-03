@@ -211,6 +211,24 @@ def list_orders(
     return [dict(r) for r in rows]
 
 
+def recent_sold_tickers(
+    *, since_iso: str, url: str | None = None,
+) -> list[str]:
+    """Return distinct tickers that had a SELL trade after `since_iso`.
+
+    Used by the correlation-hint block so the allocator sees that a
+    ticker it's about to buy correlates with something we recently exited
+    (hidden factor re-exposure).
+    """
+    with _connect(_resolve_url(url)) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT UPPER(ticker) FROM paper_orders "
+            "WHERE side = 'sell' AND submitted_at >= ?",
+            (since_iso,),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
 def recent_trades_for_tickers(
     tickers: list[str],
     *,

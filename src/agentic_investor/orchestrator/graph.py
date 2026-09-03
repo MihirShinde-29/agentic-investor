@@ -432,8 +432,27 @@ def _messages(state: GraphState) -> list[dict]:
             from agentic_investor.orchestrator.correlation import (
                 find_correlated_pairs_hint,
             )
+            # Union of {picker tickers, prior positions, recent sold-off
+            # tickers}. Catches "sold NVDA an hour ago, now considering
+            # AVGO" - the proxy re-exposure pattern.
+            corr_universe = {t.upper() for t in req.tickers}
+            prev_alloc_for_corr = state.get("previous_allocation")
+            if prev_alloc_for_corr is not None:
+                for p in prev_alloc_for_corr.positions:
+                    corr_universe.add(p.ticker.upper())
+            try:
+                from datetime import UTC, datetime, timedelta
+
+                from agentic_investor.tools.paper_store import (
+                    recent_sold_tickers,
+                )
+                since = str(datetime.now(UTC) - timedelta(hours=24))
+                for tk in recent_sold_tickers(since_iso=since):
+                    corr_universe.add(tk)
+            except Exception:  # noqa: BLE001 - hint best-effort
+                pass
             pairs = find_correlated_pairs_hint(
-                list(req.tickers),
+                sorted(corr_universe),
                 window_days=getattr(profile, "correlation_window_days", 60),
                 threshold=getattr(profile, "max_pair_correlation", 0.7),
             )
