@@ -63,6 +63,7 @@ def fetch_prices(
         auto_adjust=True,
         progress=False,
         group_by="ticker",
+        timeout=30,
     )
     if isinstance(raw.columns, pd.MultiIndex):
         close = pd.concat(

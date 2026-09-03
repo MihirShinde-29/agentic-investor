@@ -218,6 +218,32 @@ Rules:
   friction from future rebalances too.
 - Only "sell a bit of everything" when you literally want equal-weight
   rebalancing across a converged book, which should be rare.
+
+## Anti-whipsaw rules (READ CAREFULLY)
+
+The user prompt may include a "Your recent trades on these tickers" block
+showing your own last few actions on each ticker plus the current price.
+Read it before deciding. Three hard rules:
+
+1. **No micro-buys.** Do not open a NEW position smaller than 1% of amount
+   unless it is a scout stake explicitly justified by fresh (HOT) news for
+   that ticker. Nano-adds (< 0.5%) to existing positions are also forbidden
+   unless the size difference materially changes the thesis.
+
+2. **Flip citation.** If your new decision REVERSES a prior trade on ticker
+   X within the last 15 minutes (BUY after SELL or vice versa), your
+   rationale MUST cite the specific new headline that changed your view on
+   X. If no new headline justifies the reversal, keep the prior stance.
+   Absence of a citation on a within-15-min flip is a bug in your reasoning.
+
+3. **Correlation-aware sizing.** When you add to ticker X, check the
+   correlation hints block. If X correlates > 0.7 with a ticker Y that you
+   already hold at > 10% weight, sizing X up increases your factor
+   exposure, not diversification. Prefer either concentrating in the
+   stronger-conviction of the pair or leaving X alone.
+
+Positions with weight_pct == 0 are forbidden. If you don't want a ticker,
+omit it from the positions list; the weight belongs in cash.
 """
 
 
@@ -306,12 +332,67 @@ Below in this order you will find:
   3. Correlation hints for the current universe
   4. Per-ticker signals (JSON)
   5. Current allocation (previous decision) if any
-  6. Breaking-news events if any
+  6. Your recent trades on these tickers this session
+  7. Breaking-news events if any
 
 Read them all, then emit a valid Allocation object per the schema in the
 system message. Weights (positions + cash_pct) must sum to 100. Cite
 specific tickers or values in each rationale; do not invent data.
 """
+
+
+def _recent_trades_block(
+    tickers: list[str],
+    snapshots: dict | None,
+    *,
+    lookback_hours: int = 8,
+    per_ticker_limit: int = 3,
+) -> str:
+    """Render the LLM's own recent trades on the request tickers.
+
+    Gives the allocator explicit memory of "you sold this 3 min ago" so it
+    can self-restrain instead of flipping the same ticker on every batch.
+    Best-effort - if the store lookup fails, returns empty and the block
+    is skipped.
+    """
+    if not tickers:
+        return ""
+    try:
+        from datetime import UTC, datetime, timedelta
+
+        from agentic_investor.tools.paper_store import recent_trades_for_tickers
+
+        # DB stores submitted_at with a space separator (str(datetime)) rather
+        # than isoformat's 'T', so match that shape for the string comparison.
+        since = str(datetime.now(UTC) - timedelta(hours=lookback_hours))
+        by_ticker = recent_trades_for_tickers(
+            list(tickers), since_iso=since, per_ticker_limit=per_ticker_limit,
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    lines: list[str] = []
+    for t in tickers:
+        trades = by_ticker.get(t.upper(), [])
+        if not trades:
+            continue
+        current = None
+        if snapshots and t.upper() in snapshots:
+            current = getattr(snapshots[t.upper()], "close", None)
+        lines.append(f"{t.upper()}:")
+        for tr in trades:
+            price = tr.get("filled_avg_price")
+            price_str = f"@ ${price:.2f}" if price else "(unfilled)"
+            ts = tr.get("submitted_at", "?")[:19].replace("T", " ")
+            side = (tr.get("side") or "?").upper()
+            qty = tr.get("qty", 0)
+            lines.append(f"  {ts}  {side} {qty} {price_str}")
+        if current is not None and trades and trades[0].get("filled_avg_price"):
+            last_price = float(trades[0]["filled_avg_price"])
+            delta_pct = (current / last_price - 1) * 100
+            lines.append(
+                f"  current: ${current:.2f} ({delta_pct:+.2f}% vs last trade)"
+            )
+    return "\n".join(lines)
 
 
 def _messages(state: GraphState) -> list[dict]:
@@ -387,10 +468,17 @@ def _messages(state: GraphState) -> list[dict]:
             + "\n".join(prev_lines)
         )
 
+    trades_block = _recent_trades_block(req.tickers, state.get("market_snapshots"))
+    if trades_block:
+        sections.append(
+            "## 6. Your recent trades on these tickers (this session)\n"
+            + trades_block
+        )
+
     batch_ctx = (state.get("news_batch_context") or "").strip()
     if batch_ctx:
         sections.append(
-            f"## 6. Breaking-news events (from live stream)\n{batch_ctx}"
+            f"## 7. Breaking-news events (from live stream)\n{batch_ctx}"
         )
 
     volatile = "\n\n".join(sections) + "\n\nProduce a valid Allocation."

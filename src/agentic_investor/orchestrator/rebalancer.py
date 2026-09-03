@@ -42,6 +42,7 @@ def compute_trade_plan(
     cooldown_seconds: int = 900,
     now: datetime | None = None,
     news_batch_tickers: set[str] | None = None,
+    news_bypass_cooldown: bool = True,
     ticker_recent_moves: dict[str, float] | None = None,
     adverse_move_threshold_pct: float = 1.0,
     avg_entry_prices: dict[str, float] | None = None,
@@ -53,8 +54,11 @@ def compute_trade_plan(
 
     Discipline layer applies BUY-side and TRIM-side vetoes before returning
     plans:
-      - Temporal cooldown: no reverse-side trade within cooldown_seconds
-        (bypassed if the ticker is in news_batch_tickers).
+      - Temporal cooldown: no reverse-side trade within cooldown_seconds.
+        A ticker in the current news batch bypasses the cooldown by default;
+        set news_bypass_cooldown=False for a strict block. The LLM is
+        expected to self-restrain via the recent-trades context in its
+        prompt.
       - Adverse-move veto (BUY): skip if the ticker moved beyond
         -adverse_move_threshold_pct recently (don't catch falling knives).
       - Halt-buys drawdown (BUY): skip if position already down more than
@@ -91,13 +95,16 @@ def compute_trade_plan(
             continue
         side = "buy" if delta > 0 else "sell"
 
-        # Cooldown veto: no reverse-side trade within window (news bypasses).
+        # Cooldown veto: no reverse-side trade within window. News bypass is
+        # opt-in because the LLM will happily flip the same ticker every
+        # news batch otherwise.
         recent = recent_trades.get(t.upper())
         if recent is not None:
             recent_side, recent_ts = recent
             age = (now - recent_ts).total_seconds()
-            if (recent_side != side and age < cooldown_seconds
-                    and t.upper() not in news_batch_tickers):
+            in_news = t.upper() in news_batch_tickers
+            bypassed = news_bypass_cooldown and in_news
+            if recent_side != side and age < cooldown_seconds and not bypassed:
                 continue
 
         if side == "buy":

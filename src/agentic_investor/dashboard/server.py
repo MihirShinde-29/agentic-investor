@@ -323,6 +323,7 @@ def create_app() -> FastAPI:
                             interval=chosen_interval,
                             progress=False,
                             auto_adjust=False,
+                            timeout=15,
                         )
                         if df is not None and not df.empty and isinstance(
                             df.columns, __import__("pandas").MultiIndex

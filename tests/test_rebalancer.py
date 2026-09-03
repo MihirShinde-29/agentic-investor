@@ -192,10 +192,32 @@ def test_cooldown_bypass_when_ticker_in_news_batch():
         recent_trades=recent,
         cooldown_seconds=900,
         now=now,
-        news_batch_tickers={"AAPL"},  # news for AAPL - bypass cooldown
+        news_batch_tickers={"AAPL"},
     )
-    # AAPL BUY allowed because AAPL is in news batch (fresh signal justifies).
+    # Default news bypass: AAPL BUY allowed because AAPL is in the news batch.
+    # LLM is expected to self-restrain via the recent-trades prompt block.
     assert any(p.ticker == "AAPL" and p.side == "buy" for p in plans)
+
+
+def test_cooldown_strict_block_when_news_bypass_disabled():
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    recent = {"AAPL": ("sell", now - timedelta(minutes=10))}
+    plans = compute_trade_plan(
+        _rec(),
+        current_positions={"AAPL": 0, "NVDA": 0},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=1.0,
+        recent_trades=recent,
+        cooldown_seconds=900,
+        now=now,
+        news_batch_tickers={"AAPL"},
+        news_bypass_cooldown=False,
+    )
+    # Strict mode: mechanical cooldown holds even when news is present.
+    assert not any(p.ticker == "AAPL" and p.side == "buy" for p in plans)
 
 
 def test_cooldown_expired_allows_reversal():

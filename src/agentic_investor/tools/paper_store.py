@@ -211,6 +211,41 @@ def list_orders(
     return [dict(r) for r in rows]
 
 
+def recent_trades_for_tickers(
+    tickers: list[str],
+    *,
+    since_iso: str | None = None,
+    per_ticker_limit: int = 3,
+    url: str | None = None,
+) -> dict[str, list[dict]]:
+    """Return {ticker: [most-recent-trade, ...]} for the given tickers.
+
+    Used by the allocator prompt to give the LLM its own recent trade
+    history per ticker so it can factor in "I just sold this 3 min ago"
+    when deciding whether to flip.
+    """
+    if not tickers:
+        return {}
+    out: dict[str, list[dict]] = {t.upper(): [] for t in tickers}
+    with _connect(_resolve_url(url)) as conn:
+        conn.row_factory = sqlite3.Row
+        for t in {t.upper() for t in tickers}:
+            query = (
+                "SELECT ticker, side, qty, submitted_at, filled_at, "
+                "filled_avg_price, status FROM paper_orders "
+                "WHERE UPPER(ticker) = ?"
+            )
+            params: list = [t]
+            if since_iso:
+                query += " AND submitted_at >= ?"
+                params.append(since_iso)
+            query += " ORDER BY submitted_at DESC LIMIT ?"
+            params.append(per_ticker_limit)
+            rows = conn.execute(query, params).fetchall()
+            out[t] = [dict(r) for r in rows]
+    return out
+
+
 def record_filter_skip(
     *,
     skip_reason: str,

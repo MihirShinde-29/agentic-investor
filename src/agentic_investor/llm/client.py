@@ -233,6 +233,7 @@ def structured_complete[T: BaseModel](
     model: str | None = None,
     temperature: float | None = None,
     max_retries: int = 1,
+    timeout: float = 30.0,
 ) -> T:
     """Call the LLM and return a validated instance of response_model.
 
@@ -244,6 +245,9 @@ def structured_complete[T: BaseModel](
       exception chain because instructor wraps provider errors.
     Every successful call is logged into the module-level usage tracker via
     litellm's success_callback so CLI commands can print a per-run summary.
+
+    `timeout` bounds each individual completion call so a stuck provider
+    response can't freeze the whole loop while tenacity waits for it.
     """
     s = get_settings()
     return _client.chat.completions.create(
@@ -252,4 +256,5 @@ def structured_complete[T: BaseModel](
         response_model=response_model,
         temperature=s.llm_temperature if temperature is None else temperature,
         max_retries=max_retries,
+        timeout=timeout,
     )

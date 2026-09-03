@@ -116,16 +116,20 @@ def fetch_ohlcv(
     period: str = "2y",
     interval: str = "1d",
     end: str | None = None,
+    timeout: float = 15.0,
 ) -> pd.DataFrame:
     """Download OHLCV bars for one ticker as a clean, single-index DataFrame.
 
     When `end` is provided (point-in-time mode), fetches [end - period, end]
     instead of [today - period, today]. Used by the --as-of picker to eliminate
     look-ahead bias when backtesting a historical strategy.
+
+    `timeout` bounds the yfinance HTTP call. Yahoo's public endpoint hangs
+    under IP throttling; without a bound, one stuck fetch freezes the loop.
     """
     if end is None:
         df = yf.Ticker(ticker).history(
-            period=period, interval=interval, auto_adjust=True
+            period=period, interval=interval, auto_adjust=True, timeout=timeout,
         )
     else:
         # yfinance can't combine period + end, so translate the coarse period
@@ -138,6 +142,7 @@ def fetch_ohlcv(
             end=end_ts.strftime("%Y-%m-%d"),
             interval=interval,
             auto_adjust=True,
+            timeout=timeout,
         )
     df = _drop_incomplete(df)
     if df.empty:
