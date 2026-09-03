@@ -78,6 +78,7 @@ function App() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <TimeframeSelector value={timeframe} onChange={setTimeframe} />
             <SessionPicker
               selected={selectedSession}
               onChange={setSelectedSession}
@@ -110,9 +111,6 @@ function App() {
         </div>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
           <div className="space-y-4">
-            <div className="flex items-center justify-end">
-              <TimeframeSelector value={timeframe} onChange={setTimeframe} />
-            </div>
             <PortfolioChart
               sessionId={selectedSession === "live" ? undefined : selectedSession}
               timeframe={timeframe}
