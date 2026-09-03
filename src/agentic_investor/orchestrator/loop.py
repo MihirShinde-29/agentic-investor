@@ -121,6 +121,22 @@ class LoopConfig:
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
 
+    # Trigger materiality: news batches whose tickers don't intersect with
+    # held + picker-frozen + recent-exits are dropped BEFORE they fire a
+    # regen. Cuts the "barely-moved skip on non-book news" waste.
+    materiality_filter_enabled: bool = True
+
+    # Correlation-drift trigger: after each rec, snapshot the pairwise
+    # correlation matrix on held tickers. On each tick, recompute and fire a
+    # regen if any pair shifted by more than this threshold in absolute
+    # units. 0.15 means "0.60 -> 0.75 is material."
+    correlation_drift_threshold: float = 0.15
+    correlation_drift_enabled: bool = True
+
+    # Regime-change trigger: fire a regen when MacroAgent's regime label
+    # transitions (bull <-> bear <-> sideways <-> high_vol).
+    regime_change_trigger_enabled: bool = True
+
     # Ops toggles
     dry_run: bool = False
     once: bool = False
@@ -177,6 +193,14 @@ class LoopState:
     # the recent past. Used to grant per-ticker cooldown bypass only when
     # >= N distinct sources converge on the same name (see #94).
     news_source_urls: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    # Correlation-matrix snapshot for drift detection. Keyed by "A|B" with
+    # tickers sorted alphabetically, value is the pairwise correlation
+    # captured just after the last regen. Compared against a fresh compute
+    # each tick to decide whether to fire a correlation-drift regen.
+    last_correlation_snapshot: dict[str, float] = field(default_factory=dict)
+    # Most recent macro regime label. When the fresh MacroAgent call returns
+    # a different label, that transition fires a regen.
+    last_regime: str | None = None
 
     def to_dict(self) -> dict:
         """Serialize for SQLite persistence."""
@@ -203,6 +227,8 @@ class LoopState:
             "news_source_urls": {
                 k: [list(t) for t in v] for k, v in self.news_source_urls.items()
             },
+            "last_correlation_snapshot": dict(self.last_correlation_snapshot),
+            "last_regime": self.last_regime,
         }
 
     @classmethod
@@ -238,6 +264,10 @@ class LoopState:
                 k: [(t[0], t[1]) for t in v]
                 for k, v in (d.get("news_source_urls") or {}).items()
             },
+            last_correlation_snapshot=dict(
+                d.get("last_correlation_snapshot") or {}
+            ),
+            last_regime=d.get("last_regime"),
         )
 
 
@@ -281,6 +311,80 @@ def _technical_stance_changed(
         if prev and prev != cur:
             changes[t] = f"{prev} -> {cur}"
     return bool(changes), changes
+
+
+def _held_ticker_set(broker) -> set[str]:
+    """Uppercase set of tickers currently held. Empty on broker error."""
+    try:
+        return {p.ticker.upper() for p in broker.get_positions()}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _material_ticker_set(state, broker) -> set[str]:
+    """Union of tickers we care about: held + picker-frozen + recent exits.
+
+    A news batch touching only non-material tickers isn't worth burning an
+    LLM regen on. Recent exits stay material for 24h because the LLM might
+    legitimately want to re-open them on new information.
+    """
+    material = _held_ticker_set(broker)
+    for t in (state.frozen_picker_tickers or []):
+        material.add(t.upper())
+    try:
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from agentic_investor.tools.paper_store import recent_sold_tickers
+        since = (_dt.now(_UTC) - _td(hours=24)).isoformat()
+        for t in recent_sold_tickers(since_iso=since):
+            material.add(t.upper())
+    except Exception:  # noqa: BLE001 - recent-exits lookup is best-effort
+        pass
+    return material
+
+
+def _snapshot_pairs(matrix) -> dict[str, float]:
+    """Flatten a correlation DataFrame into {'A|B': corr} with A<B sorted."""
+    out: dict[str, float] = {}
+    cols = list(matrix.columns)
+    for i, a in enumerate(cols):
+        for b in cols[i + 1:]:
+            try:
+                v = float(matrix.loc[a, b])
+            except Exception:  # noqa: BLE001
+                continue
+            if v != v:  # NaN
+                continue
+            key = f"{a}|{b}" if a < b else f"{b}|{a}"
+            out[key] = v
+    return out
+
+
+def _correlation_shifts(
+    prev: dict[str, float],
+    cur: dict[str, float],
+    threshold: float,
+) -> dict[str, dict[str, float]]:
+    """Pairs whose absolute correlation shifted by more than `threshold`.
+
+    Only compares pairs present in both snapshots so a change in the held
+    universe doesn't count as a shift by itself.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for key, cur_v in cur.items():
+        prev_v = prev.get(key)
+        if prev_v is None:
+            continue
+        delta = abs(cur_v - prev_v)
+        if delta >= threshold:
+            out[key] = {
+                "prev": round(prev_v, 3),
+                "cur": round(cur_v, 3),
+                "delta": round(cur_v - prev_v, 3),
+            }
+    return out
 
 
 def _opinion_barely_moved(
@@ -787,6 +891,19 @@ def run_tick(
                 state.last_stances = {
                     s.ticker.upper(): s.stance for s in rec.technical_signals
                 }
+                # Snapshot pairwise correlations on the fresh held set so the
+                # drift trigger has a baseline to compare against on later ticks.
+                try:
+                    held_syms = {p.ticker.upper() for p in rec.allocation.positions}
+                    if len(held_syms) >= 2:
+                        from agentic_investor.orchestrator.correlation import (
+                            compute_correlation_matrix,
+                        )
+                        matrix = compute_correlation_matrix(sorted(held_syms))
+                        if matrix is not None:
+                            state.last_correlation_snapshot = _snapshot_pairs(matrix)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("correlation snapshot failed: %s", e)
                 regenerated = True
                 try:
                     from agentic_investor.tools.paper_store import save_loop_state
@@ -1237,17 +1354,45 @@ def run_event_loop(
             ingest(decision_state, new_events, now)
 
             fire, reason = should_fire(decision_state, now)
+
+            # Materiality gate: drop news-batch fires whose tickers don't
+            # intersect with the tickers we care about (held + on-deck +
+            # recent exits). Non-material news mostly produced barely-moved
+            # skips - burn LLM budget, learn nothing.
+            if fire and cfg.materiality_filter_enabled and decision_state.unprocessed:
+                material = _material_ticker_set(state, broker)
+                batch_tickers = {
+                    (e.ticker or "").upper() for e in decision_state.unprocessed
+                }
+                overlap = batch_tickers & material
+                if not overlap:
+                    if session:
+                        session.log("materiality_skip", {
+                            "batch_tickers": sorted(batch_tickers),
+                            "material_count": len(material),
+                        })
+                        session.log("knob_fired", {
+                            "name": "materiality", "reason": "non-material",
+                        })
+                    # Clear the batch so it doesn't accumulate and eventually
+                    # fire on its own without any material follow-up.
+                    decision_state.unprocessed = []
+                    decision_state.last_fire_at = now
+                    fire = False
+                    reason = ""
             interval_due = (
                 (now - last_interval_tick).total_seconds() >= cfg.interval_seconds
             )
 
             # Extra triggers layered on top of news + interval:
             # (a) price-move: any held ticker moved > threshold from baseline
-            # (b) force-regen: last regen was more than force_regen_seconds ago
-            # (c) technical-stance: any held ticker's technical stance flipped
+            # (b) correlation-drift: pairwise correlation shifted materially
+            # (c) regime-change: macro regime label flipped since last regen
+            # (d) force-regen: last regen was more than force_regen_seconds ago
+            # (e) technical-stance: any held ticker's technical stance flipped
             price_ctx = ""
             price_fire = False
-            if not fire and state.baseline_prices:
+            if state.baseline_prices:
                 try:
                     from agentic_investor.tools.paper_broker import get_latest_price
                     cur_prices = {}
@@ -1273,14 +1418,64 @@ def run_event_loop(
                             f"- {line}" for line in moved
                         )
                         price_fire = True
-                        reason = "price-move"
+                        if not fire:
+                            reason = "price-move"
                         if session:
                             session.log("price_move_trigger", {"moves": moves})
                 except Exception as e:  # noqa: BLE001
                     logger.warning("price-move check failed: %s", e)
 
+            corr_fire = False
+            if (not fire and not price_fire and cfg.correlation_drift_enabled
+                    and state.last_correlation_snapshot):
+                try:
+                    held_syms = _held_ticker_set(broker)
+                    if len(held_syms) >= 2:
+                        from agentic_investor.orchestrator.correlation import (
+                            compute_correlation_matrix,
+                        )
+                        matrix = compute_correlation_matrix(sorted(held_syms))
+                        if matrix is not None:
+                            cur_pairs = _snapshot_pairs(matrix)
+                            shifts = _correlation_shifts(
+                                state.last_correlation_snapshot, cur_pairs,
+                                cfg.correlation_drift_threshold,
+                            )
+                            if shifts:
+                                corr_fire = True
+                                reason = "correlation-drift"
+                                if session:
+                                    session.log("correlation_drift_trigger", {
+                                        "shifts": shifts,
+                                        "threshold": cfg.correlation_drift_threshold,
+                                    })
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("correlation-drift check failed: %s", e)
+
+            regime_fire = False
+            if (not fire and not price_fire and not corr_fire
+                    and cfg.regime_change_trigger_enabled):
+                try:
+                    from agentic_investor.agents.macro import analyze_macro
+                    macro = analyze_macro()
+                    prev_regime = state.last_regime
+                    cur_regime = macro.regime
+                    if (prev_regime is not None
+                            and cur_regime != prev_regime
+                            and cur_regime != "unknown"):
+                        regime_fire = True
+                        reason = "regime-change"
+                        if session:
+                            session.log("regime_change_trigger", {
+                                "from": prev_regime, "to": cur_regime,
+                            })
+                    state.last_regime = cur_regime
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("regime-change check failed: %s", e)
+
             force_fire = False
-            if not fire and not price_fire and cfg.force_regen_seconds > 0:
+            if (not fire and not price_fire and not corr_fire and not regime_fire
+                    and cfg.force_regen_seconds > 0):
                 if state.last_regen_at is None:
                     force_fire = False  # first regen handled by is_new_day path
                 else:
@@ -1295,7 +1490,8 @@ def run_event_loop(
 
             stance_fire = False
             stance_ctx = ""
-            if (not fire and not price_fire and not force_fire
+            if (not fire and not price_fire and not corr_fire and not regime_fire
+                    and not force_fire
                     and cfg.enable_technical_change_trigger
                     and state.last_stances):
                 try:
@@ -1323,7 +1519,8 @@ def run_event_loop(
                 except Exception as e:  # noqa: BLE001
                     logger.warning("technical-change check failed: %s", e)
 
-            if fire or price_fire or force_fire or stance_fire or interval_due:
+            if (fire or price_fire or corr_fire or regime_fire
+                    or force_fire or stance_fire or interval_due):
                 if fire:
                     batch = build_batch(
                         decision_state, now,
