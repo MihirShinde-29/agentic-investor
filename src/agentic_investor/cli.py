@@ -838,6 +838,98 @@ def _paper_attribution(sessions_dir: str, out_path: str) -> None:
     print("\nOpen to see per-session metrics, filter behavior, honesty notes.")
 
 
+def _paper_session_diff(session_a: str, session_b: str) -> None:
+    """Compare two session.jsonl runs on knob firing counts + cost.
+
+    Points at session directories (contains session.jsonl). Prints a per-
+    counter diff so we can quantitatively answer 'did last night's fix
+    change the discipline stack's behavior' instead of eyeballing logs.
+    """
+    import json
+    from pathlib import Path
+
+    def _summarize(path: Path) -> dict:
+        counters: dict[str, int] = {}
+        cost = 0.0
+        first_ts, last_ts = None, None
+        with path.open() as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                et = e.get("event", "")
+                ts = e.get("ts", "")
+                if ts:
+                    if first_ts is None:
+                        first_ts = ts
+                    last_ts = ts
+                counters[et] = counters.get(et, 0) + 1
+                if et == "knob_fired":
+                    name = e.get("name", "")
+                    counters[f"knob_fired::{name}"] = (
+                        counters.get(f"knob_fired::{name}", 0) + 1
+                    )
+                if et == "tick_cost":
+                    raw = str(e.get("cost_usd", "$0")).replace("$", "").replace(",", "")
+                    try:
+                        cost += float(raw)
+                    except ValueError:
+                        pass
+        return {
+            "counters": counters, "cost_usd": cost,
+            "first_ts": first_ts, "last_ts": last_ts,
+        }
+
+    def _pick_jsonl(root: str) -> Path:
+        p = Path(root)
+        return p if p.is_file() else p / "session.jsonl"
+
+    a_path, b_path = _pick_jsonl(session_a), _pick_jsonl(session_b)
+    if not a_path.exists() or not b_path.exists():
+        raise SystemExit(f"missing session.jsonl at {a_path} or {b_path}")
+    a = _summarize(a_path)
+    b = _summarize(b_path)
+    interest = [
+        "regen_done", "opinion_drift_skip", "order_submitted",
+        "materiality_bypass_promoted", "materiality_skip", "finbert_skip",
+        "finbert_hot_signal", "finbert_hot_signal_deferred",
+        "picker_exit_suppressed", "rebalance_skipped_all_below_band",
+        "fall_through_in_flight_dropped", "fall_through_add_blocked",
+        "on_deck_purge_applied", "alloc_repair",
+    ]
+
+    def _row(label: str, va, vb) -> str:
+        d = vb - va
+        arrow = " " if d == 0 else ("+" if d > 0 else "")
+        return f"  {label:<48s} {va:>6}  ->  {vb:>6}   ({arrow}{d})"
+
+    print(f"\nA: {a_path}  ({a['first_ts']}  ->  {a['last_ts']})")
+    print(f"B: {b_path}  ({b['first_ts']}  ->  {b['last_ts']})")
+    print("\nEvent counts:")
+    for k in interest:
+        va = a["counters"].get(k, 0)
+        vb = b["counters"].get(k, 0)
+        if va or vb:
+            print(_row(k, va, vb))
+    # knob-level breakdown
+    knob_keys = sorted(
+        {k for k in list(a["counters"]) + list(b["counters"])
+         if k.startswith("knob_fired::")}
+    )
+    if knob_keys:
+        print("\nKnob firings:")
+        for k in knob_keys:
+            va = a["counters"].get(k, 0)
+            vb = b["counters"].get(k, 0)
+            if va or vb:
+                print(_row(k.replace("knob_fired::", ""), va, vb))
+    print(f"\nCost:  A=${a['cost_usd']:.4f}  B=${b['cost_usd']:.4f}  "
+          f"diff={b['cost_usd'] - a['cost_usd']:+.4f}")
+
+
 def _paper_calibration(horizon_minutes: int, out_dir: str) -> None:
     from agentic_investor.ops.calibration import build_calibration_report
 
@@ -1359,6 +1451,13 @@ def main() -> None:
     pr2.add_argument("--session", default=None,
                      help="path to a session dir; omit for most-recent session")
 
+    psd = sub.add_parser("paper-session-diff",
+                         help="compare two session.jsonl runs on knob "
+                              "firing counts + cost; quantifies whether a "
+                              "fix actually changed behavior")
+    psd.add_argument("session_a", help="path to earlier session dir")
+    psd.add_argument("session_b", help="path to later session dir")
+
     pc = sub.add_parser("paper-calibration",
                         help="LLM confidence calibration curve across all "
                              "filled orders (does 0.8 confidence win 80%%?)")
@@ -1465,6 +1564,8 @@ def main() -> None:
         _paper_attribution(args.sessions_dir, args.out)
     elif args.cmd == "paper-report":
         _paper_report(args.session)
+    elif args.cmd == "paper-session-diff":
+        _paper_session_diff(args.session_a, args.session_b)
     elif args.cmd == "paper-calibration":
         _paper_calibration(args.horizon_minutes, args.out_dir)
     elif args.cmd == "paper-test-event":

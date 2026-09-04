@@ -103,6 +103,12 @@ class LoopConfig:
     # the next natural batch window. Coalesces rapid re-fires observed on
     # 2026-09-04 (avg ~1 regen per 90s during heavy news periods).
     finbert_hot_signal_cooldown_seconds: int = 60
+    # Emit a `cost_alert` session event when the last-hour rolling LLM
+    # spend crosses this threshold. Steady-state Sept-4 was ~$0.20/hr;
+    # anything above $0.50/hr is either a promotion storm or a bug.
+    # Cheap heuristic so runaway churn is auto-flagged instead of
+    # requiring us to eyeball the running cost display.
+    cost_alert_per_hour_usd: float = 0.50
 
     # CLI override for profile.max_positions. None = use profile default (12
     # for moderate). Exposed as --max-positions so we can A/B without editing
@@ -244,6 +250,10 @@ class LoopState:
     # arrived. Rendered as "news-time $X, now $Y (±Z%)" so the LLM can
     # see whether the market already priced in the headline.
     last_news_price: dict[str, float] = field(default_factory=dict)
+    # Rolling in-memory (last 1h) list of (iso_ts, cost_usd) samples used
+    # to fire `cost_alert` events when spend crosses a threshold. Not
+    # persisted — a fresh 1h window on restart is fine.
+    cost_window: list[tuple[str, float]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Serialize for SQLite persistence."""
@@ -882,6 +892,33 @@ def run_tick(
             "completion_tokens": after.completion_tokens - stats_before.completion_tokens,
             "cost_usd": f"${cost:.4f}",
         })
+        # Rolling-hour cost alert: keep the last 60 min of tick costs,
+        # sum them, and emit a `cost_alert` event when we cross the
+        # threshold. Fires once when we cross and again each subsequent
+        # tick above the line (no dedup) so the alert is visible in the
+        # session tail rather than easy to miss.
+        if cost > 0:
+            now_iso = tick_at
+            state.cost_window.append((now_iso, cost))
+            try:
+                from datetime import UTC as _UTC
+                from datetime import datetime as _dt
+                from datetime import timedelta as _td
+                cutoff = _dt.now(_UTC) - _td(minutes=60)
+                state.cost_window = [
+                    (ts, c) for ts, c in state.cost_window
+                    if _dt.fromisoformat(ts.replace("Z", "+00:00")) >= cutoff
+                ]
+            except Exception:  # noqa: BLE001
+                pass
+            hourly = sum(c for _, c in state.cost_window)
+            if hourly > cfg.cost_alert_per_hour_usd:
+                session.log("cost_alert", {
+                    "hourly_cost_usd": round(hourly, 4),
+                    "threshold_usd": cfg.cost_alert_per_hour_usd,
+                    "window_samples": len(state.cost_window),
+                    "latest_tick_cost": round(cost, 4),
+                })
 
     # Two-tier: regenerate the recommendation once per day OR when the event
     # loop pushed news batch context onto state; reuse otherwise.
@@ -1508,6 +1545,22 @@ def run_tick(
                 for p in plans
             ],
         })
+        # Regen attribution: capture what trigger produced trades and on
+        # which tickers, so we can grep "how often does the trigger
+        # ticker actually appear as the decision subject" across
+        # sessions. Answers the recurring "MRK exited on PATH news"
+        # pattern (trigger != decision-subject) with data.
+        trigger_batch_tickers = sorted(batch_tickers_for_cooldown or set())
+        decision_tickers = sorted({p.ticker.upper() for p in plans})
+        overlap = set(trigger_batch_tickers) & set(decision_tickers)
+        session.log("regen_attribution", {
+            "rec_id": state.last_rec_id,
+            "trigger": trigger,
+            "trigger_tickers": trigger_batch_tickers,
+            "decision_tickers": decision_tickers,
+            "trigger_matches_decision": sorted(overlap),
+            "n_trades": len(plans),
+        })
     submitted = execute_trade_plan(
         plans, broker, rec_id=state.last_rec_id,
         stop_loss_pct=cfg.stop_loss_pct, take_profit_pct=cfg.take_profit_pct,
@@ -1517,6 +1570,13 @@ def run_tick(
     # order_submitted events - useful for auditing "why did the LLM buy?"
     rationale_by_ticker = {
         p.ticker.upper(): p.rationale for p in rec.allocation.positions
+    }
+    # Snapshot per-ticker unrealized P/L% so we can flag underwater adds
+    # (LLM doubling down on a name that's already in the red). Not a
+    # block - just data. If the pattern turns out to lose money over
+    # weeks, we'll add discipline; for now we want the frequency.
+    unrealized_pct_by_ticker = {
+        p.ticker.upper(): float(p.unrealized_pl_pct) for p in positions
     }
     for o in submitted:
         record_order(o, source="loop", rec_id=state.last_rec_id)
@@ -1541,6 +1601,18 @@ def run_tick(
                     session.log("no_news_buy", {
                         "ticker": tkr,
                         "qty": o.qty,
+                        "rationale": (rationale_by_ticker.get(tkr) or "")[:300],
+                    })
+                # Underwater-add audit: flag BUY trades that add to a name
+                # currently down more than 1% from average entry. Doubling
+                # down on losers is a well-known LLM failure mode; we
+                # observed it on IOT (-1.64%, +15sh add) today.
+                pl_pct = unrealized_pct_by_ticker.get(tkr)
+                if pl_pct is not None and pl_pct < -1.0:
+                    session.log("underwater_add", {
+                        "ticker": tkr,
+                        "qty": o.qty,
+                        "unrealized_pl_pct": round(pl_pct, 2),
                         "rationale": (rationale_by_ticker.get(tkr) or "")[:300],
                     })
     state.orders_submitted += len(submitted)

@@ -471,6 +471,10 @@ def create_app() -> FastAPI:
         # tried it and dropped it; don't also list it on-deck. Matches the
         # loop-side picker_exit_suppress behavior (task #109).
         exit_set = {t.upper() for t in exit_tickers}
+        # Promotion metadata for enrichment: same signals the LLM sees.
+        promoted_at = loop_state.get("promoted_at") or {}
+        last_news_price = loop_state.get("last_news_price") or {}
+        now_utc = _dt.now(_UTC)
         for tk in picker_tickers:
             if tk in held_set or tk in exit_set:
                 continue
@@ -480,13 +484,31 @@ def create_app() -> FastAPI:
             except Exception:  # noqa: BLE001
                 pass
             p = target_by_ticker.get(tk)
-            on_deck.append({
+            entry: dict = {
                 "ticker": tk,
                 "target_weight_pct": p.weight_pct if p else 0.0,
                 "target_dollars": p.dollars if p else 0.0,
                 "confidence": p.confidence if p else None,
                 "current_price": price,
-            })
+            }
+            promoted_iso = promoted_at.get(tk)
+            if promoted_iso:
+                try:
+                    p_dt = _dt.fromisoformat(promoted_iso)
+                    if p_dt.tzinfo is None:
+                        p_dt = p_dt.replace(tzinfo=_UTC)
+                    entry["promoted_min_ago"] = int(
+                        (now_utc - p_dt).total_seconds() / 60
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            news_px = last_news_price.get(tk)
+            if news_px and price:
+                entry["news_price"] = round(float(news_px), 2)
+                entry["price_change_pct"] = round(
+                    (price / float(news_px) - 1) * 100, 2
+                )
+            on_deck.append(entry)
 
         return {"held": held, "recent_exits": recent_exits, "on_deck": on_deck}
 
