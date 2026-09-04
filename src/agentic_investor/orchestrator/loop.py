@@ -208,6 +208,15 @@ class LoopState:
     # Most recent macro regime label. When the fresh MacroAgent call returns
     # a different label, that transition fires a regen.
     last_regime: str | None = None
+    # Staging area for news events that arrived since the last regen. On the
+    # next regen decision they're either attributed to a ticker delta (moved
+    # to news_effect_log) or dropped as non-actionable (barely-moved skip).
+    pending_news_events: list[dict] = field(default_factory=list)
+    # Per-ticker journal of news events that PROVED to move the book. Entries
+    # persist across regens with a TTL safety valve. Doubles as anti-ladder
+    # discipline signal in the prompt: LLM sees "SNOW: added 4 times on RBC/
+    # WF/MS/UBS notes, cumulative +14sh" and self-restrains at concentration.
+    news_effect_log: dict[str, list[dict]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Serialize for SQLite persistence."""
@@ -236,6 +245,10 @@ class LoopState:
             },
             "last_correlation_snapshot": dict(self.last_correlation_snapshot),
             "last_regime": self.last_regime,
+            "pending_news_events": [dict(e) for e in self.pending_news_events],
+            "news_effect_log": {
+                k: [dict(e) for e in v] for k, v in self.news_effect_log.items()
+            },
         }
 
     @classmethod
@@ -275,6 +288,11 @@ class LoopState:
                 d.get("last_correlation_snapshot") or {}
             ),
             last_regime=d.get("last_regime"),
+            pending_news_events=[dict(e) for e in (d.get("pending_news_events") or [])],
+            news_effect_log={
+                k: [dict(e) for e in v]
+                for k, v in (d.get("news_effect_log") or {}).items()
+            },
         )
 
 
@@ -318,6 +336,116 @@ def _technical_stance_changed(
         if prev and prev != cur:
             changes[t] = f"{prev} -> {cur}"
     return bool(changes), changes
+
+
+def _stage_pending_news(state, events, now) -> None:
+    """Add each incoming news event to the pending staging area.
+
+    Each entry captures ticker, ts, source, headline, and a short summary.
+    On the next regen decision the event either gets attributed to a ticker
+    delta and promoted into news_effect_log, or dropped if the LLM's own
+    barely-moved decision proved it non-actionable.
+    """
+    ts_iso = now.isoformat()
+    for e in events:
+        ticker = (e.ticker or "").upper()
+        if not ticker:
+            continue
+        state.pending_news_events.append({
+            "ts": ts_iso,
+            "ticker": ticker,
+            "source": (e.source or "")[:40],
+            "headline": (e.headline or "")[:200],
+            "summary": (e.summary or "")[:200],
+        })
+
+
+def _attribute_pending_news(state, new_rec, prev_rec, min_delta_pp: float) -> None:
+    """Promote pending news to news_effect_log when the ticker's rec delta
+    exceeded the threshold. Deltas are computed vs the previous rec's targets
+    (or vs zero if the ticker wasn't in the prior rec). Non-attributed
+    events are dropped - the LLM saw them and chose not to act.
+    """
+    if not state.pending_news_events:
+        return
+    new_targets = {
+        p.ticker.upper(): float(p.weight_pct) for p in new_rec.allocation.positions
+    }
+    prev_targets = {}
+    if prev_rec is not None:
+        prev_targets = {
+            p.ticker.upper(): float(p.weight_pct)
+            for p in prev_rec.allocation.positions
+        }
+    deltas = {}
+    for t in set(new_targets) | set(prev_targets):
+        d = new_targets.get(t, 0.0) - prev_targets.get(t, 0.0)
+        if abs(d) >= min_delta_pp:
+            deltas[t] = d
+    for event in state.pending_news_events:
+        ticker = event["ticker"]
+        delta = deltas.get(ticker)
+        if delta is None:
+            continue
+        entry = dict(event)
+        entry["delta_pp"] = round(delta, 2)
+        state.news_effect_log.setdefault(ticker, []).append(entry)
+    state.pending_news_events = []
+
+
+def _drop_pending_news(state) -> None:
+    """Clear pending events without attribution. Called when the LLM's own
+    decision (opinion_drift_skip=barely-moved) proved the batch non-actionable.
+    """
+    state.pending_news_events = []
+
+
+def _prune_news_effect_log(state, now, ttl_seconds: int = 86400) -> None:
+    """Age out effect-log entries older than TTL. Safety valve so stale
+    entries don't hang around forever if the LLM never revisits the ticker.
+    """
+    from datetime import datetime as _dt
+
+    cutoff = now.timestamp() - ttl_seconds
+    empty_keys = []
+    for ticker, entries in state.news_effect_log.items():
+        kept = []
+        for e in entries:
+            try:
+                ts_dt = _dt.fromisoformat(e["ts"])
+                if ts_dt.timestamp() >= cutoff:
+                    kept.append(e)
+            except Exception:  # noqa: BLE001
+                kept.append(e)  # keep if we can't parse
+        if kept:
+            state.news_effect_log[ticker] = kept
+        else:
+            empty_keys.append(ticker)
+    for k in empty_keys:
+        state.news_effect_log.pop(k, None)
+
+
+def _render_news_effect_log(state) -> str:
+    """Compact per-ticker journal for the allocator prompt. Each ticker gets
+    one line: "TKR: HH:MM source headline_short -> +Xpp | HH:MM ...".
+    Empty string when no ticker has any attributed entries.
+    """
+    if not state.news_effect_log:
+        return ""
+    lines: list[str] = []
+    for ticker in sorted(state.news_effect_log):
+        entries = state.news_effect_log[ticker]
+        if not entries:
+            continue
+        parts = []
+        for e in entries[-6:]:  # last 6 effective entries per ticker
+            ts_short = str(e.get("ts", ""))[11:16]  # "HH:MM"
+            head = (e.get("headline") or "")[:70]
+            delta = e.get("delta_pp")
+            delta_str = f" -> {delta:+.1f}pp" if delta is not None else ""
+            parts.append(f"{ts_short} {head}{delta_str}")
+        lines.append(f"{ticker}: " + " | ".join(parts))
+    return "\n".join(lines)
 
 
 def _held_ticker_set(broker) -> set[str]:
@@ -793,8 +921,19 @@ def run_tick(
                     load_recommendation as _load_for_anchor,
                 )
                 prev_rec_for_prompt = _load_for_anchor(state.last_rec_id)
+            # Prepend the per-ticker effect journal to the batch context so
+            # the LLM sees "you added SNOW 4 times already, cumulative +14sh"
+            # alongside the new batch events. Doubles as anti-ladder discipline.
+            journal = _render_news_effect_log(state)
+            combined_ctx = batch_ctx or ""
+            if journal:
+                combined_ctx = (
+                    "News-effect journal (past batches this session that moved the book):\n"
+                    + journal
+                    + ("\n\nCurrent batch:\n" + batch_ctx if batch_ctx else "")
+                )
             rec, tickers_used = _generate_recommendation(
-                cfg, news_batch_context=batch_ctx, pre_picked_tickers=pre_picked,
+                cfg, news_batch_context=combined_ctx, pre_picked_tickers=pre_picked,
                 previous_rec=prev_rec_for_prompt,
                 extra_tickers=promoted or None,
             )
@@ -897,6 +1036,10 @@ def run_tick(
                     rec = prev_rec
                     regenerated = False
                     fall_through_reduce_only = True
+                    # The LLM's own decision proved the pending news was
+                    # non-actionable. Drop the staging area so those events
+                    # never enter the effect log.
+                    _drop_pending_news(state)
                 else:
                     _log_tick_cost()
                     return TickResult(
@@ -937,6 +1080,10 @@ def run_tick(
                 except Exception as e:  # noqa: BLE001
                     logger.debug("correlation snapshot failed: %s", e)
                 regenerated = True
+                # Attribute pending news to the tickers whose targets shifted
+                # enough to be considered driven by this batch. Non-attributed
+                # events drop; attributed ones become the persistent journal.
+                _attribute_pending_news(state, rec, prev_rec, min_delta_pp=1.0)
                 try:
                     from agentic_investor.tools.paper_store import save_loop_state
                     save_loop_state(state.to_dict())
@@ -971,6 +1118,10 @@ def run_tick(
                 s.ticker.upper(): s.stance for s in rec.technical_signals
             }
             regenerated = True
+            # First rec of the day, no prev to diff against - attribute
+            # pending news against a zero baseline so opening trades still
+            # produce journal entries.
+            _attribute_pending_news(state, rec, None, min_delta_pp=1.0)
             try:
                 from agentic_investor.tools.paper_store import save_loop_state
                 save_loop_state(state.to_dict())
@@ -1384,6 +1535,10 @@ def run_event_loop(
                     entries = state.news_source_urls.setdefault(key, [])
                     if not any(u == url_key for u, _ in entries):
                         entries.append((url_key, ts_iso))
+                # Also stage them for effect-log attribution on the next
+                # regen decision.
+                _stage_pending_news(state, new_events, now)
+            _prune_news_effect_log(state, now)
             ingest(decision_state, new_events, now)
 
             fire, reason = should_fire(decision_state, now)
