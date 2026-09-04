@@ -52,7 +52,12 @@ risk tolerance, and target, produce a paper-portfolio allocation.
 # Hard rules (output MUST satisfy)
 - All weights, including cash_pct, must sum to 100.
 - No single position weight may exceed the profile's max_single_pct cap.
-- cash_pct must be at least the profile's cash_floor_pct.
+- **cash_pct MUST be at least the profile's cash_floor_pct.** Positions
+  must SUM to at most (100 - cash_floor_pct). If your candidate positions
+  would leave less than cash_floor_pct in cash, TRIM the lowest-conviction
+  ones proportionally BEFORE emitting the allocation. Do not rely on
+  downstream repair to enforce the floor - your output is graded
+  first-pass and repair introduces sub-optimal trims.
 - For each position, dollars = amount * weight_pct / 100; same for cash.
 - Every position MUST include a `confidence` field in [0.0, 1.0].
   Do NOT omit it. Missing confidence disables downstream risk controls.
@@ -556,6 +561,19 @@ def _messages(state: GraphState) -> list[dict]:
 
     slow_prefix = USER_PREAMBLE + "\n\n" + "\n\n".join(slow_sections)
     fast_tail = "\n\n".join(fast_sections) + "\n\nProduce a valid Allocation."
+    # Diagnostic for cache-hit stagnation (#105). Small prompts drop to 5-6%
+    # hit rate while big ones hit 25%+; suspicion is the slow-prefix
+    # content shifts tick-to-tick. Log a short hash + byte length so we
+    # can diff across regens and see WHAT is drifting.
+    try:
+        import hashlib as _hashlib
+        _sp_hash = _hashlib.sha1(slow_prefix.encode("utf-8")).hexdigest()[:12]
+        logger.debug(
+            "prompt shape: slow_prefix_bytes=%d slow_prefix_hash=%s fast_tail_bytes=%d",
+            len(slow_prefix), _sp_hash, len(fast_tail),
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     # SYSTEM caches independently (its own breakpoint). USER text splits into
     # slow (Sections 1-3) which gets a cache_control marker, and fast

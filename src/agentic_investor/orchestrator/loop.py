@@ -992,6 +992,13 @@ def run_tick(
             rec = _load_prev(state.last_rec_id)
             regenerated = False
             tickers_used = state.frozen_picker_tickers or []
+            # Refresh the cooldown clock even though we skipped the LLM
+            # call: from the hot-signal fast-path's perspective this is
+            # still a "decision was made this instant" event. Missing
+            # this update caused the 2026-09-04 gap where hot news
+            # firing 5-7s after a pre-check-skipped tick bypassed the
+            # 60s cooldown.
+            state.last_regen_at = now
         else:
             # Delta-form prompt anchor (non-first-day only).
             prev_rec_for_prompt = None
@@ -1829,8 +1836,15 @@ def run_event_loop(
                         if state.frozen_picker_tickers is None:
                             state.frozen_picker_tickers = []
                         existing = {t.upper() for t in state.frozen_picker_tickers}
+                        # Whitelist filter: micro-caps that pass the news
+                        # bypass keyword check but aren't in the S&P
+                        # actionable set often error every regen at the
+                        # yfinance boundary (XTND, VBNK, PDEX, ...). Same
+                        # gate the 0w news-body promotion path already uses.
+                        from agentic_investor.universes import is_actionable_ticker
                         newly_promoted = [
-                            t for t in promoted_tickers if t not in existing
+                            t for t in promoted_tickers
+                            if t not in existing and is_actionable_ticker(t)
                         ]
                         for t in newly_promoted:
                             state.frozen_picker_tickers.append(t)
