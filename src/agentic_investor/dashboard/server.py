@@ -429,7 +429,7 @@ def create_app() -> FastAPI:
             for p in positions
         ]
 
-        since = str(_dt.now(_UTC) - _td(hours=24))
+        since = str(_dt.now(_UTC) - _td(hours=2))
         exit_tickers = [
             t for t in recent_sold_tickers(since_iso=since) if t not in held_set
         ]
@@ -467,8 +467,12 @@ def create_app() -> FastAPI:
         picker_tickers = [
             t.upper() for t in (loop_state.get("frozen_picker_tickers") or [])
         ]
+        # Same-session dedup: if a ticker shows in recent_exits it means we
+        # tried it and dropped it; don't also list it on-deck. Matches the
+        # loop-side picker_exit_suppress behavior (task #109).
+        exit_set = {t.upper() for t in exit_tickers}
         for tk in picker_tickers:
-            if tk in held_set:
+            if tk in held_set or tk in exit_set:
                 continue
             price = None
             try:
@@ -659,7 +663,7 @@ def create_app() -> FastAPI:
                     recent_sold_tickers,
                 )
 
-                since = str(_dt.now(_UTC) - _td(hours=24))
+                since = str(_dt.now(_UTC) - _td(hours=2))
                 for t in recent_sold_tickers(since_iso=since):
                     symbol_set.add(t)
             except Exception:  # noqa: BLE001

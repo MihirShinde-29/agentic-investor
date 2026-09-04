@@ -90,6 +90,19 @@ class LoopConfig:
     # model download is ~440MB.
     finbert_prefilter_enabled: bool = False
     finbert_min_delta: float = 0.15
+    # Per-headline fast-path: when any single incoming headline scores above
+    # this abs-threshold, force-close the batch window and fire the regen
+    # immediately. Avoids the dilution failure where 1 strong signal averages
+    # with N neutral notes in the aggregate. Only active when the prefilter
+    # itself is enabled. 0.6 corresponds to a highly-confident directional
+    # sentiment (finBERT rarely emits >0.6 on ambient analyst chatter).
+    finbert_immediate_threshold: float = 0.6
+    # Post-regen cooldown before hot-signal fast-path can fire another regen.
+    # Without this, hot news arriving 5s after a regen just finished forces
+    # a fresh LLM call while the pending buffer would have picked it up on
+    # the next natural batch window. Coalesces rapid re-fires observed on
+    # 2026-09-04 (avg ~1 regen per 90s during heavy news periods).
+    finbert_hot_signal_cooldown_seconds: int = 60
 
     # CLI override for profile.max_positions. None = use profile default (12
     # for moderate). Exposed as --max-positions so we can A/B without editing
@@ -131,6 +144,19 @@ class LoopConfig:
     # Regime-change trigger: fire a regen when MacroAgent's regime label
     # transitions (bull <-> bear <-> sideways <-> high_vol).
     regime_change_trigger_enabled: bool = True
+
+    # Suppress the picker's frozen on-deck offer for tickers we fully-exited
+    # within this window. Prevents the "in-out-in same session" whipsaw where
+    # the picker keeps offering back a name the LLM just decided to drop.
+    # Scoped to intraday (60 min default) so overnight re-considers still work.
+    picker_exit_suppress_minutes: int = 60
+
+    # Hard cap on frozen_picker_tickers to bound prompt-size growth from
+    # #104 bypass promotions. Observed 2026-09-04 the list ballooned 12 → 39
+    # in 30 min, doubling per-regen prompt tokens and collapsing cache hits
+    # to 0-6%. When promotion would push the list past the cap, drop the
+    # oldest-promoted names first (held/originally-picked names are kept).
+    max_frozen_picker_size: int = 25
 
     # Ops toggles
     dry_run: bool = False
@@ -205,6 +231,19 @@ class LoopState:
     # discipline signal in the prompt: LLM sees "SNOW: added 4 times on RBC/
     # WF/MS/UBS notes, cumulative +14sh" and self-restrains at concentration.
     news_effect_log: dict[str, list[dict]] = field(default_factory=dict)
+    # Ticker -> ISO timestamp of when it was promoted to on-deck via
+    # materiality_bypass_promoted. Feeds the on-deck section of the LLM
+    # prompt so the model can judge staleness ("42m ago, no follow-up →
+    # nominate for on_deck_purge"). Held tickers are not tracked here.
+    promoted_at: dict[str, str] = field(default_factory=dict)
+    # Parallel to promoted_at: ticks_run value at promotion time. Lets the
+    # prompt render "promoted at tick 89 (now tick 145) = 56 ticks stale"
+    # alongside the minutes-ago figure.
+    promoted_at_tick: dict[str, int] = field(default_factory=dict)
+    # Ticker -> price snapshot when the ticker's MOST RECENT news event
+    # arrived. Rendered as "news-time $X, now $Y (±Z%)" so the LLM can
+    # see whether the market already priced in the headline.
+    last_news_price: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Serialize for SQLite persistence."""
@@ -237,6 +276,9 @@ class LoopState:
             "news_effect_log": {
                 k: [dict(e) for e in v] for k, v in self.news_effect_log.items()
             },
+            "promoted_at": dict(self.promoted_at),
+            "promoted_at_tick": dict(self.promoted_at_tick),
+            "last_news_price": dict(self.last_news_price),
         }
 
     @classmethod
@@ -280,6 +322,11 @@ class LoopState:
             news_effect_log={
                 k: [dict(e) for e in v]
                 for k, v in (d.get("news_effect_log") or {}).items()
+            },
+            promoted_at=dict(d.get("promoted_at") or {}),
+            promoted_at_tick=dict(d.get("promoted_at_tick") or {}),
+            last_news_price={
+                k: float(v) for k, v in (d.get("last_news_price") or {}).items()
             },
         )
 
@@ -444,12 +491,34 @@ def _held_ticker_set(broker) -> set[str]:
         return set()
 
 
+def _same_session_exits(broker, *, since_minutes: int) -> set[str]:
+    """Uppercase tickers that were sold in the last N minutes AND currently
+    show zero shares. Used to suppress the picker's on-deck offer for names
+    the LLM decided to drop this session, so the same name doesn't get
+    re-baited on every regen.
+    """
+    try:
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from agentic_investor.tools.paper_store import recent_sold_tickers
+        since = (_dt.now(_UTC) - _td(minutes=since_minutes)).isoformat()
+        sold = {t.upper() for t in recent_sold_tickers(since_iso=since)}
+    except Exception:  # noqa: BLE001
+        return set()
+    held = _held_ticker_set(broker)
+    return sold - held
+
+
 def _material_ticker_set(state, broker) -> set[str]:
     """Union of tickers we care about: held + picker-frozen + recent exits.
 
     A news batch touching only non-material tickers isn't worth burning an
-    LLM regen on. Recent exits stay material for 24h because the LLM might
-    legitimately want to re-open them on new information.
+    LLM regen on. Recent exits stay material for 2h so a same-session
+    whipsaw-back can still be prompted by real news, but stale exits from
+    yesterday no longer bloat the material set (was 24h → 2h on 2026-09-04
+    to reduce noise wake-ups).
     """
     material = _held_ticker_set(broker)
     for t in (state.frozen_picker_tickers or []):
@@ -460,7 +529,7 @@ def _material_ticker_set(state, broker) -> set[str]:
         from datetime import timedelta as _td
 
         from agentic_investor.tools.paper_store import recent_sold_tickers
-        since = (_dt.now(_UTC) - _td(hours=24)).isoformat()
+        since = (_dt.now(_UTC) - _td(hours=2)).isoformat()
         for t in recent_sold_tickers(since_iso=since):
             material.add(t.upper())
     except Exception:  # noqa: BLE001 - recent-exits lookup is best-effort
@@ -699,6 +768,7 @@ def _generate_recommendation(
     pre_picked_tickers: list[str] | None = None,
     previous_rec: Recommendation | None = None,
     extra_tickers: list[str] | None = None,
+    on_deck_watchlist: list[str] | None = None,
 ) -> tuple[Recommendation, list[str]]:
     """Run the orchestrator once for today's decision. Uses the M6 profile.
 
@@ -758,6 +828,7 @@ def _generate_recommendation(
         req, profile=profile,
         news_batch_context=news_batch_context,
         previous_allocation=prev_alloc,
+        on_deck_watchlist=on_deck_watchlist,
     )
     return rec, final_tickers
 
@@ -840,6 +911,26 @@ def run_tick(
         # regens don't reshuffle the ticker set.
         is_new_day = state.last_rec_date != today
         pre_picked = None if is_new_day else state.frozen_picker_tickers
+        # Suppress tickers we fully-exited within the last N min so the picker
+        # doesn't keep offering the same name back and the LLM doesn't keep
+        # re-considering it. Root cause of the ZS/TRV in-out-in whipsaws
+        # observed 2026-09-04.
+        if pre_picked and cfg.picker_exit_suppress_minutes > 0:
+            suppressed = _same_session_exits(
+                broker, since_minutes=cfg.picker_exit_suppress_minutes,
+            )
+            if suppressed:
+                filtered = [t for t in pre_picked if t.upper() not in suppressed]
+                if len(filtered) != len(pre_picked) and session:
+                    session.log("picker_exit_suppressed", {
+                        "dropped": sorted(
+                            t.upper() for t in pre_picked
+                            if t.upper() in suppressed
+                        ),
+                        "n_kept": len(filtered),
+                        "window_min": cfg.picker_exit_suppress_minutes,
+                    })
+                pre_picked = filtered or None
 
         # 0w: news-body beneficiary promotion. Extract every ticker named in
         # the batch (both Alpaca-tagged and body-extracted, per 0p fan-out),
@@ -920,12 +1011,95 @@ def run_tick(
                     + journal
                     + ("\n\nCurrent batch:\n" + batch_ctx if batch_ctx else "")
                 )
+            # On-deck watchlist with staleness signals for LLM purge judgment:
+            # each entry gets promoted-age + minutes-since-last-news. LLM can
+            # nominate stale ones via rec.allocation.on_deck_purge.
+            on_deck_now = list(state.frozen_picker_tickers or [])
+            on_deck_meta: list[dict] = []
+            current_tick = state.ticks_run
+            for t in on_deck_now:
+                up = t.upper()
+                entry: dict = {"ticker": up}
+                promoted_iso = state.promoted_at.get(up)
+                if promoted_iso:
+                    try:
+                        p_dt = datetime.fromisoformat(promoted_iso)
+                        if p_dt.tzinfo is None:
+                            p_dt = p_dt.replace(tzinfo=UTC)
+                        entry["promoted_min_ago"] = int(
+                            (now - p_dt).total_seconds() / 60
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                p_tick = state.promoted_at_tick.get(up)
+                if p_tick is not None:
+                    entry["promoted_ticks_ago"] = current_tick - p_tick
+                # Price-at-news vs current price so the LLM can see whether
+                # the market already reacted to the story.
+                news_px = state.last_news_price.get(up)
+                if news_px:
+                    try:
+                        now_px = float(price_fetcher(up))
+                        entry["news_price"] = round(news_px, 2)
+                        entry["now_price"] = round(now_px, 2)
+                        if news_px > 0:
+                            entry["price_change_pct"] = round(
+                                (now_px / news_px - 1) * 100, 2
+                            )
+                    except Exception:  # noqa: BLE001
+                        pass
+                # Last-news lookup from news_source_urls (already tracked).
+                news_entries = state.news_source_urls.get(up) or []
+                if news_entries:
+                    last_ts = max(ts for _, ts in news_entries)
+                    try:
+                        n_dt = datetime.fromisoformat(last_ts)
+                        if n_dt.tzinfo is None:
+                            n_dt = n_dt.replace(tzinfo=UTC)
+                        entry["last_news_min_ago"] = int(
+                            (now - n_dt).total_seconds() / 60
+                        )
+                        entry["news_count"] = len(news_entries)
+                    except Exception:  # noqa: BLE001
+                        pass
+                on_deck_meta.append(entry)
             rec, tickers_used = _generate_recommendation(
                 cfg, news_batch_context=combined_ctx, pre_picked_tickers=pre_picked,
                 previous_rec=prev_rec_for_prompt,
                 extra_tickers=promoted or None,
+                on_deck_watchlist=on_deck_meta,
             )
             state.last_batch_fingerprint = batch_fp
+            # Honor the LLM's on-deck purge nominations. Never drops held
+            # tickers (safety) and never drops the tickers we're about to
+            # trade in this rec (they're active decisions).
+            purge = getattr(rec.allocation, "on_deck_purge", None) or []
+            if purge and state.frozen_picker_tickers:
+                held_now = _held_ticker_set(broker)
+                active_targets = {
+                    p.ticker.upper() for p in rec.allocation.positions
+                }
+                purge_set = {t.upper() for t in purge}
+                # Never purge held or actively-targeted tickers.
+                effective_purge = purge_set - held_now - active_targets
+                if effective_purge:
+                    before = len(state.frozen_picker_tickers)
+                    state.frozen_picker_tickers = [
+                        t for t in state.frozen_picker_tickers
+                        if t.upper() not in effective_purge
+                    ]
+                    if session:
+                        session.log("on_deck_purge_applied", {
+                            "rec_id": state.last_rec_id,
+                            "purged": sorted(effective_purge),
+                            "requested": sorted(purge_set),
+                            "size_before": before,
+                            "size_after": len(state.frozen_picker_tickers),
+                        })
+                        session.log("knob_fired", {
+                            "name": "on_deck_purge",
+                            "reason": "llm-nominated",
+                        })
 
         # Opinion-drift filter: compare new rec to previous; skip on LLM
         # noise (barely-moved) or over-swing (avg-drift / max-delta).
@@ -1256,6 +1430,61 @@ def run_tick(
                 "name": "fall_through", "reason": "reduce_only",
             })
 
+    # Walk-back re-derives from `positions()`, which reports shares OWNED but
+    # not shares HELD_FOR_ORDERS. When a prior tick's sell is still in flight
+    # the walk-back "sees" full qty and re-submits an identical sell that
+    # Alpaca rejects with insufficient qty. Drop any (ticker, side) already
+    # covered by an open order.
+    if fall_through_reduce_only and plans:
+        try:
+            open_orders = broker.list_orders(status="open")
+        except Exception:  # noqa: BLE001
+            open_orders = []
+        in_flight = {(o.ticker.upper(), o.side) for o in open_orders}
+        n_before = len(plans)
+        plans = [p for p in plans if (p.ticker.upper(), p.side) not in in_flight]
+        n_dropped = n_before - len(plans)
+        if n_dropped and session:
+            session.log("fall_through_in_flight_dropped", {
+                "rec_id": state.last_rec_id,
+                "n_dropped": n_dropped,
+                "n_kept": len(plans),
+            })
+            session.log("knob_fired", {
+                "name": "fall_through", "reason": "in_flight",
+            })
+
+    if not plans and session and regenerated:
+        # A fresh rec produced zero trades because every diff sits under the
+        # band. Log what was suppressed so silent no-ops on new-position
+        # proposals (e.g. CRM 5% target -> 0% held == 5pp == band edge) don't
+        # disappear from the audit trail.
+        allocation_base_for_diag = allocation_base if allocation_base else 1.0
+        suppressed = []
+        for pos in rec.allocation.positions:
+            tk = pos.ticker.upper()
+            target_dollars = pos.weight_pct / 100.0 * allocation_base_for_diag
+            current_dollars = positions_dollars.get(tk, 0.0)
+            delta_dollars = target_dollars - current_dollars
+            delta_pp = pos.weight_pct - (
+                current_dollars / allocation_base_for_diag * 100.0
+                if allocation_base_for_diag > 0 else 0.0
+            )
+            if abs(delta_pp) >= 1.0:
+                suppressed.append({
+                    "ticker": tk,
+                    "target_pct": round(pos.weight_pct, 2),
+                    "delta_pp": round(delta_pp, 2),
+                    "delta_dollars": round(delta_dollars, 2),
+                })
+        if suppressed:
+            session.log("rebalance_skipped_all_below_band", {
+                "rec_id": state.last_rec_id,
+                "band_abs_pct": cfg.band_abs_pct,
+                "band_rel_pct": cfg.band_rel_pct,
+                "suppressed": suppressed,
+            })
+
     if cfg.dry_run or not plans:
         _log_tick_cost()
         return TickResult(
@@ -1330,9 +1559,10 @@ def _sleep_until(when_iso: str, *, now: datetime | None = None) -> None:
     if target.tzinfo is None:
         target = target.replace(tzinfo=UTC)
     delta = (target - now).total_seconds()
-    if delta > 0:
-        # Cap sleep at 15 min per call so a SIGINT lands quickly.
-        time.sleep(min(delta, 900))
+    # Cap at 15 min per call so SIGINT lands quickly, floor at 1s so we don't
+    # tight-spin when the broker clock lags the wall clock by <1s at the bell
+    # (which shows up as dozens of market_closed events per second at 09:30).
+    time.sleep(max(1.0, min(delta, 900)))
 
 
 def run_event_loop(
@@ -1451,12 +1681,93 @@ def run_event_loop(
                     logger.warning("reconcile_orders failed: %s", e)
                 last_reconcile_at = now
             new_events = drain_queue(event_q)
+            hot_signal_fire = False
             if new_events and session:
                 for e in new_events:
                     session.log("news_received", {
                         "ticker": e.ticker,
                         "headline": e.headline[:120],
                     })
+            # Snapshot price-at-news for on-deck / held tickers so the LLM
+            # can see "did the market already price this in?" when judging
+            # staleness. Best-effort: single last-price wins if multiple
+            # events on one ticker arrive in the same drain.
+            if new_events:
+                try:
+                    from agentic_investor.tools.paper_broker import get_latest_price
+                except Exception:  # noqa: BLE001
+                    get_latest_price = None
+                tracked = set(t.upper() for t in (state.frozen_picker_tickers or []))
+                tracked |= _held_ticker_set(broker)
+                seen_now: set[str] = set()
+                if get_latest_price is not None:
+                    for e in new_events:
+                        tk = (e.ticker or "").upper()
+                        if not tk or tk in seen_now or tk not in tracked:
+                            continue
+                        try:
+                            state.last_news_price[tk] = float(get_latest_price(tk))
+                            seen_now.add(tk)
+                        except Exception:  # noqa: BLE001
+                            pass
+            # Per-headline finBERT fast-path: if any single arriving headline
+            # scores above the immediate threshold, force-close the batch
+            # window and fire NOW instead of waiting for the aggregate to
+            # possibly dilute the signal. Only active when finbert prefilter
+            # is enabled (uses the same pipeline).
+            if new_events and cfg.finbert_prefilter_enabled:
+                try:
+                    from agentic_investor.orchestrator.finbert_prefilter import (
+                        score_single,
+                    )
+                    for e in new_events:
+                        headline = str(getattr(e, "headline", "") or "")
+                        summary = str(getattr(e, "summary", "") or "")[:200]
+                        combined = f"{headline}. {summary}" if summary else headline
+                        score = score_single(combined)
+                        if score is None:
+                            continue
+                        if abs(score) >= cfg.finbert_immediate_threshold:
+                            # Cooldown: if a regen just fired recently, don't
+                            # force another one — event is already in the
+                            # pending buffer and will be picked up by the
+                            # next natural batch closure. Coalesces the
+                            # "hot news arrives 5s after regen completed"
+                            # pattern.
+                            recent_regen = (
+                                state.last_regen_at is not None
+                                and (now - state.last_regen_at).total_seconds()
+                                    < cfg.finbert_hot_signal_cooldown_seconds
+                            )
+                            if recent_regen:
+                                if session:
+                                    session.log("finbert_hot_signal_deferred", {
+                                        "ticker": e.ticker,
+                                        "headline": headline[:120],
+                                        "score": round(score, 3),
+                                        "seconds_since_regen": round(
+                                            (now - state.last_regen_at).total_seconds(),
+                                            1,
+                                        ),
+                                        "cooldown_seconds":
+                                            cfg.finbert_hot_signal_cooldown_seconds,
+                                    })
+                                break  # still one hot per drain
+                            hot_signal_fire = True
+                            if session:
+                                session.log("finbert_hot_signal", {
+                                    "ticker": e.ticker,
+                                    "headline": headline[:120],
+                                    "score": round(score, 3),
+                                    "threshold": cfg.finbert_immediate_threshold,
+                                })
+                                session.log("knob_fired", {
+                                    "name": "finbert_prefilter",
+                                    "reason": "hot-signal-immediate",
+                                })
+                            break  # one hot headline is enough
+                except Exception as ex:  # noqa: BLE001
+                    logger.debug("finbert per-headline fast-path error: %s", ex)
             # Track distinct news URLs per ticker for the convergence bypass.
             # Same URL fanned out across many tickers still counts as one
             # signal per ticker.
@@ -1477,6 +1788,13 @@ def run_event_loop(
             ingest(decision_state, new_events, now)
 
             fire, reason = should_fire(decision_state, now)
+            # Per-headline hot-signal fast-path overrides the batch-window
+            # closure: force fire now with an explicit reason so the
+            # aggregate finBERT prefilter below doesn't dilute+skip the
+            # signal we just proved was hot.
+            if hot_signal_fire:
+                fire = True
+                reason = "finbert-hot-headline"
 
             # Materiality gate: drop news-batch fires whose tickers don't
             # intersect with the tickers we care about (held + on-deck +
@@ -1496,15 +1814,78 @@ def run_event_loop(
                         if _is_high_signal_headline(e.headline or "")
                     ]
                     if high_signal_events:
+                        # Promote high-signal non-material tickers to on-deck
+                        # instead of firing a full regen. Keeps the discovery
+                        # pipeline alive (LLM will see them on its next
+                        # naturally-triggered regen) without burning $0.006
+                        # per ambient PT-change headline. Fixes the leak that
+                        # dropped MRK on unrelated PATH news at 11:55 today.
+                        promoted_tickers = sorted({
+                            (e.ticker or "").upper()
+                            for e in high_signal_events
+                        })
+                        # Append to frozen_picker_tickers so subsequent regens
+                        # include them via pre_picked. Cap to keep prompt bounded.
+                        if state.frozen_picker_tickers is None:
+                            state.frozen_picker_tickers = []
+                        existing = {t.upper() for t in state.frozen_picker_tickers}
+                        newly_promoted = [
+                            t for t in promoted_tickers if t not in existing
+                        ]
+                        for t in newly_promoted:
+                            state.frozen_picker_tickers.append(t)
+                        # Record promotion timestamps + tick-count for the
+                        # newly added tickers. LLM sees both time-ago and
+                        # tick-delta in the on-deck section so it can judge
+                        # staleness in whichever framing is more meaningful.
+                        now_iso = now.isoformat()
+                        current_tick = state.ticks_run
+                        for t in newly_promoted:
+                            state.promoted_at[t.upper()] = now_iso
+                            state.promoted_at_tick[t.upper()] = current_tick
+                        # Enforce the hard cap: if the list overflows, drop
+                        # oldest-promoted first. Held tickers and originally
+                        # picked names are earlier in the list so they survive
+                        # via FIFO ordering (append-at-end promotion).
+                        dropped_by_cap = []
+                        cap = cfg.max_frozen_picker_size
+                        held_now = _held_ticker_set(broker)
+                        while len(state.frozen_picker_tickers) > cap:
+                            # Drop from index 0 (oldest) BUT skip held tickers
+                            # — those are the real book, never drop them.
+                            drop_idx = None
+                            for i, t in enumerate(state.frozen_picker_tickers):
+                                if t.upper() not in held_now:
+                                    drop_idx = i
+                                    break
+                            if drop_idx is None:
+                                break  # nothing to drop (all held)
+                            dropped_by_cap.append(
+                                state.frozen_picker_tickers.pop(drop_idx)
+                            )
                         if session:
-                            session.log("materiality_bypass", {
-                                "reason": "high_signal_news",
-                                "tickers": sorted({
-                                    (e.ticker or "").upper()
-                                    for e in high_signal_events
-                                }),
+                            session.log("materiality_bypass_promoted", {
+                                "reason": "high_signal_non_material",
+                                "tickers": promoted_tickers,
+                                "newly_added": newly_promoted,
                                 "n_events": len(high_signal_events),
+                                "cap_dropped": dropped_by_cap,
+                                "cap": cap,
+                                "size": len(state.frozen_picker_tickers),
                             })
+                            session.log("knob_fired", {
+                                "name": "materiality",
+                                "reason": "promoted_to_on_deck",
+                            })
+                        # Keep the news in decision_state.unprocessed so it
+                        # renders in the next natural batch context. Don't
+                        # fire the regen now — that's the whole point.
+                        # Advance last_fire_at so the next iteration doesn't
+                        # immediately re-trigger the natural fire path on
+                        # the same buffer.
+                        fire = False
+                        reason = ""
+                        decision_state.last_fire_at = now
                     else:
                         if session:
                             session.log("materiality_skip", {
@@ -1669,7 +2050,10 @@ def run_event_loop(
                     # P1 #3: finBERT pre-filter. Score the batch locally and
                     # skip the LLM regen if aggregate sentiment barely moved
                     # from the last fired batch. Fully opt-in via config.
-                    if cfg.finbert_prefilter_enabled:
+                    # Skip the aggregate check entirely when a hot per-headline
+                    # signal already forced the fire — the whole point of the
+                    # fast-path is to not let dilution suppress the trigger.
+                    if cfg.finbert_prefilter_enabled and not hot_signal_fire:
                         try:
                             from agentic_investor.orchestrator.finbert_prefilter import (
                                 score_events,

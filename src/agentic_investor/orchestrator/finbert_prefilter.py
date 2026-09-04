@@ -120,6 +120,29 @@ def score_headlines(headlines: list[str]) -> SentimentScore | None:
     )
 
 
+def score_single(headline: str) -> float | None:
+    """Return signed sentiment for one headline in [-1, 1], or None if the
+    pipeline isn't available. Cheap enough (~50ms cpu) to run inline as
+    news arrives so hot signals can force-fire the LLM without waiting
+    for the batch window to close.
+    """
+    pipe = _get_pipeline()
+    if pipe is None or not headline:
+        return None
+    try:
+        row = pipe([headline], truncation=True, max_length=128)[0]  # type: ignore[misc]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("finBERT single-headline scoring failed: %s", e)
+        return None
+    entries = row if isinstance(row, list) else [row]
+    weighted = 0.0
+    for entry in entries:
+        weighted += float(entry.get("score", 0.0)) * _label_to_signed(
+            str(entry.get("label", ""))
+        )
+    return weighted
+
+
 def score_events(events: list[NewsEvent]) -> SentimentScore | None:
     """Score a batch of NewsEvents (uses headline + summary snippet)."""
     if not events:

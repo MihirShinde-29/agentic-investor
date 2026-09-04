@@ -233,11 +233,17 @@ def recent_sold_tickers(
     Used by the correlation-hint block so the allocator sees that a
     ticker it's about to buy correlates with something we recently exited
     (hidden factor re-exposure).
+
+    Comparison uses `datetime()` on both sides so mixed separator formats
+    (stored 'YYYY-MM-DD HH:MM:SS+00:00' vs iso 'YYYY-MM-DDTHH:MM:SS+00:00'
+    from callers using .isoformat()) don't silently fail via string compare
+    (' ' 0x20 < 'T' 0x54 flips the ordering — cost us a session of "no
+    recent exits found" false negatives).
     """
     with _connect(_resolve_url(url)) as conn:
         rows = conn.execute(
             "SELECT DISTINCT UPPER(ticker) FROM paper_orders "
-            "WHERE side = 'sell' AND submitted_at >= ?",
+            "WHERE side = 'sell' AND datetime(submitted_at) >= datetime(?)",
             (since_iso,),
         ).fetchall()
     return [r[0] for r in rows]

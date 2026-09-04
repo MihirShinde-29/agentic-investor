@@ -49,6 +49,12 @@ class Allocation(BaseModel):
     cash_pct: float = Field(ge=0.0, le=100.0)
     cash_dollars: float = Field(ge=0.0)
     portfolio_rationale: str
+    # LLM-nominated tickers to drop from the on-deck watchlist. Populated
+    # when the LLM judges a promoted-but-not-acted-on candidate no longer
+    # worth watching (stale news, thesis moved, no follow-up flow). Loop
+    # removes these from state.frozen_picker_tickers after honoring the
+    # trade plan. Empty by default — no purge nominated.
+    on_deck_purge: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod

@@ -508,6 +508,52 @@ def _messages(state: GraphState) -> list[dict]:
             f"## 7. Breaking-news events (from live stream)\n{batch_ctx}"
         )
 
+    # On-deck watchlist with staleness signals: each entry may include
+    # promoted_min_ago, last_news_min_ago, news_count. LLM uses these to
+    # judge which tickers are still thesis-relevant vs stale.
+    on_deck_meta = state.get("on_deck_watchlist") or []
+    held_names = {p.ticker.upper() for p in (prev_alloc.positions if prev_alloc else [])}
+
+    def _fmt_entry(e):
+        if isinstance(e, str):
+            return f"  - {e.upper()}"
+        tk = str(e.get("ticker", "")).upper()
+        parts = []
+        if "promoted_min_ago" in e:
+            tick_part = ""
+            if "promoted_ticks_ago" in e:
+                tick_part = f", {e['promoted_ticks_ago']} ticks ago"
+            parts.append(f"promoted {e['promoted_min_ago']}m ago{tick_part}")
+        if "last_news_min_ago" in e:
+            n = e.get("news_count", 1)
+            parts.append(
+                f"last news {e['last_news_min_ago']}m ago ({n} total)"
+            )
+        if "news_price" in e and "now_price" in e:
+            pct = e.get("price_change_pct", 0.0)
+            sign = "+" if pct >= 0 else ""
+            parts.append(
+                f"price ${e['news_price']} → ${e['now_price']} ({sign}{pct}%)"
+            )
+        tail = f" — {', '.join(parts)}" if parts else ""
+        return f"  - {tk}{tail}"
+
+    on_deck_candidates = [
+        e for e in on_deck_meta
+        if (str(e.get("ticker", "")) if isinstance(e, dict) else str(e)).upper()
+            not in held_names
+    ]
+    if on_deck_candidates:
+        fast_sections.append(
+            "## 8. On-deck watchlist (promoted candidates, not currently held)\n"
+            + "\n".join(_fmt_entry(e) for e in on_deck_candidates)
+            + "\n\nEach entry shows how long ago the ticker was promoted "
+            + "and when its most recent news arrived. You can list any "
+            + "you consider no longer worth watching in `on_deck_purge` "
+            + "and the loop will drop them from the watchlist. This is "
+            + "entirely optional — your call which (if any) to purge."
+        )
+
     slow_prefix = USER_PREAMBLE + "\n\n" + "\n\n".join(slow_sections)
     fast_tail = "\n\n".join(fast_sections) + "\n\nProduce a valid Allocation."
 
@@ -607,6 +653,7 @@ def run_orchestrator(
     *,
     news_batch_context: str | None = None,
     previous_allocation: "Allocation | None" = None,
+    on_deck_watchlist: list[str] | None = None,
 ) -> Recommendation:
     """Run the orchestrator graph. If profile is None, uses the risk-tier preset.
 
@@ -647,6 +694,8 @@ def run_orchestrator(
         initial["news_batch_context"] = news_batch_context
     if previous_allocation is not None:
         initial["previous_allocation"] = previous_allocation
+    if on_deck_watchlist:
+        initial["on_deck_watchlist"] = list(on_deck_watchlist)
     final = _get_graph().invoke(initial)
     return Recommendation(
         request=request,
