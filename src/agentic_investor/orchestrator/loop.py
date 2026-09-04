@@ -117,6 +117,13 @@ class LoopConfig:
     halt_buys_drawdown_pct: float = 5.0      # 0r don't average down on losers
     small_drawdown_hold_pct: float = 3.0     # 0g don't sell into bounces
     force_loss_cut_pct: float = 8.0          # 0g auto-exit deep losers
+    # Concentration ceiling on any BUY execution. Tighter than the profile's
+    # max_single_pct proposal cap - this stops the mechanical rebalancer from
+    # GROWING a book position above the ceiling even when the LLM's target
+    # sits under it. Blocks the cumulative-ladder pattern where each
+    # individual add clears the size floor but the sum runs the position
+    # to 40%+ of NAV.
+    max_add_concentration_pct: float = 25.0
 
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
@@ -1088,6 +1095,7 @@ def run_tick(
         halt_buys_drawdown_pct=cfg.halt_buys_drawdown_pct,
         small_drawdown_hold_pct=cfg.small_drawdown_hold_pct,
         force_loss_cut_pct=cfg.force_loss_cut_pct,
+        max_add_concentration_pct=cfg.max_add_concentration_pct,
     )
 
     # On barely-moved fall-through the LLM offered no fresh conviction, so

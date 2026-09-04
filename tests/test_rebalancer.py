@@ -188,6 +188,84 @@ def test_multi_source_bypass_fires_at_threshold():
     assert aapl.side == "sell"
 
 
+def test_add_concentration_ceiling_blocks_buy_above_cap():
+    # AAPL currently held at $2000 (20% of $10K equity). LLM wants it at $3500
+    # (35%). Cap is 25%. The buy would push the position over the ceiling so
+    # it must be skipped. NVDA at target (no trade) as a control.
+    rec = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=35, dollars=3500, rationale="x"),
+                Position(ticker="NVDA", weight_pct=40, dollars=4000, rationale="x"),
+            ],
+            cash_pct=25, cash_dollars=2500, portfolio_rationale="x",
+        ),
+    )
+    plans = compute_trade_plan(
+        rec,
+        current_positions={"AAPL": 2000, "NVDA": 4000},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=1.0,
+        max_add_concentration_pct=25.0,
+    )
+    assert not any(p.ticker == "AAPL" for p in plans)
+
+
+def test_add_concentration_ceiling_allows_buy_within_cap():
+    # AAPL held at $1000 (10%). Target $2400 (24%). Cap 25%. Under the cap,
+    # buy proceeds.
+    rec = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=24, dollars=2400, rationale="x"),
+                Position(ticker="NVDA", weight_pct=40, dollars=4000, rationale="x"),
+            ],
+            cash_pct=36, cash_dollars=3600, portfolio_rationale="x",
+        ),
+    )
+    plans = compute_trade_plan(
+        rec,
+        current_positions={"AAPL": 1000, "NVDA": 4000},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=1.0,
+        max_add_concentration_pct=25.0,
+    )
+    aapl = next(p for p in plans if p.ticker == "AAPL")
+    assert aapl.side == "buy"
+    assert aapl.dollars == 1400
+
+
+def test_add_concentration_ceiling_never_blocks_sells():
+    # AAPL currently at $4000 (40%, above cap already from price appreciation).
+    # LLM wants to trim to $2000. Even though position is above the ceiling,
+    # the SELL must proceed - the ceiling only gates buys.
+    rec = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=20, dollars=2000, rationale="x"),
+                Position(ticker="NVDA", weight_pct=40, dollars=4000, rationale="x"),
+            ],
+            cash_pct=40, cash_dollars=4000, portfolio_rationale="x",
+        ),
+    )
+    plans = compute_trade_plan(
+        rec,
+        current_positions={"AAPL": 4000, "NVDA": 4000},
+        total_equity=10_000,
+        prices={"AAPL": 100, "NVDA": 200},
+        min_trade_dollars=1.0,
+        max_add_concentration_pct=25.0,
+    )
+    aapl = next(p for p in plans if p.ticker == "AAPL")
+    assert aapl.side == "sell"
+    assert aapl.dollars == 2000
+
+
 def test_missing_price_skips_ticker_gracefully():
     plans = compute_trade_plan(
         _rec(), current_positions={}, total_equity=10_000,

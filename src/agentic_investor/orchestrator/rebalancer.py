@@ -54,6 +54,7 @@ def compute_trade_plan(
     halt_buys_drawdown_pct: float = 5.0,
     small_drawdown_hold_pct: float = 3.0,
     force_loss_cut_pct: float = 8.0,
+    max_add_concentration_pct: float = 100.0,
 ) -> list[TradePlan]:
     """Diff target-weight allocation against current positions.
 
@@ -73,6 +74,13 @@ def compute_trade_plan(
         intraday lows).
       - Force loss-cut (post-plan): any held position down more than
         force_loss_cut_pct gets a forced full SELL, overriding the LLM.
+      - Add-concentration ceiling (BUY): skip any buy whose target weight
+        would leave the ticker above max_add_concentration_pct of NAV.
+        Different from the profile's max_single_pct cap (which trims the
+        LLM's proposal): this fires at execution time to prevent the
+        book from GROWING above the ceiling even when the target is
+        under. Default 100 disables the check for callers that don't
+        opt in.
     """
     now = now or datetime.now(UTC)
     recent_trades = recent_trades or {}
@@ -145,6 +153,15 @@ def compute_trade_plan(
                 continue
 
         if side == "buy":
+            # Concentration ceiling: don't grow a ticker above the cap
+            # regardless of what the LLM's target says. Blocks both fresh
+            # opens sized above the ceiling and adds that would push a
+            # held position over. Reduces catch cumulative-ladder patterns
+            # that individual size floors miss.
+            if total_equity > 0 and max_add_concentration_pct < 100.0:
+                target_pct = tgt_d / total_equity * 100.0
+                if target_pct > max_add_concentration_pct:
+                    continue
             # Adverse-move: don't buy into recent weakness.
             move = ticker_recent_moves.get(t.upper())
             if move is not None and move <= -adverse_move_threshold_pct:

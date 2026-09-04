@@ -536,7 +536,12 @@ def test_tick_regenerates_rec_on_first_run_and_submits_orders(tmp_path, monkeypa
         lambda *a, **k: None,
     )
 
-    cfg = LoopConfig(tickers=["AAPL", "NVDA"], band_abs_pct=5.0, min_trade_dollars=1.0)
+    # Fake rec puts AAPL + NVDA at 40% each - above the production ceiling of
+    # 25%. Disable the ceiling here so this test can focus on the tick pipeline.
+    cfg = LoopConfig(
+        tickers=["AAPL", "NVDA"], band_abs_pct=5.0, min_trade_dollars=1.0,
+        max_add_concentration_pct=100.0,
+    )
     state = LoopState()
     broker = FakeBroker(cash=10_000, equity=10_000)
 
@@ -596,7 +601,10 @@ def test_dry_run_computes_plan_but_submits_no_orders(monkeypatch):
     )
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_snapshot", lambda *a, **k: 1)
 
-    cfg = LoopConfig(tickers=["AAPL", "NVDA"], dry_run=True, min_trade_dollars=1.0)
+    cfg = LoopConfig(
+        tickers=["AAPL", "NVDA"], dry_run=True, min_trade_dollars=1.0,
+        max_add_concentration_pct=100.0,
+    )
     state = LoopState()
     broker = FakeBroker(cash=10_000, equity=10_000)
 
