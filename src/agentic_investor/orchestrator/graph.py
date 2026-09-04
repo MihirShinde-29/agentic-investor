@@ -397,13 +397,19 @@ def _recent_trades_block(
 
 
 def _messages(state: GraphState) -> list[dict]:
-    """Build the allocator prompt as [stable prefix | volatile tail].
+    """Build the allocator prompt as [stable prefix | slow-changing | fast tail].
 
-    Stable prefix = system message + USER_PREAMBLE, both marked with
-    cache_control for Anthropic. Volatile tail (request, regime,
-    correlation, signals, previous allocation, news batch) sits below
-    the second marker so a change high in the tail can't invalidate any
-    of the cached tokens above it.
+    Three-tier cache layout for Anthropic prompt caching:
+      1. SYSTEM message alone (~2800 tokens) - constant across the run.
+      2. USER preamble + slow sections 1-3 (request, regime, correlation)
+         which change per session or per macro state, not per rec.
+      3. Volatile sections 4-7 (signals JSON, prev allocation, recent
+         trades, news batch) which change every regen.
+
+    A single cache_control marker at the boundary between (2) and (3)
+    means Anthropic caches everything up to the end of the slow block.
+    Previously the marker sat on USER_PREAMBLE alone (~100 tokens, below
+    the ~1024 min cache size) so only the SYSTEM message actually cached.
     """
     req = state["request"]
     profile = _profile_from_state(state)
@@ -413,8 +419,8 @@ def _messages(state: GraphState) -> list[dict]:
         state.get("market_snapshots"),
     )
 
-    sections: list[str] = []
-    sections.append(
+    slow_sections: list[str] = []
+    slow_sections.append(
         "## 1. Request\n"
         f"  amount:  ${req.amount:,.2f}\n"
         f"  risk:    {req.risk} (profile '{profile.name}': max single "
@@ -426,7 +432,7 @@ def _messages(state: GraphState) -> list[dict]:
 
     macro_pb = state.get("macro_prompt_block")
     if macro_pb:
-        sections.append(f"## 2. Market regime\n{macro_pb}")
+        slow_sections.append(f"## 2. Market regime\n{macro_pb}")
 
     if getattr(profile, "correlation_enabled", False) and req.tickers:
         try:
@@ -464,7 +470,7 @@ def _messages(state: GraphState) -> list[dict]:
                 cap = getattr(
                     profile, "max_joint_correlated_weight_pct", 50.0
                 )
-                sections.append(
+                slow_sections.append(
                     "## 3. Correlation hints (60d daily returns)\n"
                     + "\n".join(corr_lines)
                     + f"\nJoint weight of any pair above the correlation "
@@ -475,7 +481,8 @@ def _messages(state: GraphState) -> list[dict]:
         except Exception:  # noqa: BLE001 - hint is best-effort
             pass
 
-    sections.append(f"## 4. Signals (JSON, keyed by ticker)\n{signals}")
+    fast_sections: list[str] = []
+    fast_sections.append(f"## 4. Signals (JSON, keyed by ticker)\n{signals}")
 
     prev_alloc = state.get("previous_allocation")
     if prev_alloc is not None:
@@ -483,28 +490,31 @@ def _messages(state: GraphState) -> list[dict]:
             f"  {p.ticker}: {p.weight_pct:.1f}%" for p in prev_alloc.positions
         ]
         prev_lines.append(f"  cash: {prev_alloc.cash_pct:.1f}%")
-        sections.append(
+        fast_sections.append(
             "## 5. Current allocation (your previous decision)\n"
             + "\n".join(prev_lines)
         )
 
     trades_block = _recent_trades_block(req.tickers, state.get("market_snapshots"))
     if trades_block:
-        sections.append(
+        fast_sections.append(
             "## 6. Your recent trades on these tickers (this session)\n"
             + trades_block
         )
 
     batch_ctx = (state.get("news_batch_context") or "").strip()
     if batch_ctx:
-        sections.append(
+        fast_sections.append(
             f"## 7. Breaking-news events (from live stream)\n{batch_ctx}"
         )
 
-    volatile = "\n\n".join(sections) + "\n\nProduce a valid Allocation."
+    slow_prefix = USER_PREAMBLE + "\n\n" + "\n\n".join(slow_sections)
+    fast_tail = "\n\n".join(fast_sections) + "\n\nProduce a valid Allocation."
 
-    # cache_control marker: Anthropic caches everything up to and including
-    # the marker. OpenAI ignores the field and auto-caches by prefix match.
+    # SYSTEM caches independently (its own breakpoint). USER text splits into
+    # slow (Sections 1-3) which gets a cache_control marker, and fast
+    # (Sections 4-7) which stays uncached because it changes every regen.
+    # Two effective cached prefixes: SYSTEM alone, and SYSTEM + slow user.
     system_msg = {
         "role": "system",
         "content": [
@@ -520,10 +530,10 @@ def _messages(state: GraphState) -> list[dict]:
         "content": [
             {
                 "type": "text",
-                "text": USER_PREAMBLE,
+                "text": slow_prefix,
                 "cache_control": {"type": "ephemeral"},
             },
-            {"type": "text", "text": volatile},
+            {"type": "text", "text": fast_tail},
         ],
     }
     return [system_msg, user_msg]
@@ -549,13 +559,14 @@ def repair(state: GraphState) -> dict:
     """Repair pass between allocate and validate.
 
     Applies position-count cap + cash floor so downstream rebalancing sees
-    a target that respects the profile even when the LLM doesn't.
+    a target that respects the profile even when the LLM doesn't. Structured
+    events flow up to the loop for session logging.
     """
     profile = _profile_from_state(state)
-    repaired, notes = repair_allocation(state["allocation"], profile)
+    repaired, notes, events = repair_allocation(state["allocation"], profile)
     if notes:
         logger.info("alloc_repair: %s", "; ".join(notes))
-    return {"allocation": repaired}
+    return {"allocation": repaired, "repair_events": events}
 
 
 def validate(state: GraphState) -> dict:
@@ -643,4 +654,5 @@ def run_orchestrator(
         technical_signals=final.get("technical_signals", []),
         news_signals=final.get("news_signals", []),
         violations=final.get("violations", []),
+        repair_events=final.get("repair_events", []),
     )

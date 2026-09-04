@@ -230,15 +230,20 @@ def check_profile_rules(
     return violations
 
 
-def repair_allocation(allocation: Allocation, profile) -> tuple[Allocation, list[str]]:
+def repair_allocation(
+    allocation: Allocation, profile
+) -> tuple[Allocation, list[str], list[dict]]:
     """Enforce position-count cap and cash floor after the LLM allocates.
 
     The prompt asks for both, but the LLM doesn't consistently respect either
     when a lot of tickers are in play. Drop smallest positions past the cap
     (weight -> cash), then trim proportionally if cash is still below floor.
-    Returns (repaired, notes) so the loop can log what changed.
+    Returns (repaired, notes, events). Notes are human-readable log lines
+    for the loop. Events are structured dicts the loop forwards to the
+    session recorder so we can grep phantom pressure across runs.
     """
     notes: list[str] = []
+    events: list[dict] = []
     positions = list(allocation.positions)
     cash_pct = allocation.cash_pct
     cash_dollars = allocation.cash_dollars
@@ -253,11 +258,19 @@ def repair_allocation(allocation: Allocation, profile) -> tuple[Allocation, list
         dropped_dollars = sum(p.dollars for p in dropped)
         cash_pct += dropped_pct
         cash_dollars += dropped_dollars
+        dropped_tickers = [p.ticker for p in dropped]
         notes.append(
             f"position-cap: dropped {len(dropped)} smallest "
-            f"({', '.join(p.ticker for p in dropped)}); "
+            f"({', '.join(dropped_tickers)}); "
             f"{dropped_pct:.1f}pp -> cash"
         )
+        events.append({
+            "action": "position_cap_drop",
+            "n_dropped": len(dropped),
+            "tickers": dropped_tickers,
+            "pp_to_cash": round(dropped_pct, 2),
+            "cap": max_positions,
+        })
 
     if cash_pct + 0.05 < cash_floor and positions:
         gap_pp = cash_floor - cash_pct
@@ -278,6 +291,12 @@ def repair_allocation(allocation: Allocation, profile) -> tuple[Allocation, list
                 f"to lift cash from {allocation.cash_pct:.1f}% to "
                 f"{cash_floor:.1f}%"
             )
+            events.append({
+                "action": "cash_floor_lift",
+                "trim_pct": round((1 - scale) * 100, 2),
+                "cash_before_pct": round(allocation.cash_pct, 2),
+                "cash_after_pct": round(cash_floor, 2),
+            })
 
     # Sweep any small residual into cash so weights still sum to 100.
     total = sum(p.weight_pct for p in positions) + cash_pct
@@ -291,7 +310,7 @@ def repair_allocation(allocation: Allocation, profile) -> tuple[Allocation, list
         cash_dollars=cash_dollars,
         portfolio_rationale=allocation.portfolio_rationale,
     )
-    return repaired, notes
+    return repaired, notes, events
 
 
 class Recommendation(BaseModel):
@@ -300,6 +319,10 @@ class Recommendation(BaseModel):
     technical_signals: list[TechnicalSignal] = Field(default_factory=list)
     news_signals: list[NewsSignal] = Field(default_factory=list)
     violations: list[str] = Field(default_factory=list)
+    # Structured events emitted by repair_allocation (position-cap drops,
+    # cash-floor lifts). Loop forwards each to the session recorder so
+    # phantom pressure can be counted across runs.
+    repair_events: list[dict] = Field(default_factory=list)
 
 
 class GraphState(TypedDict, total=False):

@@ -26,6 +26,59 @@ from agentic_investor.config import get_settings
 # Alpaca resends headlines minutes apart.
 _DEDUP_TTL_SECONDS = 600
 
+# Fanout detection: when the same normalized headline hash arrives for at
+# least this many distinct tickers within the TTL window, log a
+# fanout_detected event. Prompt cost + false multi-source signal both scale
+# with fanout width, so the metric is worth surfacing even if we're not
+# collapsing the events themselves yet.
+_FANOUT_TICKER_THRESHOLD = 5
+
+# Meaning-preserving normalization: strip modifiers that vary between
+# resends of the same underlying story but keep tokens that carry meaning
+# (rating names, direction verbs, numbers).
+_PREFIX_MODIFIERS_RE = re.compile(
+    r"^("
+    r"update|correction|breaking|latest|now|"
+    r"just in|reported earlier|reported|repeat|"
+    r"full|complete|extended|live|final"
+    r")\s*[:\-,]?\s*",
+    re.IGNORECASE,
+)
+_TRAILING_SOURCE_RE = re.compile(
+    r"\s*[-–|]\s*(benzinga|reuters|bloomberg|cnbc|marketwatch|barron[''']?s|"
+    r"seeking alpha|yahoo|dow jones)\s*$",
+    re.IGNORECASE,
+)
+# Same modifier words the prefix regex catches, but also stripped when they
+# appear before a content noun anywhere in the headline. Catches "Full
+# Transcript" / "Complete Report" / "Live Q&A" variants of one story.
+_MIDDLE_MODIFIERS_RE = re.compile(
+    r"\b(full|complete|extended|live|final|updated)\s+",
+    re.IGNORECASE,
+)
+# HTML entity artifacts we've seen in Alpaca payloads.
+_HTML_ENTITY_RE = re.compile(r"&(?:amp|#\d+|#x[0-9a-fA-F]+);")
+
+
+def _normalize_headline(headline: str) -> str:
+    """Return a stable key for dedup that ignores wording variants but
+    preserves meaning-bearing tokens (numbers, direction verbs, ratings).
+    """
+    s = _HTML_ENTITY_RE.sub(" ", headline)
+    s = re.sub(r"\s+", " ", s).strip()
+    # Strip repeated prefix modifiers (e.g. "REPORTED EARLIER: UPDATE: X").
+    for _ in range(3):
+        stripped = _PREFIX_MODIFIERS_RE.sub("", s)
+        if stripped == s:
+            break
+        s = stripped
+    s = _TRAILING_SOURCE_RE.sub("", s)
+    s = _MIDDLE_MODIFIERS_RE.sub("", s)
+    # Collapse whitespace again in case the middle strip left double spaces.
+    s = re.sub(r"\s+", " ", s).strip()
+    s = s.strip("- \t\r\n.,;:")
+    return s.lower()
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +132,12 @@ class NewsStreamer:
         self._stream_factory = stream_factory  # for tests
         # (ticker, headline_hash) -> monotonic seconds; pruned by TTL.
         self._seen: dict[str, float] = {}
+        # headline_hash -> {ticker: monotonic_ts}. Tracks fanout width so
+        # we can emit a diagnostic when one story reaches many tickers.
+        self._fanout_seen: dict[str, dict[str, float]] = {}
+        # headline_hashes we've already reported fanout for; avoids
+        # re-emitting once per additional ticker in the same story.
+        self._fanout_reported: set[str] = set()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -135,10 +194,11 @@ class NewsStreamer:
             [str(s).upper() for s in symbols] + list(extra)
         ))
 
-        # Normalize before hashing so "CORRECTION:" / "UPDATE:" variants of
-        # the same headline collapse to one key.
-        norm = re.sub(r"\s+", " ", headline).strip().lower()
-        norm = re.sub(r"^(update|correction|breaking)[:\-]?\s*", "", norm)
+        # Normalize before hashing so wording variants of the same story
+        # (UPDATE: / CORRECTION: / Full Transcript / trailing " - Benzinga")
+        # collapse to one key. Numbers + rating verbs are preserved so
+        # "beats Q3" and "misses Q3" stay distinct hashes.
+        norm = _normalize_headline(headline)
         h = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
         now_mono = time.monotonic()
         self._prune_seen(now_mono)
@@ -153,6 +213,20 @@ class NewsStreamer:
                 logger.debug("news dedup drop: %s | %s", sym, headline[:60])
                 continue
             self._seen[key] = now_mono
+            # Fanout tracking: same normalized headline reaching N+ distinct
+            # tickers in the TTL window is a broker aggregation, not N
+            # independent signals. Log once when the threshold trips.
+            fan = self._fanout_seen.setdefault(h, {})
+            fan[sym] = now_mono
+            if (
+                len(fan) >= _FANOUT_TICKER_THRESHOLD
+                and h not in self._fanout_reported
+            ):
+                self._fanout_reported.add(h)
+                logger.info(
+                    "news fanout: %d tickers on one story: %s",
+                    len(fan), headline[:100],
+                )
             evt = NewsEvent(
                 ticker=sym,
                 headline=headline,
@@ -170,3 +244,15 @@ class NewsStreamer:
         stale = [k for k, ts in self._seen.items() if ts < cutoff]
         for k in stale:
             self._seen.pop(k, None)
+        # Same TTL for fanout tracking; also drops the "reported" set so a
+        # story that returns tomorrow can retrigger the diagnostic.
+        stale_h = []
+        for h, tickers_map in self._fanout_seen.items():
+            fresh = {t: ts for t, ts in tickers_map.items() if ts >= cutoff}
+            if fresh:
+                self._fanout_seen[h] = fresh
+            else:
+                stale_h.append(h)
+        for h in stale_h:
+            self._fanout_seen.pop(h, None)
+            self._fanout_reported.discard(h)

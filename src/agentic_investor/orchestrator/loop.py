@@ -1084,6 +1084,9 @@ def run_tick(
                         "cash_pct": rec.allocation.cash_pct,
                         "trigger": reason,
                     })
+                    for ev in getattr(rec, "repair_events", []) or []:
+                        session.log("alloc_repair", {"rec_id": rec_id, **ev})
+
         else:
             # First-ever regen or new-day reset: no prior rec to compare
             # against, so the drift filter can't fire. Save straight through.
@@ -1122,6 +1125,8 @@ def run_tick(
                     "cash_pct": rec.allocation.cash_pct,
                     "trigger": reason,
                 })
+                for ev in getattr(rec, "repair_events", []) or []:
+                    session.log("alloc_repair", {"rec_id": rec_id, **ev})
     else:
         from agentic_investor.orchestrator.store import load_recommendation
 
@@ -1272,6 +1277,11 @@ def run_tick(
         stop_loss_pct=cfg.stop_loss_pct, take_profit_pct=cfg.take_profit_pct,
         day=today,
     )
+    # Position rationales keyed by ticker so we can attach them to
+    # order_submitted events - useful for auditing "why did the LLM buy?"
+    rationale_by_ticker = {
+        p.ticker.upper(): p.rationale for p in rec.allocation.positions
+    }
     for o in submitted:
         record_order(o, source="loop", rec_id=state.last_rec_id)
         # Record for temporal cooldown lookup on next tick.
@@ -1282,6 +1292,21 @@ def run_tick(
                 "broker_order_id": o.id, "status": o.status,
                 "client_order_id": o.client_order_id,
             })
+            # No-news-buy audit: flag BUY trades where the ticker had no news
+            # in the current batch AND no attributed effect-log entry. Not a
+            # block - just observability. The LLM legitimately adds on
+            # correlation-driven rebalancing, drift-back-to-target, etc.
+            # Later analysis can decide if the pattern is productive.
+            if o.side == "buy":
+                tkr = o.ticker.upper()
+                had_batch_news = tkr in batch_tickers_for_cooldown
+                had_effect_entry = bool(state.news_effect_log.get(tkr))
+                if not had_batch_news and not had_effect_entry:
+                    session.log("no_news_buy", {
+                        "ticker": tkr,
+                        "qty": o.qty,
+                        "rationale": (rationale_by_ticker.get(tkr) or "")[:300],
+                    })
     state.orders_submitted += len(submitted)
     # Persist post-execution state so recent_trades + trade counters survive
     # restart. The earlier post-regen save runs BEFORE trade execution.
