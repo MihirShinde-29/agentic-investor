@@ -49,38 +49,27 @@ def compute_trade_plan(
     news_source_counts: dict[str, int] | None = None,
     min_bypass_sources: int = 1,
     ticker_recent_moves: dict[str, float] | None = None,
-    adverse_move_threshold_pct: float = 1.0,
     avg_entry_prices: dict[str, float] | None = None,
-    halt_buys_drawdown_pct: float = 5.0,
-    small_drawdown_hold_pct: float = 3.0,
     force_loss_cut_pct: float = 8.0,
     max_add_concentration_pct: float = 100.0,
 ) -> list[TradePlan]:
     """Diff target-weight allocation against current positions.
 
-    Discipline layer applies BUY-side and TRIM-side vetoes before returning
-    plans:
+    Discipline vetoes that fire before a plan is added:
+      - Trade-size floors by direction: open / add / trim / close have
+        separate thresholds so a ladder of small adds can't slip through.
+        Full closes bypass the trim floor.
       - Temporal cooldown: no reverse-side trade within cooldown_seconds.
-        A ticker in the current news batch bypasses the cooldown by default;
-        set news_bypass_cooldown=False for a strict block. The LLM is
-        expected to self-restrain via the recent-trades context in its
-        prompt.
-      - Adverse-move veto (BUY): skip if the ticker moved beyond
-        -adverse_move_threshold_pct recently (don't catch falling knives).
-      - Halt-buys drawdown (BUY): skip if position already down more than
-        halt_buys_drawdown_pct from entry (don't average down).
-      - Small-drawdown hold (SELL): skip trim if position is between
-        -small_drawdown_hold_pct and 0 AND bouncing (don't sell into
-        intraday lows).
+        Bypassed when news_source_counts crosses min_bypass_sources for
+        the ticker (multi-source convergence), or by the legacy any-in-
+        news path when source counts aren't supplied.
+      - Add-concentration ceiling: skip any BUY whose target weight would
+        leave the ticker above max_add_concentration_pct of NAV. Distinct
+        from the profile's max_single_pct proposal cap - this fires at
+        execution time so the book can't GROW above the ceiling even when
+        the LLM's target sits under it.
       - Force loss-cut (post-plan): any held position down more than
         force_loss_cut_pct gets a forced full SELL, overriding the LLM.
-      - Add-concentration ceiling (BUY): skip any buy whose target weight
-        would leave the ticker above max_add_concentration_pct of NAV.
-        Different from the profile's max_single_pct cap (which trims the
-        LLM's proposal): this fires at execution time to prevent the
-        book from GROWING above the ceiling even when the target is
-        under. Default 100 disables the check for callers that don't
-        opt in.
     """
     now = now or datetime.now(UTC)
     recent_trades = recent_trades or {}
@@ -156,31 +145,12 @@ def compute_trade_plan(
             # Concentration ceiling: don't grow a ticker above the cap
             # regardless of what the LLM's target says. Blocks both fresh
             # opens sized above the ceiling and adds that would push a
-            # held position over. Reduces catch cumulative-ladder patterns
-            # that individual size floors miss.
+            # held position over. Catches cumulative-ladder patterns that
+            # individual size floors miss.
             if total_equity > 0 and max_add_concentration_pct < 100.0:
                 target_pct = tgt_d / total_equity * 100.0
                 if target_pct > max_add_concentration_pct:
                     continue
-            # Adverse-move: don't buy into recent weakness.
-            move = ticker_recent_moves.get(t.upper())
-            if move is not None and move <= -adverse_move_threshold_pct:
-                continue
-            # Halt-buys: don't average down on losing positions.
-            avg_entry = avg_entry_prices.get(t.upper())
-            if avg_entry and avg_entry > 0:
-                loss_pct = (price / avg_entry - 1) * 100
-                if loss_pct <= -halt_buys_drawdown_pct:
-                    continue
-        else:  # sell
-            # Small-drawdown hold: don't trim into a bounce on tiny drawdown.
-            avg_entry = avg_entry_prices.get(t.upper())
-            if avg_entry and avg_entry > 0:
-                unrealized_pct = (price / avg_entry - 1) * 100
-                if -small_drawdown_hold_pct < unrealized_pct < 0:
-                    move = ticker_recent_moves.get(t.upper())
-                    if move is not None and move > 0:
-                        continue
         plans.append(
             TradePlan(
                 ticker=t,

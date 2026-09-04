@@ -55,10 +55,10 @@ class LoopConfig:
     # e.g. band_rel_pct=20 -> a 5%-target position gets a 1pp band; a
     # 25%-target position stays at the full 5pp abs band. 0 disables.
     band_rel_pct: float = 20.0
-    min_trade_dollars: float = 50.0
-    # Category-specific floors override min_trade_dollars when set. Splitting
-    # by trade type stops the LLM from ladder-adding a name in five sub-floor
-    # chunks that each pass a single loose threshold. Closes always execute.
+    # Category-specific trade-size floors. Split by direction/context so a
+    # ladder of small adds can't slip through under a single loose threshold.
+    # Closes always execute regardless of size. Legacy min_trade_dollars was
+    # removed after these superseded it.
     min_open_dollars: float = 200.0
     min_add_dollars: float = 500.0
     min_trim_dollars: float = 200.0
@@ -70,8 +70,12 @@ class LoopConfig:
     # Re-enable once stance derives from deterministic indicators.
     enable_technical_change_trigger: bool = False
 
-    # Opinion-drift filter (LLM variance skip logic)
-    opinion_drift_threshold_pct: float = 3.0
+    # Opinion-drift filter (LLM variance skip logic). Threshold raised from
+    # 3pp to 5pp after 2026-09-03 showed the tighter setting was blocking
+    # legitimate small rebalances the LLM was making on real news. avg and
+    # single-delta caps keep the outer bounds tight so hallucinated blowups
+    # (TEAM +30pp on unrelated batches) still get caught.
+    opinion_drift_threshold_pct: float = 5.0
     max_avg_drift_pct: float = 5.0
     max_single_delta_pct: float = 15.0
 
@@ -87,23 +91,10 @@ class LoopConfig:
     finbert_prefilter_enabled: bool = False
     finbert_min_delta: float = 0.15
 
-    # Portfolio-level trade cooldown: after any rebalance with >= N trades,
-    # require >= Y seconds before another N-trade rebalance can execute.
-    # Blocks the whole-portfolio flip-flop pattern (rec #105->#106->#107 and
-    # rec #132's diversified->concentrated reversal on 2026-08-31 live
-    # session). 30 min matches the observed 15-20 min flip-flop cadence
-    # with margin to catch the immediate counter-reaction too.
-    big_rebalance_min_trades: int = 5
-    big_rebalance_cooldown_seconds: int = 1800
     # CLI override for profile.max_positions. None = use profile default (12
     # for moderate). Exposed as --max-positions so we can A/B without editing
     # a TOML.
     max_positions_override: int | None = None
-    # Even a "concentration reshape" (n_new <= n_dropped) gets blocked
-    # during cooldown if the total notional of the plan exceeds this
-    # share of NAV. Catches the CRWD-style $2.5k re-open on a book that
-    # already had CRWD - low position-count delta, high dollar delta.
-    big_rebalance_max_bypass_notional_pct: float = 15.0
 
     # Discipline layer (vetoes at the rebalancer boundary)
     cooldown_seconds: int = 1500             # 25min per-ticker flip lockout
@@ -113,10 +104,7 @@ class LoopConfig:
     # stories through.
     news_convergence_min_sources: int = 2
     news_convergence_window_sec: int = 900   # 15min rolling window
-    adverse_move_threshold_pct: float = 1.0  # 0r don't buy falling knives
-    halt_buys_drawdown_pct: float = 5.0      # 0r don't average down on losers
-    small_drawdown_hold_pct: float = 3.0     # 0g don't sell into bounces
-    force_loss_cut_pct: float = 8.0          # 0g auto-exit deep losers
+    force_loss_cut_pct: float = 8.0          # capital-preservation circuit breaker
     # Concentration ceiling on any BUY execution. Tighter than the profile's
     # max_single_pct proposal cap - this stops the mechanical rebalancer from
     # GROWING a book position above the ceiling even when the LLM's target
@@ -1230,7 +1218,7 @@ def run_tick(
     allocation_base = min(cfg.amount, acct.equity) if cfg.amount > 0 else acct.equity
     plans = compute_trade_plan(
         rec, positions_dollars, allocation_base,
-        prices=prices, min_trade_dollars=cfg.min_trade_dollars,
+        prices=prices,
         min_open_dollars=cfg.min_open_dollars,
         min_add_dollars=cfg.min_add_dollars,
         min_trim_dollars=cfg.min_trim_dollars,
@@ -1241,10 +1229,7 @@ def run_tick(
         news_source_counts=news_source_counts,
         min_bypass_sources=int(getattr(cfg, "news_convergence_min_sources", 1)),
         ticker_recent_moves=ticker_recent_moves,
-        adverse_move_threshold_pct=cfg.adverse_move_threshold_pct,
         avg_entry_prices=avg_entry_prices,
-        halt_buys_drawdown_pct=cfg.halt_buys_drawdown_pct,
-        small_drawdown_hold_pct=cfg.small_drawdown_hold_pct,
         force_loss_cut_pct=cfg.force_loss_cut_pct,
         max_add_concentration_pct=cfg.max_add_concentration_pct,
     )
@@ -1274,76 +1259,6 @@ def run_tick(
             submitted=[], equity=acct.equity,
         )
 
-    # Cooldown on big rebalances. Direction-aware: a plan that drops as many
-    # or more names than it opens (with <= 2 new) is treated as the LLM
-    # cleaning up an over-diversified book and passes; adding more names
-    # than it drops is the whipsaw pattern we're trying to block.
-    if (
-        len(plans) >= cfg.big_rebalance_min_trades
-        and state.last_big_rebalance_at is not None
-    ):
-        secs = (now - state.last_big_rebalance_at).total_seconds()
-        if secs < cfg.big_rebalance_cooldown_seconds:
-            target_tickers = {p.ticker.upper() for p in rec.allocation.positions}
-            current_tickers = set(positions_dollars.keys())
-            n_new = len(target_tickers - current_tickers)
-            n_dropped = len(current_tickers - target_tickers)
-            plan_notional = sum(float(p.dollars or 0) for p in plans)
-            notional_pct = (
-                plan_notional / acct.equity * 100.0 if acct.equity else 0.0
-            )
-            is_small_reshape = (
-                n_new <= n_dropped
-                and n_new <= 2
-                and notional_pct <= cfg.big_rebalance_max_bypass_notional_pct
-            )
-            if is_small_reshape:
-                logger.info(
-                    "tick %s: cooldown bypass (concentration reshape) "
-                    "new=%d dropped=%d plan=%d notional=%.1f%%",
-                    tick_at, n_new, n_dropped, len(plans), notional_pct,
-                )
-                if session:
-                    session.log("big_rebalance_cooldown_bypass", {
-                        "rec_id": state.last_rec_id,
-                        "plan_count": len(plans),
-                        "n_new_positions": n_new,
-                        "n_dropped_positions": n_dropped,
-                        "notional_pct": round(notional_pct, 2),
-                        "seconds_since_last": secs,
-                    })
-                    session.log("knob_fired", {
-                        "name": "big_rebalance_cooldown", "reason": "bypass",
-                    })
-            else:
-                logger.info(
-                    "tick %s: big-rebalance cooldown blocking %d trades "
-                    "(last was %.0fs ago, need %ds; new=%d dropped=%d "
-                    "notional=%.1f%%)",
-                    tick_at, len(plans), secs,
-                    cfg.big_rebalance_cooldown_seconds,
-                    n_new, n_dropped, notional_pct,
-                )
-                if session:
-                    session.log("big_rebalance_cooldown_skip", {
-                        "rec_id": state.last_rec_id,
-                        "plan_count": len(plans),
-                        "seconds_since_last": secs,
-                        "cooldown_seconds": cfg.big_rebalance_cooldown_seconds,
-                        "n_new_positions": n_new,
-                        "n_dropped_positions": n_dropped,
-                        "notional_pct": round(notional_pct, 2),
-                    })
-                    session.log("knob_fired", {
-                        "name": "big_rebalance_cooldown", "reason": "block",
-                    })
-                _log_tick_cost()
-                return TickResult(
-                    tick_at=tick_at, rec_id=state.last_rec_id,
-                    regenerated_rec=regenerated, plan_count=len(plans),
-                    submitted=[], equity=acct.equity,
-                )
-
     if session:
         session.log("trade_plan", {
             "rec_id": state.last_rec_id,
@@ -1368,13 +1283,8 @@ def run_tick(
                 "client_order_id": o.client_order_id,
             })
     state.orders_submitted += len(submitted)
-    # Stamp the portfolio-level cooldown when this counts as a big rebalance.
-    if len(submitted) >= cfg.big_rebalance_min_trades:
-        state.last_big_rebalance_at = now
-    # Persist post-execution state so cooldown timing + recent_trades survive
-    # restart. Without this, `last_big_rebalance_at` is only saved via the
-    # earlier post-regen save which runs BEFORE trade execution, so a restart
-    # loses the most recent big-rebalance timestamp.
+    # Persist post-execution state so recent_trades + trade counters survive
+    # restart. The earlier post-regen save runs BEFORE trade execution.
     try:
         from agentic_investor.tools.paper_store import save_loop_state as _sls
         _sls(state.to_dict())

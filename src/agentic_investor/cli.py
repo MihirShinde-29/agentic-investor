@@ -919,7 +919,9 @@ def _paper_test_event(
     cfg = LoopConfig(
         profile_name=profile_name, amount=amount,
         tickers=[t.upper() for t in tickers], auto=False,
-        band_abs_pct=5.0, min_trade_dollars=1.0, dry_run=dry_run,
+        band_abs_pct=5.0,
+        min_open_dollars=1.0, min_add_dollars=1.0, min_trim_dollars=1.0,
+        dry_run=dry_run,
     )
     state = LoopState(pending_news_context=ctx)
     broker = get_broker()
@@ -942,7 +944,6 @@ def _paper_loop(
     interval: str,
     band_abs_pct: float,
     band_rel_pct: float,
-    min_trade_dollars: float,
     stop_loss_pct: float | None,
     take_profit_pct: float | None,
     dry_run: bool,
@@ -957,7 +958,6 @@ def _paper_loop(
     max_single_delta_pct: float,
     max_avg_drift_pct: float,
     opinion_drift_threshold_pct: float,
-    big_rebalance_cooldown_seconds: int,
     max_positions: int | None,
 ) -> None:
     import logging
@@ -1001,7 +1001,6 @@ def _paper_loop(
         interval_seconds=_parse_interval(interval),
         band_abs_pct=band_abs_pct,
         band_rel_pct=band_rel_pct,
-        min_trade_dollars=min_trade_dollars,
         stop_loss_pct=stop_loss_pct,
         take_profit_pct=take_profit_pct,
         dry_run=dry_run,
@@ -1012,7 +1011,6 @@ def _paper_loop(
         max_single_delta_pct=max_single_delta_pct,
         max_avg_drift_pct=max_avg_drift_pct,
         opinion_drift_threshold_pct=opinion_drift_threshold_pct,
-        big_rebalance_cooldown_seconds=big_rebalance_cooldown_seconds,
         max_positions_override=max_positions,
     )
     broker = get_broker()
@@ -1037,7 +1035,6 @@ def _paper_tick(
     top_n: int,
     band_abs_pct: float,
     band_rel_pct: float,
-    min_trade_dollars: float,
     stop_loss_pct: float | None,
     take_profit_pct: float | None,
     dry_run: bool,
@@ -1056,7 +1053,6 @@ def _paper_tick(
         profile_name=profile_name, amount=amount, tickers=tickers,
         auto=auto, universe=universe, top_n=top_n,
         band_abs_pct=band_abs_pct, band_rel_pct=band_rel_pct,
-        min_trade_dollars=min_trade_dollars,
         stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
         dry_run=dry_run, once=True,
     )
@@ -1290,7 +1286,6 @@ def main() -> None:
     pt.add_argument("--band-rel-pct", type=float, default=20.0,
                     help="size-aware band: pct of target weight (default 20; "
                          "0 disables). Small positions get tighter bands.")
-    pt.add_argument("--min-trade-dollars", type=float, default=50.0)
     pt.add_argument("--stop-loss-pct", type=float, default=None)
     pt.add_argument("--take-profit-pct", type=float, default=None)
     pt.add_argument("--dry-run", action="store_true")
@@ -1311,7 +1306,6 @@ def main() -> None:
     pl.add_argument("--band-rel-pct", type=float, default=20.0,
                     help="size-aware band: pct of target weight (default 20; "
                          "0 disables). Small positions get tighter bands.")
-    pl.add_argument("--min-trade-dollars", type=float, default=50.0)
     pl.add_argument("--stop-loss-pct", type=float, default=None)
     pl.add_argument("--take-profit-pct", type=float, default=None)
     pl.add_argument("--dry-run", action="store_true",
@@ -1339,19 +1333,15 @@ def main() -> None:
     pl.add_argument("--finbert-min-delta", type=float, default=0.15,
                     help="min sentiment delta (in [0,2]) needed to fire a "
                          "regen when --finbert-prefilter is on (default 0.15)")
-    pl.add_argument("--big-rebalance-cooldown-seconds", type=int, default=1800,
-                    help="portfolio-level cooldown: seconds between big "
-                         "rebalances (>=5 trades) to block whipsaw "
-                         "(default 1800 = 30min)")
     pl.add_argument("--max-single-delta-pct", type=float, default=15.0,
                     help="opinion-drift filter: max weight change on a "
                          "single ticker per regen (default 15pp)")
     pl.add_argument("--max-avg-drift-pct", type=float, default=5.0,
                     help="opinion-drift filter: max avg drift across "
                          "positions per regen (default 5pp)")
-    pl.add_argument("--opinion-drift-threshold-pct", type=float, default=3.0,
+    pl.add_argument("--opinion-drift-threshold-pct", type=float, default=5.0,
                     help="opinion-drift filter: min per-position drift to "
-                         "consider a regen substantive (default 3pp)")
+                         "consider a regen substantive (default 5pp)")
     pl.add_argument("--max-positions", type=int, default=None,
                     help="override profile max_positions cap (moderate "
                          "default 12); repair pass drops smallest names "
@@ -1469,7 +1459,6 @@ def main() -> None:
         _paper_tick(
             args.profile, args.amount, tickers, args.auto, args.universe,
             args.top_n, args.band_abs_pct, args.band_rel_pct,
-            args.min_trade_dollars,
             args.stop_loss_pct, args.take_profit_pct, args.dry_run,
         )
     elif args.cmd == "paper-attribution":
@@ -1491,14 +1480,12 @@ def main() -> None:
         _paper_loop(
             args.profile, args.amount, tickers, args.auto, args.universe,
             args.top_n, args.interval, args.band_abs_pct, args.band_rel_pct,
-            args.min_trade_dollars,
             args.stop_loss_pct, args.take_profit_pct, args.dry_run, args.once,
             args.log_file, args.regen_mode, args.force_open,
             args.serve_dashboard, args.dashboard_port,
             args.finbert_prefilter, args.finbert_min_delta,
             args.max_single_delta_pct, args.max_avg_drift_pct,
             args.opinion_drift_threshold_pct,
-            args.big_rebalance_cooldown_seconds,
             args.max_positions,
         )
     else:

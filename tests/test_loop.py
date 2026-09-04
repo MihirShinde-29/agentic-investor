@@ -506,7 +506,8 @@ def test_promotion_extracts_beneficiaries_from_batch_and_caps(monkeypatch):
         "- [HOT] SNOW  age=3m: Snowflake beats"
     )
     cfg = LoopConfig(
-        tickers=["AAPL"], band_abs_pct=5.0, min_trade_dollars=1.0,
+        tickers=["AAPL"], band_abs_pct=5.0,
+        min_open_dollars=1.0, min_add_dollars=1.0, min_trim_dollars=1.0,
         max_promotions_per_regen=3,
     )
     state = LoopState(pending_news_context=batch_ctx)
@@ -539,7 +540,8 @@ def test_tick_regenerates_rec_on_first_run_and_submits_orders(tmp_path, monkeypa
     # Fake rec puts AAPL + NVDA at 40% each - above the production ceiling of
     # 25%. Disable the ceiling here so this test can focus on the tick pipeline.
     cfg = LoopConfig(
-        tickers=["AAPL", "NVDA"], band_abs_pct=5.0, min_trade_dollars=1.0,
+        tickers=["AAPL", "NVDA"], band_abs_pct=5.0,
+        min_open_dollars=1.0, min_add_dollars=1.0, min_trim_dollars=1.0,
         max_add_concentration_pct=100.0,
     )
     state = LoopState()
@@ -572,7 +574,10 @@ def test_tick_reuses_rec_within_same_day_and_skips_when_no_drift(monkeypatch):
         lambda rec_id, url=None: _rec(),
     )
 
-    cfg = LoopConfig(tickers=["AAPL", "NVDA"], band_abs_pct=5.0, min_trade_dollars=1.0)
+    cfg = LoopConfig(
+        tickers=["AAPL", "NVDA"], band_abs_pct=5.0,
+        min_open_dollars=1.0, min_add_dollars=1.0, min_trim_dollars=1.0,
+    )
     today = datetime.now(UTC).strftime("%Y-%m-%d")
     state = LoopState(last_rec_id=42, last_rec_date=today)
 
@@ -602,7 +607,8 @@ def test_dry_run_computes_plan_but_submits_no_orders(monkeypatch):
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_snapshot", lambda *a, **k: 1)
 
     cfg = LoopConfig(
-        tickers=["AAPL", "NVDA"], dry_run=True, min_trade_dollars=1.0,
+        tickers=["AAPL", "NVDA"], dry_run=True,
+        min_open_dollars=1.0, min_add_dollars=1.0, min_trim_dollars=1.0,
         max_add_concentration_pct=100.0,
     )
     state = LoopState()
