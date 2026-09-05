@@ -713,6 +713,71 @@ def create_app(
             "violations": list(r.violations or []),
         }
 
+    @app.get("/api/rec/{rec_id}/precedents")
+    def rec_precedents(rec_id: int, k: int = 4) -> dict:
+        """Top-k past recs the LLM would consult when regenerating rec_id.
+
+        Arm scoping via ?arm=X flows through runtime_context, so the
+        A/B isolation invariant is enforced in the UI path too.
+        """
+        from agentic_investor.orchestrator.store import load_recommendation
+
+        r = load_recommendation(rec_id)
+        if r is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        query_parts: list[str] = []
+        portfolio_rationale = (r.allocation.portfolio_rationale or "").strip()
+        if portfolio_rationale:
+            query_parts.append(portfolio_rationale)
+        held = sorted({p.ticker.upper() for p in r.allocation.positions})
+        if held:
+            query_parts.append(f"Currently holding: {', '.join(held)}")
+        query_parts.append(
+            f"Risk profile: {r.request.risk}, target {r.request.target}"
+        )
+        query_text = "\n".join(query_parts).strip()
+
+        exp = app.state.experiment
+        arm_id = "solo"
+        if exp is not None:
+            from agentic_investor.runtime_context import (
+                get_active_alpaca_account,
+            )
+            for a in exp.arms:
+                if a.alpaca_account == get_active_alpaca_account():
+                    arm_id = a.arm_id
+                    break
+
+        try:
+            from agentic_investor.memory.retrieval import retrieve_similar
+
+            results = retrieve_similar(query_text, arm_id=arm_id, k=k)
+        except Exception as e:  # noqa: BLE001
+            return {"rec_id": rec_id, "arm_id": arm_id, "precedents": [],
+                    "error": str(e)}
+        return {
+            "rec_id": rec_id,
+            "arm_id": arm_id,
+            "query": query_text[:400],
+            "precedents": [
+                {
+                    "rec_id": p.rec_id,
+                    "source": p.source,
+                    "created_at": p.created_at,
+                    "tickers": p.tickers,
+                    "similarity": p.similarity,
+                    "text": p.text,
+                    "outcome_pl_pct_15m": p.outcome_pl_pct_15m,
+                    "outcome_pl_pct_60m": p.outcome_pl_pct_60m,
+                    "outcome_pl_pct_1d": p.outcome_pl_pct_1d,
+                    "outcome_pl_pct_1w": p.outcome_pl_pct_1w,
+                    "prompt_line": p.to_prompt_line(),
+                }
+                for p in results
+            ],
+        }
+
     @app.get("/api/filter-skips")
     def filter_skips(limit: int = 50) -> list[dict]:
         """Recent opinion-drift-filter skips for the attribution counter."""

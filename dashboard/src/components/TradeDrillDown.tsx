@@ -41,6 +41,95 @@ function stanceVariant(stance: string): "success" | "danger" | "muted" {
   return "muted";
 }
 
+type Precedent = {
+  rec_id: number;
+  source: string;
+  created_at: string;
+  tickers: string[];
+  similarity: number;
+  text: string;
+  outcome_pl_pct_15m: number | null;
+  outcome_pl_pct_60m: number | null;
+  outcome_pl_pct_1d: number | null;
+  outcome_pl_pct_1w: number | null;
+  prompt_line: string;
+};
+
+type PrecedentsResp = {
+  rec_id: number;
+  arm_id: string;
+  query?: string;
+  precedents: Precedent[];
+  error?: string;
+};
+
+function outcomeChip(label: string, val: number | null) {
+  if (val === null) return null;
+  const color =
+    val > 0
+      ? "text-success"
+      : val < 0
+        ? "text-danger"
+        : "text-muted-foreground";
+  const sign = val > 0 ? "+" : "";
+  return (
+    <span className={cn("tabular text-[11px]", color)}>
+      {label} {sign}
+      {val.toFixed(2)}%
+    </span>
+  );
+}
+
+function PrecedentsSection({ recId }: { recId: number }) {
+  const { data } = useSWR<PrecedentsResp>(
+    `/api/rec/${recId}/precedents?k=4`,
+    fetcher,
+  );
+  if (!data || !data.precedents || data.precedents.length === 0) return null;
+  return (
+    <section>
+      <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        Similar past decisions
+        <Badge variant="muted" className="font-mono text-[10px]">
+          arm {data.arm_id}
+        </Badge>
+      </h3>
+      <div className="space-y-2">
+        {data.precedents.map((p) => (
+          <div
+            key={`${p.source}:${p.rec_id}`}
+            className="rounded-lg border border-border/40 bg-card/40 p-3"
+          >
+            <div className="mb-1 flex flex-wrap items-center gap-2 text-xs">
+              <span className="tabular text-muted-foreground">
+                {p.created_at.slice(0, 10)}
+              </span>
+              <Badge variant="muted" className="font-mono text-[10px]">
+                {p.source}
+              </Badge>
+              <span className="font-mono font-medium">
+                {p.tickers.join(",")}
+              </span>
+              <span className="tabular text-[11px] text-muted-foreground">
+                sim {(p.similarity * 100).toFixed(0)}%
+              </span>
+              <div className="ml-auto flex items-center gap-2">
+                {outcomeChip("15m", p.outcome_pl_pct_15m)}
+                {outcomeChip("60m", p.outcome_pl_pct_60m)}
+                {outcomeChip("1d", p.outcome_pl_pct_1d)}
+                {outcomeChip("1w", p.outcome_pl_pct_1w)}
+              </div>
+            </div>
+            <p className="text-xs leading-relaxed text-foreground/80">
+              {p.text.length > 240 ? p.text.slice(0, 239) + "…" : p.text}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function ConfidenceBar({ value }: { value: number }) {
   const pct = Math.max(0, Math.min(1, value)) * 100;
   const color =
@@ -200,6 +289,8 @@ export function TradeDrillDown({
                   {data.portfolio_rationale}
                 </p>
               </section>
+
+              {recId != null && <PrecedentsSection recId={recId} />}
 
               <section>
                 <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">

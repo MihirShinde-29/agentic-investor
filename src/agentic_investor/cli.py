@@ -1156,6 +1156,7 @@ def _paper_loop(
     max_avg_drift_pct: float,
     opinion_drift_threshold_pct: float,
     max_positions: int | None,
+    news_batch_window_sec: int = 60,
     alpaca_account: str = "primary",
 ) -> None:
     import logging
@@ -1210,6 +1211,7 @@ def _paper_loop(
         max_avg_drift_pct=max_avg_drift_pct,
         opinion_drift_threshold_pct=opinion_drift_threshold_pct,
         max_positions_override=max_positions,
+        news_batch_window_sec=news_batch_window_sec,
     )
     broker = get_broker(account=alpaca_account)
     if alpaca_account != "primary":
@@ -1542,6 +1544,11 @@ def main() -> None:
     pl.add_argument("--opinion-drift-threshold-pct", type=float, default=5.0,
                     help="opinion-drift filter: min per-position drift to "
                          "consider a regen substantive (default 5pp)")
+    pl.add_argument("--news-batch-window-sec", type=int, default=60,
+                    help="micro-batch hold: how long to accumulate news "
+                         "events before firing a regen (default 60s). Larger "
+                         "= fewer LLM calls + more context; hot-signal "
+                         "fast-path still fires immediately")
     pl.add_argument("--max-positions", type=int, default=None,
                     help="override profile max_positions cap (moderate "
                          "default 12); repair pass drops smallest names "
@@ -1815,6 +1822,7 @@ def main() -> None:
             args.max_single_delta_pct, args.max_avg_drift_pct,
             args.opinion_drift_threshold_pct,
             args.max_positions,
+            news_batch_window_sec=args.news_batch_window_sec,
             alpaca_account=args.alpaca_account,
         )
     else:

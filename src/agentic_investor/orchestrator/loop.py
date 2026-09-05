@@ -49,6 +49,11 @@ class LoopConfig:
 
     # Tick cadence
     interval_seconds: int = 30 * 60
+    # News micro-batch: how long we hold the pending news buffer before
+    # firing a regen. Larger windows accumulate more context per LLM call
+    # (fewer regens, less whipsaw) at the cost of slower reactions. The
+    # finBERT hot-signal fast-path still fires immediately when triggered.
+    news_batch_window_sec: int = 60
     band_abs_pct: float = 5.0
     # Size-aware bands: small positions get proportionally tighter thresholds.
     # effective_base = min(band_abs_pct, target_pct * band_rel_pct/100).
@@ -1876,7 +1881,10 @@ def run_event_loop(
             _prune_news_effect_log(state, now)
             ingest(decision_state, new_events, now)
 
-            fire, reason = should_fire(decision_state, now)
+            fire, reason = should_fire(
+                decision_state, now,
+                batch_window_sec=cfg.news_batch_window_sec,
+            )
             # Per-headline hot-signal fast-path overrides the batch-window
             # closure: force fire now with an explicit reason so the
             # aggregate finBERT prefilter below doesn't dilute+skip the

@@ -46,6 +46,7 @@ def _config_diff_to_cli_args(diff: dict) -> list[str]:
         "max_positions_override": "--max-positions",
         "band_abs_pct": "--band-abs-pct",
         "band_rel_pct": "--band-rel-pct",
+        "news_batch_window_sec": "--news-batch-window-sec",
     }
     args: list[str] = []
     for key, value in diff.items():

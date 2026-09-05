@@ -1,0 +1,25 @@
+# Does wider news batching produce better decisions?
+#
+# A: baseline 60s window. Fires on the first cooked-age headline; rapid
+#    single-signal reactions.
+# B: 3-min window. Accumulates more context per LLM call, fewer regens.
+# C: 5-min window. Even more aggregation; risks reacting slowly to
+#    time-sensitive news but the hot-signal fast-path still fires
+#    immediately on high-conviction headlines.
+#
+# Hypothesis: wider windows reduce cost + whipsaw at the cost of some
+# reaction latency. Whether the tradeoff wins depends on how often a
+# fresh signal genuinely needs sub-60s reaction.
+name: news-batch-widening
+arms:
+  A:
+    alpaca_account: primary
+    config_diff: {}
+  B:
+    alpaca_account: secondary
+    config_diff:
+      news_batch_window_sec: 180
+  C:
+    alpaca_account: tertiary
+    config_diff:
+      news_batch_window_sec: 300
