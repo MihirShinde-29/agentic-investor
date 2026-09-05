@@ -98,6 +98,11 @@ def run_bus_writer(bus_url: str) -> int:
     aren't news subscribers - they're purely broker routing for the
     per-arm books).
     """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
     from alpaca.data.live.news import NewsDataStream
 
     from agentic_investor.config import get_settings

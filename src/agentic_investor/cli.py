@@ -1511,6 +1511,15 @@ def main() -> None:
                      help="sqlite:///path/to/news_bus.db - each arm should "
                           "have AGENTIC_NEWS_BUS set to this same URL")
 
+    ppb = sub.add_parser("paper-price-bus",
+                         help="run the shared Alpaca StockDataStream "
+                              "subscriber for a paper-experiment; "
+                              "reconciles the union of arms' subscriptions "
+                              "every few seconds")
+    ppb.add_argument("bus_url",
+                     help="sqlite:///path/to/price_bus.db - each arm should "
+                          "have AGENTIC_PRICE_BUS set to this same URL")
+
     psd = sub.add_parser("paper-session-diff",
                          help="compare two session.jsonl runs on knob "
                               "firing counts + cost; quantifies whether a "
@@ -1632,6 +1641,9 @@ def main() -> None:
     elif args.cmd == "paper-news-bus":
         from agentic_investor.experiments.news_bus import run_bus_writer
         return run_bus_writer(args.bus_url)
+    elif args.cmd == "paper-price-bus":
+        from agentic_investor.experiments.price_bus import run_price_bus_writer
+        return run_price_bus_writer(args.bus_url)
     elif args.cmd == "paper-session-diff":
         _paper_session_diff(args.session_a, args.session_b)
     elif args.cmd == "paper-calibration":

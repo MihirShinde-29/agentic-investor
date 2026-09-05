@@ -25,15 +25,22 @@ from agentic_investor.experiments.manifest import Experiment
 def _arm_env(
     arm_alpaca_account: str,
     arm_db_path: Path,
+    *,
+    arm_id: str,
     news_bus_url: str | None = None,
+    price_bus_url: str | None = None,
 ) -> dict[str, str]:
     """Return env overrides for one arm's subprocess.
 
     Preserves existing env, only overrides:
-      DATABASE_URL     -> arm's own SQLite file for LoopState + orders
-      AGENTIC_NEWS_BUS -> shared news bus (if the experiment has one),
-                          so the arm reads from the bus instead of opening
-                          its own Alpaca websocket
+      DATABASE_URL      -> arm's own SQLite file for LoopState + orders
+      AGENTIC_ARM_ID    -> so the price-bus client tags subscription
+                           rows with the right arm identifier
+      AGENTIC_NEWS_BUS  -> shared news bus (single Alpaca news
+                           websocket, fanned out across arms)
+      AGENTIC_PRICE_BUS -> shared market-data bus (single Alpaca
+                           StockDataStream, subscription set is the
+                           reconciled union of arms' held+on-deck)
 
     Alpaca account is passed via CLI flag, not env, so multiple arms in
     the same shell won't accidentally cross-contaminate.
@@ -41,8 +48,11 @@ def _arm_env(
     env = dict(os.environ)
     arm_db_path.parent.mkdir(parents=True, exist_ok=True)
     env["DATABASE_URL"] = f"sqlite:///{arm_db_path}"
+    env["AGENTIC_ARM_ID"] = arm_id
     if news_bus_url:
         env["AGENTIC_NEWS_BUS"] = news_bus_url
+    if price_bus_url:
+        env["AGENTIC_PRICE_BUS"] = price_bus_url
     return env
 
 
@@ -105,40 +115,55 @@ def run_experiment(
     exp_dir.mkdir(parents=True, exist_ok=True)
     news_bus_path = exp_dir / "news_bus.db"
     news_bus_url = f"sqlite:///{news_bus_path}"
+    price_bus_path = exp_dir / "price_bus.db"
+    price_bus_url = f"sqlite:///{price_bus_path}"
     print(f"\nexperiment: {experiment.name}")
     print(f"arms: {[a.arm_id for a in experiment.arms]}")
     print(f"working dir: {exp_dir}")
-    print(f"shared news bus: {news_bus_path}\n")
+    print(f"shared news bus:  {news_bus_path}")
+    print(f"shared price bus: {price_bus_path}\n")
 
-    # Spawn the shared news bus writer first. It owns the single Alpaca
-    # news websocket for the whole experiment; arms read from the bus DB
-    # instead of trying to open their own (Alpaca's 1-connection-per-key
-    # limit would reject all but one arm otherwise).
-    bus_cmd = [
-        sys.executable, "-m", "agentic_investor.cli",
-        "paper-news-bus", news_bus_url,
-    ]
-    print(f"  news-bus writer cmd: {' '.join(bus_cmd)}")
-    if not dry_run_launch:
+    # Spawn both shared bus writers first. They own the single Alpaca
+    # news + market-data websockets for the whole experiment; arms
+    # read/write against the bus DBs instead of trying to open their
+    # own (Alpaca's 1-connection-per-key limit would reject all but
+    # one arm otherwise).
+    for bus_name, subcmd, bus_url in (
+        ("news-bus", "paper-news-bus", news_bus_url),
+        ("price-bus", "paper-price-bus", price_bus_url),
+    ):
+        bus_cmd = [
+            sys.executable, "-m", "agentic_investor.cli",
+            subcmd, bus_url,
+        ]
+        print(f"  {bus_name} writer cmd: {' '.join(bus_cmd)}")
+        if dry_run_launch:
+            continue
         bus_proc = subprocess.Popen(
             bus_cmd, env=dict(os.environ),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             bufsize=1,
         )
-        procs.append(("news-bus", bus_proc))
+        procs.append((bus_name, bus_proc))
         t = threading.Thread(
-            target=_stream_prefixed, args=(bus_proc.stdout, "news-bus"),
+            target=_stream_prefixed, args=(bus_proc.stdout, bus_name),
             daemon=True,
         )
         t.start()
         threads.append(t)
-        # Give the writer a moment to CREATE TABLE before arms start
-        # polling for rows.
+    if not dry_run_launch:
+        # Give the writers a moment to CREATE TABLE before arms start
+        # polling / registering.
         time.sleep(2)
 
     for arm in experiment.arms:
         arm_db = exp_dir / f"{arm.arm_id}.db"
-        env = _arm_env(arm.alpaca_account, arm_db, news_bus_url=news_bus_url)
+        env = _arm_env(
+            arm.alpaca_account, arm_db,
+            arm_id=arm.arm_id,
+            news_bus_url=news_bus_url,
+            price_bus_url=price_bus_url,
+        )
         cmd = [
             sys.executable, "-m", "agentic_investor.cli",
             "paper-loop",

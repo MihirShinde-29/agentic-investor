@@ -317,7 +317,24 @@ def get_latest_price(ticker: str) -> float:
     Alpaca free tier serves real-time IEX data (fine for our dow30 universe).
     yfinance is the fallback for any Alpaca hiccup (network, symbol
     unavailable, quota).
+
+    Experiment mode: if the arm was spawned with AGENTIC_PRICE_BUS +
+    AGENTIC_ARM_ID, register interest with the shared price bus (so its
+    writer subscribes to trades for this ticker) and return the latest
+    cached trade if fresh. Fall through to the REST path on cold-start,
+    stale cache, or bus-write failure.
     """
+    from agentic_investor.experiments.price_bus import get_bus_client
+
+    bus = get_bus_client()
+    if bus is not None:
+        try:
+            bus.register({ticker})
+            cached = bus.get_latest(ticker)
+            if cached is not None:
+                return cached
+        except Exception as e:  # noqa: BLE001 - never let bus errors block trading
+            logger.debug("price bus miss for %s: %s", ticker, e)
     try:
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockLatestTradeRequest
