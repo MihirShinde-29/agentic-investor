@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     alpaca_api_key: str | None = None
     alpaca_api_secret: str | None = None
     alpaca_paper: bool = True
+    # Additional Alpaca paper accounts for parallel-arm A/B/C testing (M13).
+    # All arms consume the same news stream and market state, but each
+    # holds its own book — arm-to-arm P/L deltas are honest apples-to-apples.
+    # Leave blank when not running experiments.
+    alpaca_api_key_b: str | None = None
+    alpaca_api_secret_b: str | None = None
+    alpaca_api_key_c: str | None = None
+    alpaca_api_secret_c: str | None = None
 
 
 @lru_cache

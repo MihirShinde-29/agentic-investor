@@ -838,6 +838,28 @@ def _paper_attribution(sessions_dir: str, out_path: str) -> None:
     print("\nOpen to see per-session metrics, filter behavior, honesty notes.")
 
 
+def _paper_experiment(
+    experiment_path: str, forwarded_args: list[str], *,
+    dry_run_launch: bool = False,
+) -> None:
+    from agentic_investor.experiments.manifest import load_experiment
+    from agentic_investor.experiments.runner import run_experiment
+
+    exp = load_experiment(experiment_path)
+    rc = run_experiment(
+        exp, base_paper_loop_args=forwarded_args,
+        dry_run_launch=dry_run_launch,
+    )
+    raise SystemExit(rc)
+
+
+def _paper_ab_report(experiment_name: str) -> None:
+    from agentic_investor.ops.ab_report import build_ab_report
+
+    report = build_ab_report(experiment_name)
+    print(report)
+
+
 def _paper_session_diff(session_a: str, session_b: str) -> None:
     """Compare two session.jsonl runs on knob firing counts + cost.
 
@@ -1051,6 +1073,7 @@ def _paper_loop(
     max_avg_drift_pct: float,
     opinion_drift_threshold_pct: float,
     max_positions: int | None,
+    alpaca_account: str = "primary",
 ) -> None:
     import logging
 
@@ -1105,7 +1128,9 @@ def _paper_loop(
         opinion_drift_threshold_pct=opinion_drift_threshold_pct,
         max_positions_override=max_positions,
     )
-    broker = get_broker()
+    broker = get_broker(account=alpaca_account)
+    if alpaca_account != "primary":
+        print(f"Alpaca account: {alpaca_account}\n")
     try:
         if regen_mode == "event":
             state = run_event_loop(cfg, broker, session=session)
@@ -1438,6 +1463,12 @@ def main() -> None:
                     help="override profile max_positions cap (moderate "
                          "default 12); repair pass drops smallest names "
                          "past this")
+    pl.add_argument("--alpaca-account", default="primary",
+                    choices=["primary", "secondary", "tertiary"],
+                    help="which paper account's creds to use; secondary/"
+                         "tertiary read ALPACA_API_KEY_B/_C. Used by "
+                         "paper-experiment to route arms to different "
+                         "accounts")
 
     pa = sub.add_parser("paper-attribution",
                         help="rolling analysis across all sessions: filter "
@@ -1450,6 +1481,27 @@ def main() -> None:
                               "trade log CSV + REPORT.md summary")
     pr2.add_argument("--session", default=None,
                      help="path to a session dir; omit for most-recent session")
+
+    pex = sub.add_parser("paper-experiment",
+                         help="parallel-arm A/B: spawn one paper-loop "
+                              "subprocess per arm, each with its own Alpaca "
+                              "account + DATABASE_URL, all sharing the same "
+                              "news stream")
+    pex.add_argument("experiment", help="path or name of experiment YAML "
+                                       "(bare name resolved under ./experiments/)")
+    pex.add_argument("--dry-run-launch", action="store_true",
+                     help="print the per-arm commands but don't spawn")
+    pex.add_argument("--paper-loop-args", nargs=argparse.REMAINDER,
+                     default=[],
+                     help="all args after this are forwarded to each arm's "
+                          "paper-loop invocation (e.g. --auto --top-n 8 "
+                          "--regen-mode event)")
+
+    pab = sub.add_parser("paper-ab-report",
+                         help="cross-arm comparison of an experiment: "
+                              "per-arm P/L, cost, filter firing, trades")
+    pab.add_argument("experiment", help="experiment name (used to find "
+                                       "out/experiments/{name}/)")
 
     psd = sub.add_parser("paper-session-diff",
                          help="compare two session.jsonl runs on knob "
@@ -1564,6 +1616,11 @@ def main() -> None:
         _paper_attribution(args.sessions_dir, args.out)
     elif args.cmd == "paper-report":
         _paper_report(args.session)
+    elif args.cmd == "paper-experiment":
+        _paper_experiment(args.experiment, args.paper_loop_args,
+                          dry_run_launch=args.dry_run_launch)
+    elif args.cmd == "paper-ab-report":
+        _paper_ab_report(args.experiment)
     elif args.cmd == "paper-session-diff":
         _paper_session_diff(args.session_a, args.session_b)
     elif args.cmd == "paper-calibration":
@@ -1588,6 +1645,7 @@ def main() -> None:
             args.max_single_delta_pct, args.max_avg_drift_pct,
             args.opinion_drift_threshold_pct,
             args.max_positions,
+            alpaca_account=args.alpaca_account,
         )
     else:
         _print_config()

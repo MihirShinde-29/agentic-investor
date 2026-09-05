@@ -97,26 +97,46 @@ class PaperBroker(Protocol):
 
 
 class AlpacaPaperBroker:
-    """Concrete PaperBroker backed by alpaca-py's TradingClient."""
+    """Concrete PaperBroker backed by alpaca-py's TradingClient.
 
-    def __init__(self, client=None):
+    `account` selects which paper account's credentials to use:
+      - "primary"   -> ALPACA_API_KEY   / ALPACA_API_SECRET
+      - "secondary" -> ALPACA_API_KEY_B / ALPACA_API_SECRET_B
+      - "tertiary"  -> ALPACA_API_KEY_C / ALPACA_API_SECRET_C
+    Secondary and tertiary are the extra paper accounts used by the
+    parallel-arm A/B/C experiment framework (M13).
+    """
+
+    _ACCOUNT_ENV = {
+        "primary":   ("alpaca_api_key",   "alpaca_api_secret",   ""),
+        "secondary": ("alpaca_api_key_b", "alpaca_api_secret_b", "_B"),
+        "tertiary":  ("alpaca_api_key_c", "alpaca_api_secret_c", "_C"),
+    }
+
+    def __init__(self, client=None, *, account: str = "primary"):
         # Lazy import so tests can use the module without alpaca-py installed
         # (though it IS a dep, this keeps the import out of hot paths).
         if client is None:
             from alpaca.trading.client import TradingClient
 
             s = get_settings()
-            if not s.alpaca_api_key or not s.alpaca_api_secret:
+            if account not in self._ACCOUNT_ENV:
+                raise ValueError(
+                    f"unknown alpaca account {account!r} - "
+                    f"expected one of {sorted(self._ACCOUNT_ENV)}"
+                )
+            key_attr, secret_attr, label = self._ACCOUNT_ENV[account]
+            key, secret = getattr(s, key_attr), getattr(s, secret_attr)
+            if not key or not secret:
                 raise RuntimeError(
-                    "ALPACA_API_KEY and ALPACA_API_SECRET must be set "
-                    "(get free paper keys at alpaca.markets)"
+                    f"ALPACA_API_KEY{label} and ALPACA_API_SECRET{label} "
+                    "must be set (get free paper keys at alpaca.markets)"
                 )
             client = TradingClient(
-                api_key=s.alpaca_api_key,
-                secret_key=s.alpaca_api_secret,
-                paper=s.alpaca_paper,
+                api_key=key, secret_key=secret, paper=s.alpaca_paper,
             )
         self._client = client
+        self._account = account
         # Cache of ticker -> fractionable? so submit_market_order's asset
         # lookup runs once per symbol per process, not on every trade.
         self._fractionable_cache: dict[str, bool] = {}
@@ -349,6 +369,6 @@ def _alpaca_order_to_domain(o) -> PaperOrder:
     )
 
 
-def get_broker() -> PaperBroker:
-    """Default factory: real Alpaca paper broker."""
-    return AlpacaPaperBroker()
+def get_broker(*, account: str = "primary") -> PaperBroker:
+    """Default factory: real Alpaca paper broker on the given account."""
+    return AlpacaPaperBroker(account=account)
