@@ -333,20 +333,138 @@ USER_PREAMBLE = """\
 # Portfolio allocation task
 
 Below in this order you will find:
-  1. Request metadata (tickers, amount, risk profile, target horizon)
+  1. Request metadata (amount, risk profile, target horizon)
   2. Market regime signal
-  3. Correlation hints for the current universe
-  4. Per-ticker signals (JSON)
-  5. Current allocation (previous decision) if any
-  6. Your recent trades on these tickers this session
-  7. Breaking-news events if any
-  8. On-deck watchlist of promoted candidates
-  9. Similar past decisions (retrieved from your own reasoning memory)
+  3. Profile guardrails (position caps, sector limits, cooldowns)
+  4. Universe under consideration (picker's frozen top-N)
+  5. Per-ticker signals (JSON)
+  6. Current allocation (previous decision) if any
+  7. Your recent trades on these tickers this session
+  8. Correlation hints for the current universe
+  9. Breaking-news events if any
+ 10. On-deck watchlist of promoted candidates
+ 11. Similar past decisions (retrieved from your own reasoning memory)
 
 Read them all, then emit a valid Allocation object per the schema in the
 system message. Weights (positions + cash_pct) must sum to 100. Cite
 specific tickers or values in each rationale; do not invent data.
 """
+
+
+def _profile_ruleset_block(profile) -> str:
+    """Stable per-profile guardrail reminder.
+
+    Duplicates rules the LLM already sees in SYSTEM but expanded with
+    the profile's concrete numeric limits, so the cached slow prefix
+    stays above Anthropic's 1024-token min-cache-block threshold even
+    on ticks where the macro-regime and correlation sections are empty.
+    Changes only when the risk profile itself changes (once per session
+    typically), so its cache invalidation cost is near-zero.
+    """
+    max_single = getattr(profile, "max_single_pct", 25.0)
+    cash_floor = getattr(profile, "cash_floor_pct", 10.0)
+    max_positions = getattr(profile, "max_positions", 12)
+    min_positions = getattr(profile, "min_positions", 4)
+    max_sector = getattr(profile, "max_sector_pct", 40.0)
+    corr_cap = getattr(profile, "max_joint_correlated_weight_pct", 50.0)
+    return (
+        f"Profile '{profile.name}' hard limits (every allocation must satisfy):\n"
+        f"  - Cash floor {cash_floor:.0f}% MUST be respected. If your\n"
+        f"    proposed positions would push cash below the floor, trim\n"
+        f"    the lowest-conviction position first, then re-check.\n"
+        f"    Emitting an allocation that violates the floor is a bug -\n"
+        f"    the loop enforces it post-hoc but that trims your best-\n"
+        f"    reasoned mix, not what you'd have chosen deliberately.\n"
+        f"  - Max single position {max_single:.0f}%. High-conviction\n"
+        f"    positions cap here; convert any surplus into a second\n"
+        f"    complementary name rather than concentrating.\n"
+        f"  - Position count between {min_positions} and {max_positions}.\n"
+        f"    Fewer than {min_positions} = under-diversified for the\n"
+        f"    risk band; more than {max_positions} triggers a repair\n"
+        f"    pass that drops your smallest weights, which is worse\n"
+        f"    than you sizing them out yourself.\n"
+        f"  - Max sector concentration {max_sector:.0f}%. Sector labels\n"
+        f"    from GICS; the repair pass will scale down proportionally\n"
+        f"    if you exceed this.\n"
+        f"  - Joint weight of any correlated pair (see correlation\n"
+        f"    hints later) cannot exceed {corr_cap:.0f}%.\n"
+        f"\n"
+        f"Allocation etiquette (soft but strongly preferred):\n"
+        f"  - Every position rationale must cite specific numeric or\n"
+        f"    named evidence from the signals block. Do not invent\n"
+        f"    metrics; if a ticker's technical or news signal is silent\n"
+        f"    on some dimension, don't claim confidence on that dimension.\n"
+        f"  - Prefer keeping positions from the previous allocation\n"
+        f"    within +/- {getattr(profile, 'band_abs_pct', 5.0):.0f}pp unless\n"
+        f"    a signal justifies the move. Small drift is noise; big\n"
+        f"    drift is a decision that needs explicit reasoning in the\n"
+        f"    position's rationale.\n"
+        f"  - Confidence scores 0.0-1.0 gate rebalance band widths -\n"
+        f"    high-conviction positions get wider bands, low-conviction\n"
+        f"    ones stay tight. Under-confident = keep the weight small\n"
+        f"    or move it to cash; don't hedge by taking a mid-size\n"
+        f"    position on a thesis you don't believe.\n"
+        f"  - portfolio_rationale should be 2-4 sentences summarizing\n"
+        f"    what mix you built and why it fits the risk band + current\n"
+        f"    market conditions. It's the first thing you read on the\n"
+        f"    NEXT tick, so write it for future-you as much as for\n"
+        f"    the reviewer.\n"
+        f"\n"
+        f"Worked example of applying the rules (illustrative, not\n"
+        f"prescriptive - use it to check your own logic, not to copy):\n"
+        f"\n"
+        f"  Scenario: previous allocation was NVDA 18%, AMD 12%, MSFT\n"
+        f"  10%, AAPL 8%, cash 52%. New signals show AMD downgraded to\n"
+        f"  bearish with confidence 0.7, NVDA unchanged bullish 0.85,\n"
+        f"  MSFT/AAPL unchanged neutral 0.55. Breaking news says\n"
+        f"  semiconductor sector rotation into hyperscalers.\n"
+        f"\n"
+        f"  Wrong response: flip AMD to zero, redistribute proportionally\n"
+        f"  to NVDA/MSFT/AAPL. This over-reacts by trimming names with\n"
+        f"  no fresh signal (MSFT/AAPL) and concentrates in NVDA past\n"
+        f"  the single-position cap.\n"
+        f"\n"
+        f"  Better response: trim AMD from 12% to 4% (keep small tail\n"
+        f"  in case the downgrade reverses on next print), park the 8pp\n"
+        f"  freed in cash rather than force-deploying it, cite the\n"
+        f"  downgrade text in AMD's rationale, leave MSFT/AAPL untouched\n"
+        f"  since their signals didn't move. cash_pct goes from 52% to\n"
+        f"  60%, well above the {cash_floor:.0f}% floor. Every rationale\n"
+        f"  cites at least one specific signal (downgrade text for AMD,\n"
+        f"  'no change' for the untouched names).\n"
+        f"\n"
+        f"  The point: react to the signal that actually moved. Don't\n"
+        f"  rebalance for the sake of rebalancing - that shows up as\n"
+        f"  cost + slippage without producing alpha, and the loop's\n"
+        f"  opinion-drift filter will often skip your regen if the\n"
+        f"  average change was noise-scale.\n"
+        f"\n"
+        f"How to read the signal blocks that come next:\n"
+        f"  - Signals JSON groups by ticker with technical + news fields.\n"
+        f"    Missing field = no data (don't infer neutral, note the gap\n"
+        f"    in the position rationale). stance is bullish/bearish/neutral;\n"
+        f"    confidence 0.0-1.0. reasoning quotes the primary evidence\n"
+        f"    - a 20d MA cross for technicals, a specific headline for news.\n"
+        f"  - Two signals agreeing at high confidence is a strong\n"
+        f"    directional read. One agreeing high + the other silent is\n"
+        f"    a moderate read. Two disagreeing = conflicting evidence,\n"
+        f"    generally size small or hold to cash pending resolution.\n"
+        f"  - Recent trades block shows what YOU already did this session.\n"
+        f"    Selling something 10 minutes ago then buying it back on a\n"
+        f"    marginal signal is whipsaw - the loop enforces per-ticker\n"
+        f"    cooldowns for exactly this reason, so proposing a flip\n"
+        f"    inside the cooldown window will get filtered out and burn\n"
+        f"    budget for nothing.\n"
+        f"  - Breaking news block, when present, is what triggered this\n"
+        f"    regen. Cite specific headlines in position rationales for\n"
+        f"    names you moved because of that news; it's the audit trail\n"
+        f"    for whether the reaction was justified in retrospect.\n"
+        f"  - On-deck watchlist shows candidates the picker promoted but\n"
+        f"    you haven't allocated to yet. If a ticker has been on deck\n"
+        f"    30+ minutes without you allocating to it, either commit\n"
+        f"    or add it to on_deck_purge - dead watchlist entries bloat\n"
+        f"    every future regen's prompt.\n"
+    )
 
 
 def _similar_precedents_block(state: GraphState, k: int = 4) -> str:
@@ -480,29 +598,59 @@ def _messages(state: GraphState) -> list[dict]:
         state.get("market_snapshots"),
     )
 
+    # Cached slow prefix: content stable across a session so Anthropic's
+    # 1024-token min block can actually cache. Anything that churns per
+    # regen (tickers list, correlation universe, holdings) lives below in
+    # fast_sections instead.
     slow_sections: list[str] = []
     slow_sections.append(
         "## 1. Request\n"
         f"  amount:  ${req.amount:,.2f}\n"
-        f"  risk:    {req.risk} (profile '{profile.name}': max single "
-        f"{profile.max_single_pct:.0f}%, cash floor "
-        f"{profile.cash_floor_pct:.0f}%)\n"
-        f"  target:  {req.target}\n"
-        f"  tickers: {', '.join(req.tickers)}"
+        f"  risk:    {req.risk}\n"
+        f"  target:  {req.target}"
     )
 
     macro_pb = state.get("macro_prompt_block")
     if macro_pb:
         slow_sections.append(f"## 2. Market regime\n{macro_pb}")
 
+    slow_sections.append(
+        "## 3. Profile guardrails\n" + _profile_ruleset_block(profile)
+    )
+
+    fast_sections: list[str] = []
+
+    if req.tickers:
+        fast_sections.append(
+            "## 4. Universe under consideration (picker's frozen top-N)\n"
+            "  " + ", ".join(req.tickers)
+        )
+
+    fast_sections.append(f"## 5. Signals (JSON, keyed by ticker)\n{signals}")
+
+    prev_alloc = state.get("previous_allocation")
+    if prev_alloc is not None:
+        prev_lines = [
+            f"  {p.ticker}: {p.weight_pct:.1f}%" for p in prev_alloc.positions
+        ]
+        prev_lines.append(f"  cash: {prev_alloc.cash_pct:.1f}%")
+        fast_sections.append(
+            "## 6. Current allocation (your previous decision)\n"
+            + "\n".join(prev_lines)
+        )
+
+    trades_block = _recent_trades_block(req.tickers, state.get("market_snapshots"))
+    if trades_block:
+        fast_sections.append(
+            "## 7. Your recent trades on these tickers (this session)\n"
+            + trades_block
+        )
+
     if getattr(profile, "correlation_enabled", False) and req.tickers:
         try:
             from agentic_investor.orchestrator.correlation import (
                 find_correlated_pairs_hint,
             )
-            # Union of {picker tickers, prior positions, recent sold-off
-            # tickers}. Catches "sold NVDA an hour ago, now considering
-            # AVGO" - the proxy re-exposure pattern.
             corr_universe = {t.upper() for t in req.tickers}
             prev_alloc_for_corr = state.get("previous_allocation")
             if prev_alloc_for_corr is not None:
@@ -528,45 +676,17 @@ def _messages(state: GraphState) -> list[dict]:
                 corr_lines = [
                     f"  {a}+{b}: {corr:+.2f}" for a, b, corr in pairs[:8]
                 ]
-                cap = getattr(
-                    profile, "max_joint_correlated_weight_pct", 50.0
-                )
-                slow_sections.append(
-                    "## 3. Correlation hints (60d daily returns)\n"
+                fast_sections.append(
+                    "## 8. Correlation hints (60d daily returns)\n"
                     + "\n".join(corr_lines)
-                    + f"\nJoint weight of any pair above the correlation "
-                    f"threshold cannot exceed {cap:.0f}% -- these are one "
-                    "bet under the hood, not diversification. If you want "
-                    "big exposure, pick the higher-conviction name."
                 )
         except Exception:  # noqa: BLE001 - hint is best-effort
             pass
 
-    fast_sections: list[str] = []
-    fast_sections.append(f"## 4. Signals (JSON, keyed by ticker)\n{signals}")
-
-    prev_alloc = state.get("previous_allocation")
-    if prev_alloc is not None:
-        prev_lines = [
-            f"  {p.ticker}: {p.weight_pct:.1f}%" for p in prev_alloc.positions
-        ]
-        prev_lines.append(f"  cash: {prev_alloc.cash_pct:.1f}%")
-        fast_sections.append(
-            "## 5. Current allocation (your previous decision)\n"
-            + "\n".join(prev_lines)
-        )
-
-    trades_block = _recent_trades_block(req.tickers, state.get("market_snapshots"))
-    if trades_block:
-        fast_sections.append(
-            "## 6. Your recent trades on these tickers (this session)\n"
-            + trades_block
-        )
-
     batch_ctx = (state.get("news_batch_context") or "").strip()
     if batch_ctx:
         fast_sections.append(
-            f"## 7. Breaking-news events (from live stream)\n{batch_ctx}"
+            f"## 9. Breaking-news events (from live stream)\n{batch_ctx}"
         )
 
     # On-deck watchlist with staleness signals: each entry may include
@@ -606,7 +726,7 @@ def _messages(state: GraphState) -> list[dict]:
     ]
     if on_deck_candidates:
         fast_sections.append(
-            "## 8. On-deck watchlist (promoted candidates, not currently held)\n"
+            "## 10. On-deck watchlist (promoted candidates, not currently held)\n"
             + "\n".join(_fmt_entry(e) for e in on_deck_candidates)
             + "\n\nEach entry shows how long ago the ticker was promoted "
             + "and when its most recent news arrived. You can list any "
@@ -618,22 +738,24 @@ def _messages(state: GraphState) -> list[dict]:
     precedents = _similar_precedents_block(state)
     if precedents:
         fast_sections.append(
-            "## 9. Similar past decisions (from your own reasoning memory)\n"
+            "## 11. Similar past decisions (from your own reasoning memory)\n"
             + precedents
         )
 
     slow_prefix = USER_PREAMBLE + "\n\n" + "\n\n".join(slow_sections)
     fast_tail = "\n\n".join(fast_sections) + "\n\nProduce a valid Allocation."
-    # Diagnostic for cache-hit stagnation (#105). Small prompts drop to 5-6%
-    # hit rate while big ones hit 25%+; suspicion is the slow-prefix
-    # content shifts tick-to-tick. Log a short hash + byte length so we
-    # can diff across regens and see WHAT is drifting.
+    # Hash lets us diff prefix drift across regens; the est_tokens field
+    # flags when the block falls below Anthropic's 1024 min cache block
+    # (in which case the cache_control marker is a no-op).
     try:
         import hashlib as _hashlib
         _sp_hash = _hashlib.sha1(slow_prefix.encode("utf-8")).hexdigest()[:12]
+        _sp_tokens = len(slow_prefix) // 4
         logger.debug(
-            "prompt shape: slow_prefix_bytes=%d slow_prefix_hash=%s fast_tail_bytes=%d",
-            len(slow_prefix), _sp_hash, len(fast_tail),
+            "prompt shape: slow_prefix_bytes=%d slow_prefix_est_tokens=%d "
+            "slow_prefix_cacheable=%s slow_prefix_hash=%s fast_tail_bytes=%d",
+            len(slow_prefix), _sp_tokens, _sp_tokens >= 1024, _sp_hash,
+            len(fast_tail),
         )
     except Exception:  # noqa: BLE001
         pass

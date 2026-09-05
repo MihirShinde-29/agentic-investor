@@ -81,7 +81,7 @@ def test_section_9_renders_when_enabled_and_docs_exist(seeded_chroma, monkeypatc
     msgs = _messages(_base_state())
     user_content = msgs[1]["content"]
     fast_tail = user_content[1]["text"]
-    assert "## 9. Similar past decisions" in fast_tail
+    assert "## 11. Similar past decisions" in fast_tail
     assert "AAPL,MSFT" in fast_tail
     assert "1d +0.42%" in fast_tail
 
@@ -98,15 +98,15 @@ def test_section_9_lives_in_fast_tail_not_cached_slow_prefix(
     # Section header lives in fast_tail; USER_PREAMBLE (in slow_prefix)
     # mentions "9. Similar past decisions" as a TOC entry - that's fine
     # because the TOC never changes, only the rendered CONTENT is volatile.
-    assert "## 9." not in slow_prefix
-    assert "## 9." in fast_tail
+    assert "## 11." not in slow_prefix
+    assert "## 11." in fast_tail
 
 
 def test_disabled_via_env_flag_skips_retrieval(seeded_chroma, monkeypatch):
     monkeypatch.setenv("AGENTIC_MEMORY_RAG", "0")
     msgs = _messages(_base_state())
     fast_tail = msgs[1]["content"][1]["text"]
-    assert "## 9." not in fast_tail
+    assert "## 11." not in fast_tail
     assert "Similar past decisions" not in fast_tail
 
 
@@ -119,7 +119,7 @@ def test_no_batch_no_holdings_still_queries_on_risk_profile(
     msgs = _messages(_base_state(news_batch_context=""))
     fast_tail = msgs[1]["content"][1]["text"]
     # Section 9 present because query text = "Risk profile: moderate, target ..."
-    assert "## 9." in fast_tail
+    assert "## 11." in fast_tail
 
 
 def test_retrieval_failure_never_blocks_prompt_build(seeded_chroma, monkeypatch):
@@ -135,7 +135,7 @@ def test_retrieval_failure_never_blocks_prompt_build(seeded_chroma, monkeypatch)
     msgs = _messages(_base_state())
     fast_tail = msgs[1]["content"][1]["text"]
     # Section 9 gracefully absent; sections 1-8 still there.
-    assert "## 9." not in fast_tail
+    assert "## 11." not in fast_tail
     assert "## 1. Request" in msgs[1]["content"][0]["text"]
 
 
