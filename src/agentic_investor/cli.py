@@ -864,6 +864,53 @@ def _paper_ab_report(experiment_name: str) -> None:
     print(report)
 
 
+def _paper_reset(account: str, *, confirm: bool = True) -> None:
+    from agentic_investor.tools.paper_broker import get_broker
+
+    broker = get_broker(account=account)
+    acct = broker.get_account()
+    positions = broker.get_positions()
+    print(f"\naccount:  {acct.account_number} ({account})")
+    print(f"equity:   ${acct.equity:,.2f}")
+    print(f"cash:     ${acct.cash:,.2f}")
+    print(f"positions: {len(positions)}")
+    for p in positions:
+        print(f"  {p.ticker:6s}  qty={p.qty:>10.4f}  mv=${p.market_value:>10,.2f}  "
+              f"pl=${p.unrealized_pl:>+9.2f}")
+
+    if not positions:
+        print("\nno positions to close. done.")
+        return
+
+    if confirm:
+        resp = input(
+            f"\nCancel all orders + close {len(positions)} positions "
+            f"on {account}? [y/N] "
+        )
+        if resp.strip().lower() not in ("y", "yes"):
+            print("aborted.")
+            return
+
+    # Alpaca's close_all_positions(cancel_orders=True) does both in one shot.
+    resp = broker._client.close_all_positions(cancel_orders=True)
+    print(f"\nsubmitted close for {len(resp)} positions.")
+    for r in resp:
+        sym = getattr(r, "symbol", "?")
+        status = getattr(r, "status", "?")
+        print(f"  {sym}: {status}")
+
+    import time
+    time.sleep(3)
+    acct2 = broker.get_account()
+    positions2 = broker.get_positions()
+    print(f"\npost-reset: equity=${acct2.equity:,.2f}  cash=${acct2.cash:,.2f}  "
+          f"positions={len(positions2)}")
+    if positions2:
+        print("some positions still open (may take a moment to settle):")
+        for p in positions2:
+            print(f"  {p.ticker}: qty={p.qty}")
+
+
 def _paper_session_diff(session_a: str, session_b: str) -> None:
     """Compare two session.jsonl runs on knob firing counts + cost.
 
@@ -1540,6 +1587,17 @@ def main() -> None:
     pdb.add_argument("--port", type=int, default=8000,
                      help="TCP port to listen on (default 8000)")
 
+    prst = sub.add_parser("paper-reset",
+                          help="flush a paper account: cancel all open "
+                               "orders + close all positions. Alpaca doesn't "
+                               "expose a true reset-to-$100K via API, so "
+                               "post-reset equity = current equity in cash.")
+    prst.add_argument("--account", default="primary",
+                      choices=["primary", "secondary", "tertiary"],
+                      help="which Alpaca paper account to flush (default primary)")
+    prst.add_argument("--yes", action="store_true",
+                      help="skip the interactive confirmation")
+
     psd = sub.add_parser("paper-session-diff",
                          help="compare two session.jsonl runs on knob "
                               "firing counts + cost; quantifies whether a "
@@ -1675,6 +1733,8 @@ def main() -> None:
             )
             exp_ctx = load_experiment_context(args.experiment)
         return serve_forever(port=args.port, experiment=exp_ctx)
+    elif args.cmd == "paper-reset":
+        _paper_reset(args.account, confirm=not args.yes)
     elif args.cmd == "paper-session-diff":
         _paper_session_diff(args.session_a, args.session_b)
     elif args.cmd == "paper-calibration":

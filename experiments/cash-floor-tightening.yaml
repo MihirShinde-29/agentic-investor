@@ -1,18 +1,21 @@
-# Example experiment: does a tighter cash floor produce better outcomes?
-#
-# Both arms run against the same live news stream and market state, but
-# each holds its own book on a separate Alpaca paper account. Any P/L
-# delta at end-of-session is honestly attributable to the config diff
-# (subject to noise from a single-session sample size).
+# 3-arm A/B: does tightening or loosening the drift filter + rebalance
+# bands change outcomes? Same news + same market data flow to all arms;
+# only the config diff distinguishes them.
 name: cash-floor-tightening
 arms:
   A:
     alpaca_account: primary
-    # baseline: profile default (10% cash floor from moderate)
+    # baseline: profile defaults
     config_diff: {}
   B:
     alpaca_account: secondary
-    # treatment: tighter opinion-drift filter + smaller position bands
+    # treatment: tighter drift + smaller bands (more sensitive)
     config_diff:
       opinion_drift_threshold_pct: 3
       band_abs_pct: 3
+  C:
+    alpaca_account: tertiary
+    # treatment: looser drift + bigger bands (less sensitive)
+    config_diff:
+      opinion_drift_threshold_pct: 7
+      band_abs_pct: 7
