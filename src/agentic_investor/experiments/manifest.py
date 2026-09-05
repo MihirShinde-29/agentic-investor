@@ -35,6 +35,10 @@ class ArmSpec:
     arm_id: str
     alpaca_account: str = "primary"  # "primary" | "secondary" | "tertiary"
     config_diff: dict[str, Any] = field(default_factory=dict)
+    # Extra env vars to set on this arm's subprocess. For env-controlled
+    # feature flags that don't have a corresponding LoopConfig knob
+    # (AGENTIC_MEMORY_RAG, AGENTIC_MEMORY_RAG_K, etc).
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -82,9 +86,11 @@ def load_experiment(path: str | Path) -> Experiment:
                 "cleanly separated)"
             )
         seen_accounts.add(account)
+        env_raw = (spec or {}).get("env") or {}
         arms.append(ArmSpec(
             arm_id=str(arm_id),
             alpaca_account=account,
             config_diff=dict((spec or {}).get("config_diff") or {}),
+            env={str(k): str(v) for k, v in env_raw.items()},
         ))
     return Experiment(name=name, arms=arms)

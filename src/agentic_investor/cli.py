@@ -1643,6 +1643,15 @@ def main() -> None:
     pmo.add_argument("--db-url", default=None,
                      help="sqlite URL for snapshot+bar lookups (default: settings.database_url)")
 
+    ppf = sub.add_parser("paper-preflight",
+                         help="run pre-launch health checks for an "
+                              "experiment: alpaca accounts, chroma seed, "
+                              "outcome sweep, port, arm DBs. exit code "
+                              "non-zero if anything fails.")
+    ppf.add_argument("experiment", help="experiment name or path")
+    ppf.add_argument("--dashboard-port", type=int, default=8000,
+                     help="port the dashboard will bind to (default 8000)")
+
     prst = sub.add_parser("paper-reset",
                           help="flush a paper account: cancel all open "
                                "orders + close all positions. Alpaca doesn't "
@@ -1794,6 +1803,9 @@ def main() -> None:
         return serve_forever(port=args.port, experiment=exp_ctx)
     elif args.cmd == "paper-reset":
         _paper_reset(args.account, confirm=not args.yes)
+    elif args.cmd == "paper-preflight":
+        from agentic_investor.ops.preflight import run_preflight
+        raise SystemExit(run_preflight(args.experiment, args.dashboard_port))
     elif args.cmd == "memory-index":
         _memory_index(historical=args.historical, db_url=args.db_url)
     elif args.cmd == "memory-outcomes":

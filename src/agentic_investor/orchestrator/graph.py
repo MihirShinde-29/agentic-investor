@@ -506,7 +506,9 @@ def _similar_precedents_block(state: GraphState, k: int = 4) -> str:
         from agentic_investor.memory.retrieval import retrieve_similar
 
         arm_id = _os.environ.get("AGENTIC_ARM_ID") or "solo"
-        results = retrieve_similar(query_text, arm_id=arm_id, k=k)
+        k_override = _os.environ.get("AGENTIC_MEMORY_RAG_K")
+        effective_k = int(k_override) if k_override else k
+        results = retrieve_similar(query_text, arm_id=arm_id, k=effective_k)
     except Exception as e:  # noqa: BLE001 - retrieval failure never blocks regen
         logger.debug("memory retrieval skipped: %s", e)
         return ""

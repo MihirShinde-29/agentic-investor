@@ -88,6 +88,28 @@ def test_missing_file_raises(tmp_path):
         load_experiment(str(tmp_path / "nope.yaml"))
 
 
+def test_arm_env_overrides_parse(tmp_path):
+    from agentic_investor.experiments.manifest import load_experiment
+
+    yml = tmp_path / "env_test.yaml"
+    yml.write_text("""
+name: env_test
+arms:
+  A:
+    alpaca_account: primary
+    env:
+      AGENTIC_MEMORY_RAG: "0"
+      AGENTIC_MEMORY_RAG_K: "8"
+  B:
+    alpaca_account: secondary
+""".strip())
+    exp = load_experiment(str(yml))
+    a = exp.arm("A")
+    b = exp.arm("B")
+    assert a.env == {"AGENTIC_MEMORY_RAG": "0", "AGENTIC_MEMORY_RAG_K": "8"}
+    assert b.env == {}
+
+
 def test_bare_name_resolves_under_experiments_dir(tmp_path, monkeypatch):
     from agentic_investor.experiments.manifest import load_experiment
 

@@ -139,6 +139,33 @@ def test_retrieval_failure_never_blocks_prompt_build(seeded_chroma, monkeypatch)
     assert "## 1. Request" in msgs[1]["content"][0]["text"]
 
 
+def test_memory_rag_k_env_override_takes_effect(seeded_chroma, monkeypatch):
+    """AGENTIC_MEMORY_RAG_K env lets us A/B-test retrieval k per arm
+    without a LoopConfig knob. Verify effective k = 8 not the default 4."""
+    for i in range(2, 8):
+        seeded_chroma.upsert(
+            ids=[f"rec:historical:{i}"],
+            embeddings=_fake_embedder([f"Apple defensive tech alloc variant {i}"]),
+            documents=[f"Apple defensive tech alloc variant {i}"],
+            metadatas=[{
+                "rec_id": i, "source": "historical",
+                "created_at": f"2026-08-{10 + i:02d}T10:00:00+00:00",
+                "tickers": "AAPL,MSFT", "n_positions": 2,
+                "avg_confidence": 0.7, "cash_pct": 15.0, "risk": "moderate",
+            }],
+        )
+    monkeypatch.setenv("AGENTIC_MEMORY_RAG", "1")
+    monkeypatch.setenv("AGENTIC_MEMORY_RAG_K", "8")
+    msgs = _messages(_base_state())
+    fast_tail = msgs[1]["content"][1]["text"]
+    section = fast_tail.split("## 11. Similar past decisions")[-1]
+    line_count = section.count("[2026-")
+    assert line_count >= 5, (
+        f"expected k=8 retrieved lines in section 11, got {line_count}. "
+        "AGENTIC_MEMORY_RAG_K env may not be respected."
+    )
+
+
 def test_arm_id_env_scopes_retrieval(seeded_chroma, monkeypatch):
     """Retrieval respects AGENTIC_ARM_ID for source filtering."""
     seeded_chroma.upsert(

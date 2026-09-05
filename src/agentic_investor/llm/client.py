@@ -74,6 +74,8 @@ _PRICES: dict[str, tuple[float, float]] = {
     "gemini/gemini-2.5-flash": (0.30, 2.50),
     "anthropic/claude-haiku-4-5": (1.00, 5.00),
     "anthropic/claude-sonnet-4-5": (3.00, 15.00),
+    "anthropic/claude-sonnet-4-6": (3.00, 15.00),
+    "anthropic/claude-opus-4-7": (15.00, 75.00),
 }
 
 
@@ -83,10 +85,20 @@ def _estimate_cost(
     completion_tokens: int,
     *,
     cached_tokens: int = 0,
+    cache_creation_tokens: int = 0,
 ) -> float:
+    """Estimate USD cost per LiteLLM's usage dict.
+
+    Anthropic and OpenAI price cached input differently:
+      - OpenAI: cache_read = 50% of base input rate; cache_creation not
+        separately billed (build-side cost is folded into standard input).
+      - Anthropic: cache_read = 10% of base; cache_creation = 125% of base.
+
+    LiteLLM's `prompt_tokens` includes both cache_read and cache_creation
+    on Anthropic responses, so we split them apart before scaling.
+    """
     prices = _PRICES.get(model)
     if prices is None:
-        # Substring fallback (e.g. "openai/gpt-4o-mini" or provider prefixes).
         for name, p in _PRICES.items():
             if name in model or model in name:
                 prices = p
@@ -94,9 +106,19 @@ def _estimate_cost(
     if prices is None:
         return 0.0
     in_rate, out_rate = prices
-    # OpenAI charges cached input at 50% of the base input rate.
-    uncached = max(0, prompt_tokens - cached_tokens)
-    input_cost = (uncached * in_rate + cached_tokens * in_rate * 0.5) / 1_000_000
+    is_anthropic = "anthropic" in model or "claude" in model
+    uncached = max(0, prompt_tokens - cached_tokens - cache_creation_tokens)
+    if is_anthropic:
+        cache_read_rate = in_rate * 0.10
+        cache_write_rate = in_rate * 1.25
+    else:
+        cache_read_rate = in_rate * 0.50
+        cache_write_rate = in_rate  # OpenAI: no extra creation surcharge
+    input_cost = (
+        uncached * in_rate
+        + cached_tokens * cache_read_rate
+        + cache_creation_tokens * cache_write_rate
+    ) / 1_000_000
     output_cost = completion_tokens * out_rate / 1_000_000
     return input_cost + output_cost
 
@@ -107,6 +129,7 @@ class _CallStats:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
+    cache_creation_tokens: int = 0
     estimated_cost_usd: float = 0.0
     by_model: dict[str, dict] = field(default_factory=dict)
 
@@ -130,6 +153,7 @@ def get_call_stats() -> _CallStats:
             prompt_tokens=_stats.prompt_tokens,
             completion_tokens=_stats.completion_tokens,
             cached_tokens=_stats.cached_tokens,
+            cache_creation_tokens=_stats.cache_creation_tokens,
             estimated_cost_usd=_stats.estimated_cost_usd,
             by_model={k: dict(v) for k, v in _stats.by_model.items()},
         )
@@ -160,8 +184,7 @@ def format_call_stats(stats: _CallStats | None = None) -> str:
 
 
 def _extract_cached_tokens(usage: dict) -> int:
-    """Pull cached-input-tokens from OpenAI or Anthropic usage payload."""
-    # OpenAI: usage.prompt_tokens_details.cached_tokens
+    """Pull cached-input-tokens (READ from cache) from usage payload."""
     details = usage.get("prompt_tokens_details") or {}
     if hasattr(details, "model_dump"):
         details = details.model_dump()
@@ -171,6 +194,17 @@ def _extract_cached_tokens(usage: dict) -> int:
     # Anthropic: usage.cache_read_input_tokens (LiteLLM passes through)
     cached += int(usage.get("cache_read_input_tokens", 0) or 0)
     return cached
+
+
+def _extract_cache_creation_tokens(usage: dict) -> int:
+    """Pull cache-creation input tokens (WRITTEN to cache this call).
+
+    Anthropic bills these at 1.25x the standard input rate but only on
+    the write; subsequent reads are 0.1x. Tracking creation vs read lets
+    us tell the difference between "cache is warming up" (high creation,
+    low read) and "cache is working" (low creation, high read).
+    """
+    return int(usage.get("cache_creation_input_tokens", 0) or 0)
 
 
 def _track_usage(kwargs, completion_response, start_time, end_time) -> None:
@@ -184,13 +218,18 @@ def _track_usage(kwargs, completion_response, start_time, end_time) -> None:
         prompt = int(usage.get("prompt_tokens", 0) or 0)
         completion = int(usage.get("completion_tokens", 0) or 0)
         cached = _extract_cached_tokens(usage)
+        creation = _extract_cache_creation_tokens(usage)
         model = kwargs.get("model", "unknown")
-        cost = _estimate_cost(model, prompt, completion, cached_tokens=cached)
+        cost = _estimate_cost(
+            model, prompt, completion,
+            cached_tokens=cached, cache_creation_tokens=creation,
+        )
         with _stats_lock:
             _stats.n_calls += 1
             _stats.prompt_tokens += prompt
             _stats.completion_tokens += completion
             _stats.cached_tokens += cached
+            _stats.cache_creation_tokens += creation
             _stats.estimated_cost_usd += cost
             m = _stats.by_model.setdefault(
                 model,

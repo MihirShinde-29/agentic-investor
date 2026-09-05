@@ -1,0 +1,29 @@
+# Does the M17 memory RAG actually help? And does more precedent help
+# beyond the default k=4?
+#
+# A: baseline — memory on, k=4 (production default)
+# B: memory off (AGENTIC_MEMORY_RAG=0). No section 9 in prompt. Isolates
+#    the marginal value of the whole M17 retrieval pipeline.
+# C: memory on, k=8. Doubles the number of retrieved precedents. Tests
+#    whether more historical context sharpens decisions or just crowds
+#    the prompt with less-relevant noise.
+#
+# Same news bus + market prices + broker discipline stack for all 3.
+# A vs B answers "does memory add signal?"; A vs C answers "does more
+# precedent context help or hurt?". Both are single-variable comparisons
+# so the answers are actually interpretable.
+name: memory-ablation
+arms:
+  A:
+    alpaca_account: primary
+    config_diff: {}
+  B:
+    alpaca_account: secondary
+    config_diff: {}
+    env:
+      AGENTIC_MEMORY_RAG: "0"
+  C:
+    alpaca_account: tertiary
+    config_diff: {}
+    env:
+      AGENTIC_MEMORY_RAG_K: "8"

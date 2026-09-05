@@ -25,6 +25,7 @@ def _arm_env(
     arm_id: str,
     news_bus_url: str | None = None,
     price_bus_url: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     env = dict(os.environ)
     arm_db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,6 +35,8 @@ def _arm_env(
         env["AGENTIC_NEWS_BUS"] = news_bus_url
     if price_bus_url:
         env["AGENTIC_PRICE_BUS"] = price_bus_url
+    if extra_env:
+        env.update(extra_env)
     return env
 
 
@@ -198,6 +201,7 @@ def run_experiment(
             arm_id=arm.arm_id,
             news_bus_url=news_bus_url,
             price_bus_url=price_bus_url,
+            extra_env=arm.env,
         )
         cmd = [
             sys.executable, "-m", "agentic_investor.cli",

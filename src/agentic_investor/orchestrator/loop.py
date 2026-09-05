@@ -885,11 +885,15 @@ def run_tick(
         cost = after.estimated_cost_usd - stats_before.estimated_cost_usd
         prompt_delta = after.prompt_tokens - stats_before.prompt_tokens
         cached_delta = after.cached_tokens - stats_before.cached_tokens
+        creation_delta = (
+            after.cache_creation_tokens - stats_before.cache_creation_tokens
+        )
         session.log("tick_cost", {
             "tick_at": tick_at,
             "llm_calls": after.n_calls - stats_before.n_calls,
             "prompt_tokens": prompt_delta,
             "cached_tokens": cached_delta,
+            "cache_creation_tokens": creation_delta,
             "cache_hit_pct": (
                 round(cached_delta / prompt_delta * 100, 1)
                 if prompt_delta else 0
