@@ -1,20 +1,8 @@
-"""Shared news bus for parallel experiment arms.
+"""Shared Alpaca news feed for N-arm experiments.
 
-Alpaca's news websocket permits only one concurrent connection per API
-key. When N arms each try to open their own subscription, N-1 of them
-get "connection limit exceeded". The bus fixes this: one writer owns
-the single Alpaca websocket and appends every headline to a shared
-SQLite table; every arm's news streamer polls that table instead of
-talking to Alpaca directly.
-
-Two moving pieces:
-  - `run_bus_writer(bus_url)`  - the one-and-only Alpaca subscriber;
-    typically spawned by the experiment runner as its own subprocess.
-  - `SharedBusStream` - duck-types Alpaca's NewsDataStream (implements
-    `subscribe_news(cb, *symbols)` + `run()`), so the existing
-    NewsStreamer wrapper can use it transparently.
-
-Enabled per-arm by setting env `AGENTIC_NEWS_BUS=sqlite:///...`.
+Alpaca allows one concurrent news websocket per API key. A single writer
+subscribes and appends every headline to SQLite; each arm's NewsStreamer
+uses SharedBusStream (duck-types NewsDataStream) to poll that table.
 """
 
 from __future__ import annotations
@@ -31,13 +19,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Poll cadence for arm-side readers. News is not high-frequency (dozens
-# per minute during a busy session), so half-second poll is way faster
-# than we need and keeps CPU near-zero.
 _READER_POLL_INTERVAL_SEC = 0.5
-
-# How long a reader will wait for the bus DB file to appear before it
-# gives up and lets the outer NewsStreamer retry loop take over.
 _READER_STARTUP_WAIT_SEC = 30.0
 
 
@@ -50,9 +32,9 @@ def bus_path_from_url(bus_url: str) -> Path:
 
 
 def init_bus_table(db_path: Path) -> None:
-    """Create the append-only bus table + enable WAL for concurrent readers."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(db_path)) as conn:
+        # WAL so N readers don't block the writer or each other.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
             """
@@ -75,14 +57,6 @@ def init_bus_table(db_path: Path) -> None:
 
 @dataclass
 class _BusItem:
-    """Duck-typed replacement for alpaca News payloads.
-
-    Only the attributes NewsStreamer._on_news actually reads are populated
-    (symbols, headline, summary, created_at, url, source). If future code
-    reaches for another field, it'll show up as an AttributeError in
-    testing rather than silently returning None from the real payload.
-    """
-
     symbols: list[str]
     headline: str
     summary: str
@@ -92,12 +66,6 @@ class _BusItem:
 
 
 def run_bus_writer(bus_url: str) -> int:
-    """Blocking. Owns the single Alpaca news websocket for the experiment.
-
-    Uses the primary account's news creds (secondary/tertiary accounts
-    aren't news subscribers - they're purely broker routing for the
-    per-arm books).
-    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -144,12 +112,10 @@ def run_bus_writer(bus_url: str) -> int:
 
 
 class SharedBusStream:
-    """Duck-types NewsDataStream so NewsStreamer can use it unchanged.
+    """Duck-types NewsDataStream: subscribe_news + run.
 
-    On `run()`, tails the shared bus_events table and calls the registered
-    subscribe_news callback for each new row. Each reader tracks its own
-    last-seen id in memory, so N arms polling the same bus all get every
-    headline exactly once.
+    Each reader tracks its own last-seen id so N arms polling the same
+    bus each get every headline exactly once.
     """
 
     def __init__(
@@ -165,9 +131,8 @@ class SharedBusStream:
         self._last_id = 0
 
     def subscribe_news(self, cb, *_symbols) -> None:
-        # We ignore *symbols here because the writer already subscribes to
-        # "*" upstream; NewsStreamer's own dedup + fanout logic decides
-        # which tickers to forward to the arm's decision pipeline.
+        # Writer already subscribes to "*"; NewsStreamer's own dedup +
+        # fanout decides which tickers reach the arm's decision pipeline.
         self._callback = cb
 
     def stop(self) -> None:
@@ -184,13 +149,10 @@ class SharedBusStream:
             if self._stop.wait(0.5):
                 return
         if not db_path.exists():
-            # Bus never came up. Raise so NewsStreamer's outer backoff loop
-            # will retry - the writer might come online later.
             raise FileNotFoundError(
                 f"news bus DB never appeared: {db_path}"
             )
-        # NewsStreamer's _on_news is `async`, so we need an event loop to
-        # drive it. One loop for the lifetime of run().
+        # NewsStreamer._on_news is async, so we need an event loop.
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
@@ -230,7 +192,6 @@ class SharedBusStream:
                     (self._last_id,),
                 ).fetchall()
         except sqlite3.OperationalError as e:
-            # Transient - writer might be initializing the table right
-            # now. Skip this tick, next poll will retry.
+            # Writer may be mid-init; next poll retries.
             logger.debug("news bus poll transient error: %s", e)
             return []

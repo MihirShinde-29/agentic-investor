@@ -312,18 +312,8 @@ class AlpacaPaperBroker:
 
 
 def get_latest_price(ticker: str) -> float:
-    """Latest trade price with Alpaca-first / yfinance-fallback.
-
-    Alpaca free tier serves real-time IEX data (fine for our dow30 universe).
-    yfinance is the fallback for any Alpaca hiccup (network, symbol
-    unavailable, quota).
-
-    Experiment mode: if the arm was spawned with AGENTIC_PRICE_BUS +
-    AGENTIC_ARM_ID, register interest with the shared price bus (so its
-    writer subscribes to trades for this ticker) and return the latest
-    cached trade if fresh. Fall through to the REST path on cold-start,
-    stale cache, or bus-write failure.
-    """
+    """Latest trade price: shared price bus if available, else Alpaca REST,
+    else yfinance."""
     from agentic_investor.experiments.price_bus import get_bus_client
 
     bus = get_bus_client()
@@ -333,7 +323,7 @@ def get_latest_price(ticker: str) -> float:
             cached = bus.get_latest(ticker)
             if cached is not None:
                 return cached
-        except Exception as e:  # noqa: BLE001 - never let bus errors block trading
+        except Exception as e:  # noqa: BLE001 - bus errors must never block trading
             logger.debug("price bus miss for %s: %s", ticker, e)
     try:
         from alpaca.data.historical import StockHistoricalDataClient
@@ -387,12 +377,7 @@ def _alpaca_order_to_domain(o) -> PaperOrder:
 
 
 def get_broker(*, account: str | None = None) -> PaperBroker:
-    """Default factory: real Alpaca paper broker on the given account.
-
-    When `account` is not passed and the dashboard has set a per-request
-    arm context (via runtime_context), routes to that arm's account.
-    Otherwise defaults to "primary" - the ambient single-arm behavior.
-    """
+    """Real Alpaca paper broker. Defaults to the arm context or primary."""
     if account is None:
         from agentic_investor.runtime_context import (
             get_active_alpaca_account,

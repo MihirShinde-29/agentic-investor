@@ -1,12 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { ExperimentMeta } from "@/lib/api";
 
-/**
- * Header dropdown to switch which arm the single-arm view is rendering.
- * Also links to the shared /compare view. Hidden in legacy single-arm
- * mode. Arm change navigates via query-string so all SWR hooks re-fetch
- * naturally on the next tick.
- */
 export function ArmPicker({
   meta,
   currentArm,

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { TrendingUp } from "lucide-react";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
@@ -79,6 +79,18 @@ function App() {
   const dismissAlert = (key: string) =>
     setDismissedAlerts((prev) => new Set(prev).add(key));
 
+  // Sets data-arm-theme on <html> so index.css can shift the accent HSL.
+  const themeKey = (() => {
+    if (!meta || meta.mode === "single") return null;
+    if (view === "compare") return "compare";
+    return arm || meta.default_arm;
+  })();
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (themeKey) document.documentElement.setAttribute("data-arm-theme", themeKey);
+    else document.documentElement.removeAttribute("data-arm-theme");
+  }, [themeKey]);
+
   const headerLabel = (() => {
     if (!meta || meta.mode === "single") return "Live paper trading dashboard";
     if (view === "compare") return `Experiment ${meta.name} · comparison`;
@@ -87,6 +99,13 @@ function App() {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
+      {themeKey ? (
+        <div
+          className="h-[3px] w-full"
+          style={{ backgroundColor: "hsl(var(--arm-accent))" }}
+          aria-hidden
+        />
+      ) : null}
       <header className="sticky top-0 z-20 border-b border-border/50 bg-background/90 backdrop-blur">
         <div className="mx-auto flex max-w-[1600px] items-center justify-between px-6 py-3">
           <div className="flex items-center gap-3">

@@ -1,12 +1,8 @@
-"""Spawn and monitor one subprocess per experiment arm.
+"""Spawn one paper-loop subprocess per experiment arm.
 
-Each arm is a normal `paper-loop` invocation with its Alpaca account
-routing and DATABASE_URL overridden via env so books stay cleanly
-separated. The runner just launches, streams logs prefixed with arm_id,
-and waits for shutdown (Ctrl+C forwards to all children).
-
-Keeps the loop code path unchanged - the existing single-arm loop we
-know works well is exactly what each subprocess runs.
+Each arm runs the unmodified single-arm loop with its own Alpaca
+account routing + DATABASE_URL. Runner streams prefixed logs and
+forwards Ctrl+C to all children.
 """
 
 from __future__ import annotations
@@ -30,21 +26,6 @@ def _arm_env(
     news_bus_url: str | None = None,
     price_bus_url: str | None = None,
 ) -> dict[str, str]:
-    """Return env overrides for one arm's subprocess.
-
-    Preserves existing env, only overrides:
-      DATABASE_URL      -> arm's own SQLite file for LoopState + orders
-      AGENTIC_ARM_ID    -> so the price-bus client tags subscription
-                           rows with the right arm identifier
-      AGENTIC_NEWS_BUS  -> shared news bus (single Alpaca news
-                           websocket, fanned out across arms)
-      AGENTIC_PRICE_BUS -> shared market-data bus (single Alpaca
-                           StockDataStream, subscription set is the
-                           reconciled union of arms' held+on-deck)
-
-    Alpaca account is passed via CLI flag, not env, so multiple arms in
-    the same shell won't accidentally cross-contaminate.
-    """
     env = dict(os.environ)
     arm_db_path.parent.mkdir(parents=True, exist_ok=True)
     env["DATABASE_URL"] = f"sqlite:///{arm_db_path}"
@@ -57,12 +38,7 @@ def _arm_env(
 
 
 def _config_diff_to_cli_args(diff: dict) -> list[str]:
-    """Translate a config_diff dict into paper-loop CLI arguments.
-
-    Only the knobs that paper-loop already exposes as CLI flags are
-    supported. Anything else raises so mis-typed manifests fail early
-    instead of silently ignoring an override.
-    """
+    """Translate config_diff to paper-loop CLI flags; raise on unknown keys."""
     supported = {
         "opinion_drift_threshold_pct": "--opinion-drift-threshold-pct",
         "max_single_delta_pct": "--max-single-delta-pct",
@@ -84,7 +60,6 @@ def _config_diff_to_cli_args(diff: dict) -> list[str]:
 
 
 def _stream_prefixed(stream, prefix: str, out=sys.stdout) -> None:
-    """Prefix every line from a subprocess pipe with `[arm]`."""
     for raw in iter(stream.readline, b""):
         try:
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
@@ -125,11 +100,9 @@ def run_experiment(
     print(f"shared news bus:  {news_bus_path}")
     print(f"shared price bus: {price_bus_path}\n")
 
-    # Spawn both shared bus writers first. They own the single Alpaca
-    # news + market-data websockets for the whole experiment; arms
-    # read/write against the bus DBs instead of trying to open their
-    # own (Alpaca's 1-connection-per-key limit would reject all but
-    # one arm otherwise).
+    # Bus writers own the single Alpaca news + market-data websockets
+    # for the whole experiment; arms fan out through the bus DBs instead
+    # of hitting Alpaca's 1-connection-per-key limit.
     for bus_name, subcmd, bus_url in (
         ("news-bus", "paper-news-bus", news_bus_url),
         ("price-bus", "paper-price-bus", price_bus_url),
@@ -154,14 +127,9 @@ def run_experiment(
         t.start()
         threads.append(t)
     if not dry_run_launch:
-        # Give the writers a moment to CREATE TABLE before arms start
-        # polling / registering.
+        # Let the writers CREATE TABLE before arms start polling.
         time.sleep(2)
 
-    # Spawn the shared experiment dashboard subprocess (arm picker +
-    # /compare view). One dashboard for the whole experiment - not
-    # per-arm - so the user has a single URL that swaps between arm A/B/C
-    # via the picker and shows the cross-arm compare view.
     if serve_dashboard:
         dash_cmd = [
             sys.executable, "-m", "agentic_investor.cli",
@@ -214,8 +182,7 @@ def run_experiment(
         )
         t.start()
         threads.append(t)
-        # Small stagger keeps their FinBERT / cache loads from hitting the
-        # same 100ms window and stalling each other.
+        # Stagger keeps arm FinBERT / cache loads from colliding.
         time.sleep(2)
     if dry_run_launch:
         return 0

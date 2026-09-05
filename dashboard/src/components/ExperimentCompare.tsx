@@ -15,7 +15,6 @@ import { fetcher } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-/** Distinct chart colors per arm, taken from Tailwind's default palette. */
 const ARM_COLORS = ["#60a5fa", "#f472b6", "#a78bfa", "#fbbf24", "#34d399"];
 
 function fmtUsd(n: number | undefined): string {
@@ -25,11 +24,6 @@ function fmtUsd(n: number | undefined): string {
   })}`;
 }
 
-/**
- * Multi-arm overlay: equity as % change from session open on one chart,
- * summary table below with per-arm equity/orders/notional/cash. Poll
- * every 30s; the whole point of A/B is watching the spread evolve.
- */
 export function ExperimentCompare() {
   const { data: summary } = useSWR<CompareSummaryResp>(
     "/api/experiment/compare/summary",
@@ -44,9 +38,8 @@ export function ExperimentCompare() {
 
   const chartData = useMemo(() => {
     if (!equity || equity.arms.length === 0) return [];
-    // Union all arms' timestamps. Each arm normalizes to % change from its
-    // own first point so we can see spread even if arms started with
-    // different equity.
+    // Normalize each arm to % change from its own first snapshot so
+    // arms that started at different equity are still comparable.
     const perArmNormalized: Record<string, { ts: number; pct: number }[]> = {};
     for (const arm of equity.arms) {
       if (arm.points.length === 0) {
@@ -65,7 +58,6 @@ export function ExperimentCompare() {
     return allTs.map((ts) => {
       const row: Record<string, number | string | null> = { ts };
       for (const [armId, series] of Object.entries(perArmNormalized)) {
-        // nearest-past sample
         let val: number | null = null;
         for (const p of series) {
           if (p.ts <= ts) val = p.pct;

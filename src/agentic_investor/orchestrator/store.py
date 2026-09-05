@@ -39,10 +39,7 @@ def _resolve_url(url: str | None) -> str:
     if url is not None:
         return url
     from agentic_investor.runtime_context import get_active_db_url
-    override = get_active_db_url()
-    if override:
-        return override
-    return get_settings().database_url
+    return get_active_db_url() or get_settings().database_url
 
 
 def save_recommendation(rec: Recommendation, *, url: str | None = None) -> int:

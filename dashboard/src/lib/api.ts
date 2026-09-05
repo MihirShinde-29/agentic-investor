@@ -72,18 +72,11 @@ export type RecResp = {
   }>;
 };
 
-/**
- * In experiment mode the dashboard serves multiple arms; each API request
- * needs `?arm=<id>` so the server middleware routes DB + broker calls to
- * that arm's SQLite + Alpaca account. We drive the arm off the URL query
- * string so it survives page reload + is copy-pasteable.
- */
 export function currentArm(): string | null {
   if (typeof window === "undefined") return null;
   return new URLSearchParams(window.location.search).get("arm");
 }
 
-/** Append ?arm=X to any API url, if we're in experiment mode. */
 export function withArm(path: string): string {
   const arm = currentArm();
   if (!arm) return path;

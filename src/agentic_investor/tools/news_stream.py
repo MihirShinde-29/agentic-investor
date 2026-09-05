@@ -175,10 +175,6 @@ class NewsStreamer:
     def _build_stream(self):
         if self._stream_factory is not None:
             return self._stream_factory()
-        # Experiment mode: if the arm was spawned with AGENTIC_NEWS_BUS,
-        # subscribe to the shared bus instead of opening a fresh Alpaca
-        # websocket (Alpaca allows only 1 concurrent news connection per
-        # API key, so N-arm A/B needs a single upstream + fanout).
         bus_url = os.environ.get("AGENTIC_NEWS_BUS")
         if bus_url:
             from agentic_investor.experiments.news_bus import SharedBusStream

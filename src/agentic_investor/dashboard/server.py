@@ -115,10 +115,6 @@ def create_app(
 
     @app.middleware("http")
     async def _arm_ctx(request: Request, call_next):
-        """When the dashboard is serving an experiment, read `?arm=X` and
-        set the runtime context so paper_store / broker calls transparently
-        route to that arm's SQLite + Alpaca account for the duration of
-        the request."""
         exp = app.state.experiment
         if exp is None:
             return await call_next(request)
@@ -142,15 +138,6 @@ def create_app(
 
     @app.get("/api/experiment/meta")
     def experiment_meta() -> dict:
-        """Advertise the experiment context (or absence of one) to the frontend.
-
-        `{"mode": "single"}`                     - legacy single-arm dashboard,
-                                                   no arm picker rendered
-        `{"mode": "experiment", "name": ...,
-          "arms": [{"id": "A", "account": "primary"}, ...]}`
-                                                 - experiment mode, arm
-                                                   picker + compare tab shown
-        """
         exp = app.state.experiment
         if exp is None:
             return {"mode": "single"}
@@ -166,12 +153,6 @@ def create_app(
 
     @app.get("/api/experiment/compare/summary")
     def experiment_compare_summary() -> dict:
-        """Per-arm summary for the shared /compare view.
-
-        Iterates arms, temporarily switches runtime context to each arm,
-        pulls the same shape the single-arm summary would return. Frontend
-        renders these side by side in a comparison table.
-        """
         exp = app.state.experiment
         if exp is None:
             return JSONResponse(
@@ -236,7 +217,6 @@ def create_app(
 
     @app.get("/api/experiment/compare/equity")
     def experiment_compare_equity(period: str = "1d") -> dict:
-        """Per-arm equity timeseries for the overlaid comparison chart."""
         exp = app.state.experiment
         if exp is None:
             return JSONResponse(
@@ -252,9 +232,6 @@ def create_app(
         )
         from agentic_investor.tools.paper_store import list_snapshots
 
-        # Simple period -> lookback mapping; keeps parity with /api/snapshots
-        # but doesn't handle the session-open edge cases (compare view is
-        # meant for whole-session A/B, not intra-day scoping).
         days_map = {
             "1d": 1, "3d": 3, "1w": 7, "1mo": 31, "3mo": 93, "1y": 366,
         }
@@ -934,13 +911,7 @@ def serve_in_thread(
     port: int = 8000,
     experiment: ExperimentContext | None = None,
 ) -> threading.Thread:
-    """Start uvicorn in a daemon thread. Returns the thread handle.
-
-    In legacy paper-loop mode `experiment` stays None. The experiment
-    runner spawns a separate `paper-dashboard` subprocess (see
-    `serve_forever`) instead of embedding the dashboard in the loop
-    process - keeps the two lifecycles independent.
-    """
+    """Start uvicorn in a daemon thread. Returns the thread handle."""
     import uvicorn
 
     app = create_app(experiment=experiment)
@@ -965,11 +936,7 @@ def serve_forever(
     port: int = 8000,
     experiment: ExperimentContext | None = None,
 ) -> int:
-    """Blocking uvicorn.run for the standalone `paper-dashboard` subprocess.
-
-    Configures logging so the subprocess's INFO lines reach stdout (same
-    pattern the bus writers use).
-    """
+    """Blocking uvicorn.run for the standalone `paper-dashboard` subprocess."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
