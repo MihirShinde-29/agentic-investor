@@ -179,39 +179,60 @@ def compute_outcomes_for_rec(
 def attach_outcomes_to_index(
     db_url: str | None = None, *, collection=None,
 ) -> tuple[int, int]:
-    """Update every historical Chroma doc with computed outcome metadata.
+    """Refresh outcome metadata for every rec in Chroma (historical + arm).
+
+    Per-rec source of truth:
+      - if meta.db_url is set (arm recs stash their DATABASE_URL at
+        ingest time), use that arm's own SQLite
+      - else use the caller-provided db_url (default: settings.database_url)
+        which is what historical recs from agentic_investor.db need
+
+    Idempotent: unripe horizons stay as -9999.0 sentinel and get filled
+    in on the next sweep once (created_at + horizon) has passed and the
+    arm's snapshot/bar data covers the window.
 
     Returns (n_updated, n_with_any_outcome).
     """
     from agentic_investor.config import get_settings
     from agentic_investor.memory.rec_index import _default_collection
 
-    resolved_url = db_url or get_settings().database_url
-    path = _db_path(resolved_url)
+    fallback_url = db_url or get_settings().database_url
     coll = collection if collection is not None else _default_collection()
 
-    # Chroma metadata field values can be null (None) but the KEY set is
-    # unioned across all docs on read, so we need to pull docs then update
-    # one-at-a-time (chromadb.update requires the id + full metadata).
-    result = coll.get(where={"source": "historical"})
+    result = coll.get()
     ids = result.get("ids") or []
     existing_metas = result.get("metadatas") or []
     if not ids:
-        logger.info("no historical docs in Chroma; run memory-index --historical first")
+        logger.info("no docs in Chroma; run memory-index --historical first")
         return (0, 0)
 
-    with sqlite3.connect(str(path)) as conn:
-        rec_rows = {
-            rec_id: (created_at, payload_json)
-            for rec_id, created_at, payload_json in conn.execute(
-                "SELECT id, created_at, payload_json FROM recommendations"
-            )
-        }
+    # Cache rec-blob lookups per db_url so a sweep across many arm recs
+    # doesn't re-read the same SQLite for every doc.
+    blobs_by_db: dict[str, dict[int, tuple[str, str]]] = {}
+
+    def _blobs(url: str) -> dict[int, tuple[str, str]]:
+        if url in blobs_by_db:
+            return blobs_by_db[url]
+        try:
+            with sqlite3.connect(str(_db_path(url))) as conn:
+                rows = {
+                    rid: (ts, pj)
+                    for rid, ts, pj in conn.execute(
+                        "SELECT id, created_at, payload_json FROM recommendations"
+                    )
+                }
+        except sqlite3.OperationalError as e:
+            logger.warning("cannot read recs from %s: %s", url, e)
+            rows = {}
+        blobs_by_db[url] = rows
+        return rows
 
     n_updated = 0
     n_with_outcome = 0
     for doc_id, meta in zip(ids, existing_metas, strict=False):
         rec_id = int(meta.get("rec_id") or 0)
+        rec_db_url = str(meta.get("db_url") or fallback_url)
+        rec_rows = _blobs(rec_db_url)
         if rec_id not in rec_rows:
             continue
         created_at, payload_json = rec_rows[rec_id]
@@ -219,11 +240,9 @@ def attach_outcomes_to_index(
             payload = json.loads(payload_json)
         except json.JSONDecodeError:
             continue
-        outcomes = compute_outcomes_for_rec(payload, created_at, resolved_url)
+        outcomes = compute_outcomes_for_rec(payload, created_at, rec_db_url)
         merged = {**meta, **outcomes}
-        # Chroma requires scalar (str/int/float/bool) - convert None to a
-        # sentinel we can filter on later. Using -9999.0 signals "no data"
-        # without conflicting with real P/L magnitudes.
+        # Chroma requires scalar (str/int/float/bool); None -> sentinel.
         for k in list(merged.keys()):
             if merged[k] is None:
                 merged[k] = -9999.0 if k.startswith("outcome_pl_pct_") else False

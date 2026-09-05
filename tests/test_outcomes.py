@@ -218,6 +218,51 @@ def test_attach_outcomes_updates_chroma_metadata(tmp_path):
     assert meta["outcome_pl_pct_15m"] == -9999.0
 
 
+def test_attach_outcomes_sweeps_arm_sources_and_uses_per_rec_db(tmp_path):
+    """Arm recs stash their own db_url in metadata; the sweep must read
+    snapshots from THAT db, not the caller default."""
+    arm_db = tmp_path / "arm_A.db"
+    conn_a = _seed_db(arm_db)
+    rec_time = datetime(2026, 9, 1, 10, 0, 0, tzinfo=UTC)
+    payload = _payload([("AAPL", 100.0)])
+    conn_a.execute(
+        "INSERT INTO recommendations (created_at, payload_json) VALUES (?, ?)",
+        (rec_time.isoformat(), json.dumps(payload)),
+    )
+    conn_a.commit()
+    _insert_snapshot(conn_a, rec_time, equity=100_000.0)
+    _insert_snapshot(conn_a, rec_time + timedelta(minutes=60), equity=101_000.0)
+
+    # Caller default DB is empty; the arm doc's db_url metadata is what
+    # should route the outcome lookup.
+    default_db = tmp_path / "default.db"
+    _seed_db(default_db)
+
+    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+    coll = client.get_or_create_collection(
+        name="recommendations", metadata={"hnsw:space": "cosine"},
+    )
+    coll.upsert(
+        ids=["rec:arm_A:1"],
+        embeddings=[[0.1, 0.2, 0.3, 0.4]],
+        documents=["arm A rec"],
+        metadatas=[{
+            "rec_id": 1, "source": "arm_A",
+            "created_at": rec_time.isoformat(),
+            "tickers": "AAPL", "n_positions": 1,
+            "avg_confidence": 0.7, "cash_pct": 0.0, "risk": "moderate",
+            "db_url": f"sqlite:///{arm_db}",
+        }],
+    )
+    n_updated, n_with = attach_outcomes_to_index(
+        db_url=f"sqlite:///{default_db}", collection=coll,
+    )
+    assert n_updated == 1
+    assert n_with == 1
+    meta = coll.get(ids=["rec:arm_A:1"])["metadatas"][0]
+    assert meta["outcome_pl_pct_60m"] == 1.0
+
+
 def test_attach_outcomes_empty_collection_is_noop(tmp_path):
     db = tmp_path / "seed.db"
     _seed_db(db)

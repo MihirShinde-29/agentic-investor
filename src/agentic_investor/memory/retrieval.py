@@ -40,19 +40,43 @@ class RetrievedRec:
     outcome_pl_pct_1w: float | None
 
     def to_prompt_line(self, max_text: int = 220) -> str:
-        """Compact one-line rendering for injection into the allocator prompt."""
+        """Compact one-line rendering for injection into the allocator prompt.
+
+        Trailing hint flags partial trajectories so the LLM can weight
+        a not-fully-matured precedent accordingly.
+        """
         date = self.created_at[:10] if self.created_at else "?"
         head = f"[{date}] {','.join(self.tickers) or '?'}"
         traj_parts: list[str] = []
+        n_present = 0
         for horizon in ("15m", "60m", "1d", "1w"):
             val = getattr(self, f"outcome_pl_pct_{horizon}")
             if val is not None:
                 traj_parts.append(f"{horizon} {val:+.2f}%")
-        trajectory = " -> ".join(traj_parts) if traj_parts else "no outcome"
+                n_present += 1
+        if not traj_parts:
+            trajectory = "no outcome yet"
+        elif n_present < 4:
+            trajectory = " -> ".join(traj_parts) + " (partial)"
+        else:
+            trajectory = " -> ".join(traj_parts)
         text = (self.text or "").replace("\n", " ").strip()
         if len(text) > max_text:
             text = text[: max_text - 1] + "…"
         return f"{head} [{trajectory}] {text}"
+
+    def _tiebreak_score(self) -> float:
+        """Longest-available horizon anchors the tiebreak.
+
+        Prefer 1w > 1d > 60m > 15m so mature outcomes dominate; a rec
+        with only 15m data still uses its immediate reaction rather
+        than being flattened to 0.
+        """
+        for h in ("1w", "1d", "60m", "15m"):
+            v = getattr(self, f"outcome_pl_pct_{h}")
+            if v is not None:
+                return v
+        return 0.0
 
 
 def retrieve_similar(
@@ -125,10 +149,5 @@ def retrieve_similar(
     # Nudge successful precedents ahead of failed ones on near-ties in
     # similarity. Uses 1d outcome as the anchor (highest coverage +
     # meaningful signal per M17.B distribution).
-    out.sort(
-        key=lambda r: (
-            -r.similarity,
-            -(r.outcome_pl_pct_1d if r.outcome_pl_pct_1d is not None else 0.0),
-        ),
-    )
+    out.sort(key=lambda r: (-r.similarity, -r._tiebreak_score()))
     return out[:k]

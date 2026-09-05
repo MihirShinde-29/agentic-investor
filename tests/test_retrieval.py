@@ -189,7 +189,60 @@ def test_to_prompt_line_no_outcome_data(tmp_path):
         outcome_pl_pct_1d=None, outcome_pl_pct_1w=None,
     )
     line = r.to_prompt_line()
-    assert "no outcome" in line
+    assert "no outcome yet" in line
+
+
+def test_to_prompt_line_partial_trajectory_marked(tmp_path):
+    r = RetrievedRec(
+        rec_id=1, source="arm_A",
+        created_at="2026-09-05T10:00:00+00:00",
+        tickers=["TSLA"], similarity=0.7,
+        text="partially matured", n_positions=1,
+        avg_confidence=0.6, risk="moderate",
+        outcome_pl_pct_15m=0.5, outcome_pl_pct_60m=None,
+        outcome_pl_pct_1d=None, outcome_pl_pct_1w=None,
+    )
+    line = r.to_prompt_line()
+    assert "(partial)" in line
+    assert "15m +0.50%" in line
+
+
+def test_tiebreak_cascades_to_longest_available_horizon(tmp_path):
+    """When 1d is None but 60m is present, 60m anchors the tiebreak
+    (not treated as 0.0). Recent important recs don't lose to older
+    slightly-positive ones just because 1d hasn't matured yet."""
+    coll = _tmp_collection(tmp_path)
+    # Both identical text; A has 1d=-0.5, B has only 60m=+0.8
+    coll.upsert(
+        ids=["rec:historical:1"],
+        embeddings=_fake_embedder(["same"]),
+        documents=["same"],
+        metadatas=[{
+            "rec_id": 1, "source": "historical",
+            "created_at": "2026-09-01T10:00:00+00:00",
+            "tickers": "AAPL", "n_positions": 1,
+            "avg_confidence": 0.7, "cash_pct": 0.0, "risk": "moderate",
+            "outcome_pl_pct_1d": -0.5,
+        }],
+    )
+    coll.upsert(
+        ids=["rec:historical:2"],
+        embeddings=_fake_embedder(["same"]),
+        documents=["same"],
+        metadatas=[{
+            "rec_id": 2, "source": "historical",
+            "created_at": "2026-09-05T10:00:00+00:00",
+            "tickers": "MSFT", "n_positions": 1,
+            "avg_confidence": 0.7, "cash_pct": 0.0, "risk": "moderate",
+            "outcome_pl_pct_60m": 0.8,
+        }],
+    )
+    results = retrieve_similar(
+        "same", "A", k=2, collection=coll, embedder=_fake_embedder,
+    )
+    # rec 2 (60m +0.8 = tiebreak +0.8) beats rec 1 (1d -0.5 = tiebreak -0.5)
+    assert results[0].rec_id == 2
+    assert results[1].rec_id == 1
 
 
 def test_max_age_days_filters_stale_recs(tmp_path):

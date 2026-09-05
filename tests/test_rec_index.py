@@ -213,18 +213,36 @@ def test_index_arm_rec_skips_when_disabled(tmp_path, monkeypatch):
     assert coll.count() == 0
 
 
+def test_index_arm_rec_stashes_db_url_in_metadata(tmp_path, monkeypatch):
+    """The db_url metadata is what lets a later memory-outcomes sweep
+    read snapshots from the right arm SQLite - critical for arms whose
+    DATABASE_URL differs from the caller's default."""
+    from agentic_investor.memory.rec_index import index_arm_rec
+
+    monkeypatch.setenv("AGENTIC_MEMORY_RAG", "1")
+    monkeypatch.setenv("AGENTIC_ARM_ID", "A")
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///out/experiments/exp1/A.db")
+    coll = _tmp_collection(tmp_path)
+    index_arm_rec(
+        _make_rec(["AAPL"]), rec_id=99,
+        collection=coll, embedder=_fake_embedder,
+    )
+    meta = coll.get(ids=["rec:arm_A:99"])["metadatas"][0]
+    assert meta["db_url"] == "sqlite:///out/experiments/exp1/A.db"
+
+
 def test_index_arm_rec_never_raises_on_failure(tmp_path, monkeypatch):
     """A chroma outage during ingestion cannot take down the loop."""
-    from agentic_investor.memory import rec_index as mod
     from agentic_investor.memory.rec_index import index_arm_rec
 
     monkeypatch.setenv("AGENTIC_MEMORY_RAG", "1")
 
-    def _boom(*a, **kw):
-        raise RuntimeError("simulated chroma outage")
+    class _BustedColl:
+        def upsert(self, *a, **kw):
+            raise RuntimeError("simulated chroma outage")
 
-    monkeypatch.setattr(mod, "upsert_rec", _boom)
     # Would raise if not caught; returning False is the contract.
     assert index_arm_rec(
         _make_rec(["AAPL"]), rec_id=1,
+        collection=_BustedColl(), embedder=_fake_embedder,
     ) is False

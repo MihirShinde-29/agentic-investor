@@ -225,24 +225,38 @@ def index_arm_rec(
 
     Reads AGENTIC_ARM_ID env when arm_id is not passed (solo paper-loop
     runs get arm_id="solo" so their memory is isolated from any A/B
-    experiment). Honors AGENTIC_MEMORY_RAG kill-switch. Never raises -
-    failure returns False and the loop moves on.
+    experiment). Also stashes the current DATABASE_URL in metadata so a
+    later memory-outcomes sweep knows which SQLite to read snapshots
+    from - arm subprocesses each have their own DB path.
+
+    Honors AGENTIC_MEMORY_RAG kill-switch. Never raises - failure
+    returns False and the loop moves on.
     """
     import os
     from datetime import UTC, datetime
+
+    from agentic_investor.config import get_settings
 
     if os.environ.get("AGENTIC_MEMORY_RAG", "1") != "1":
         return False
     resolved_arm = arm_id or os.environ.get("AGENTIC_ARM_ID") or "solo"
     try:
-        return upsert_rec(
-            rec,
-            rec_id=rec_id,
-            created_at=datetime.now(UTC).isoformat(),
-            source=f"arm_{resolved_arm}",
-            collection=collection,
-            embedder=embedder if embedder is not None else _default_embed,
+        source = f"arm_{resolved_arm}"
+        created_at = datetime.now(UTC).isoformat()
+        text = embed_text_for_rec(rec)
+        if not text:
+            return False
+        coll = collection if collection is not None else _default_collection()
+        emb = embedder if embedder is not None else _default_embed
+        meta = metadata_for_rec(rec, rec_id, created_at, source)
+        meta["db_url"] = get_settings().database_url
+        coll.upsert(
+            ids=[_doc_id(source, rec_id)],
+            embeddings=emb([text]),
+            documents=[text],
+            metadatas=[meta],
         )
+        return True
     except Exception as e:  # noqa: BLE001 - ingestion failure never blocks trading
         logger.debug("memory ingest failed for rec %d: %s", rec_id, e)
         return False
