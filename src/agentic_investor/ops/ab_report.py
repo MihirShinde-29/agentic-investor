@@ -134,7 +134,10 @@ def build_ab_report(experiment_name: str) -> str:
     exp_dir = Path("out") / "experiments" / experiment_name
     if not exp_dir.exists():
         return f"no experiment dir: {exp_dir}"
-    arm_dbs = sorted(exp_dir.glob("*.db"))
+    # news_bus.db is the shared upstream news feed, not an arm - skip it.
+    arm_dbs = sorted(
+        p for p in exp_dir.glob("*.db") if p.name != "news_bus.db"
+    )
     if not arm_dbs:
         return f"no arm DBs under {exp_dir}"
     lines = [f"\nExperiment: {experiment_name}", f"Dir: {exp_dir}\n"]

@@ -1503,6 +1503,14 @@ def main() -> None:
     pab.add_argument("experiment", help="experiment name (used to find "
                                        "out/experiments/{name}/)")
 
+    pnb = sub.add_parser("paper-news-bus",
+                         help="run the shared Alpaca news subscriber for a "
+                              "paper-experiment; typically spawned by the "
+                              "experiment runner, not invoked directly")
+    pnb.add_argument("bus_url",
+                     help="sqlite:///path/to/news_bus.db - each arm should "
+                          "have AGENTIC_NEWS_BUS set to this same URL")
+
     psd = sub.add_parser("paper-session-diff",
                          help="compare two session.jsonl runs on knob "
                               "firing counts + cost; quantifies whether a "
@@ -1621,6 +1629,9 @@ def main() -> None:
                           dry_run_launch=args.dry_run_launch)
     elif args.cmd == "paper-ab-report":
         _paper_ab_report(args.experiment)
+    elif args.cmd == "paper-news-bus":
+        from agentic_investor.experiments.news_bus import run_bus_writer
+        return run_bus_writer(args.bus_url)
     elif args.cmd == "paper-session-diff":
         _paper_session_diff(args.session_a, args.session_b)
     elif args.cmd == "paper-calibration":
