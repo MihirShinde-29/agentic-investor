@@ -340,11 +340,67 @@ Below in this order you will find:
   5. Current allocation (previous decision) if any
   6. Your recent trades on these tickers this session
   7. Breaking-news events if any
+  8. On-deck watchlist of promoted candidates
+  9. Similar past decisions (retrieved from your own reasoning memory)
 
 Read them all, then emit a valid Allocation object per the schema in the
 system message. Weights (positions + cash_pct) must sum to 100. Cite
 specific tickers or values in each rationale; do not invent data.
 """
+
+
+def _similar_precedents_block(state: GraphState, k: int = 4) -> str:
+    """Retrieve past reasoning similar to the current situation and render it.
+
+    Query text = breaking-news batch + held tickers + risk profile. This
+    keeps semantic anchoring on both the trigger (news) and the context
+    (what we hold). Arm scoping via `AGENTIC_ARM_ID` env; unset = "solo"
+    so a plain paper-loop still gets its own memory lane.
+
+    Returns "" when disabled, when no signal to query on, or on any
+    retrieval failure. Placement is CRITICAL: this block MUST land in the
+    volatile fast_tail (post-cache-marker) - it changes every regen and
+    would tank cache-hit rates if it moved earlier.
+    """
+    import os as _os
+
+    if _os.environ.get("AGENTIC_MEMORY_RAG", "1") != "1":
+        return ""
+    req = state.get("request")
+    if req is None:
+        return ""
+    batch_ctx = (state.get("news_batch_context") or "").strip()
+    prev_alloc = state.get("previous_allocation")
+    held_tickers = (
+        sorted({p.ticker.upper() for p in prev_alloc.positions})
+        if prev_alloc is not None else []
+    )
+    query_parts: list[str] = []
+    if batch_ctx:
+        query_parts.append(batch_ctx)
+    if held_tickers:
+        query_parts.append(f"Currently holding: {', '.join(held_tickers)}")
+    query_parts.append(f"Risk profile: {req.risk}, target {req.target}")
+    query_text = "\n".join(query_parts).strip()
+    if not query_text:
+        return ""
+    try:
+        from agentic_investor.memory.retrieval import retrieve_similar
+
+        arm_id = _os.environ.get("AGENTIC_ARM_ID") or "solo"
+        results = retrieve_similar(query_text, arm_id=arm_id, k=k)
+    except Exception as e:  # noqa: BLE001 - retrieval failure never blocks regen
+        logger.debug("memory retrieval skipped: %s", e)
+        return ""
+    if not results:
+        return ""
+    lines = [r.to_prompt_line() for r in results]
+    return (
+        "Each entry shows tickers + outcome trajectory (15m -> 60m -> "
+        "1d -> 1w) + condensed reasoning. Use them as precedent; don't "
+        "blindly copy - the market state today may differ.\n\n"
+        + "\n\n".join(lines)
+    )
 
 
 def _recent_trades_block(
@@ -557,6 +613,13 @@ def _messages(state: GraphState) -> list[dict]:
             + "you consider no longer worth watching in `on_deck_purge` "
             + "and the loop will drop them from the watchlist. This is "
             + "entirely optional — your call which (if any) to purge."
+        )
+
+    precedents = _similar_precedents_block(state)
+    if precedents:
+        fast_sections.append(
+            "## 9. Similar past decisions (from your own reasoning memory)\n"
+            + precedents
         )
 
     slow_prefix = USER_PREAMBLE + "\n\n" + "\n\n".join(slow_sections)
