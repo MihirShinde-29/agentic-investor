@@ -86,12 +86,16 @@ def _start_outcome_sweeper(
                     attach_outcomes_to_index,
                 )
                 n_updated, n_with = attach_outcomes_to_index()
+                # flush=True: this daemon thread prints to the runner's own
+                # stdout which is block-buffered when captured to a file;
+                # without it the events pile up invisibly for minutes.
                 print(
                     f"[memory-sweep] refreshed {n_updated} recs, "
-                    f"{n_with} have at least one outcome"
+                    f"{n_with} have at least one outcome",
+                    flush=True,
                 )
             except Exception as e:  # noqa: BLE001 - sweep failure is not fatal
-                print(f"[memory-sweep] error: {e}")
+                print(f"[memory-sweep] error: {e}", flush=True)
             if stop_event.wait(interval_min * 60):
                 return
 
