@@ -843,6 +843,7 @@ def _paper_experiment(
     dry_run_launch: bool = False,
     serve_dashboard: bool = False,
     dashboard_port: int = 8000,
+    memory_sweep_interval_min: int = 30,
 ) -> None:
     from agentic_investor.experiments.manifest import load_experiment
     from agentic_investor.experiments.runner import run_experiment
@@ -853,6 +854,7 @@ def _paper_experiment(
         dry_run_launch=dry_run_launch,
         serve_dashboard=serve_dashboard,
         dashboard_port=dashboard_port,
+        memory_sweep_interval_min=memory_sweep_interval_min,
     )
     raise SystemExit(rc)
 
@@ -1577,6 +1579,9 @@ def main() -> None:
                           "experiment (arm picker + /compare view)")
     pex.add_argument("--dashboard-port", type=int, default=8000,
                      help="port for --serve-dashboard (default 8000)")
+    pex.add_argument("--memory-sweep-interval-min", type=int, default=30,
+                     help="how often to refresh M17 outcome metadata via "
+                          "background thread (default 30 min; 0 = disabled)")
     pex.add_argument("--paper-loop-args", nargs=argparse.REMAINDER,
                      default=[],
                      help="all args after this are forwarded to each arm's "
@@ -1759,7 +1764,10 @@ def main() -> None:
         _paper_experiment(args.experiment, args.paper_loop_args,
                           dry_run_launch=args.dry_run_launch,
                           serve_dashboard=args.serve_dashboard,
-                          dashboard_port=args.dashboard_port)
+                          dashboard_port=args.dashboard_port,
+                          memory_sweep_interval_min=(
+                              args.memory_sweep_interval_min
+                          ))
     elif args.cmd == "paper-ab-report":
         _paper_ab_report(args.experiment)
     elif args.cmd == "paper-news-bus":

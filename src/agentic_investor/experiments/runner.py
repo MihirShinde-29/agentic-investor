@@ -69,6 +69,39 @@ def _stream_prefixed(stream, prefix: str, out=sys.stdout) -> None:
         out.flush()
 
 
+def _start_outcome_sweeper(
+    interval_min: int, stop_event: threading.Event,
+) -> threading.Thread:
+    """Background loop that refreshes M17 outcome metadata every N min.
+
+    Runs in-process on the runner - reads paper_snapshots + daily_bars
+    per arm (arms stash their db_url in each doc's metadata at ingest,
+    so the sweep routes to the right SQLite automatically).
+    """
+    def _sweep() -> None:
+        stop_event.wait(60)  # brief warmup so arms have written at least one rec
+        while not stop_event.is_set():
+            try:
+                from agentic_investor.memory.outcomes import (
+                    attach_outcomes_to_index,
+                )
+                n_updated, n_with = attach_outcomes_to_index()
+                print(
+                    f"[memory-sweep] refreshed {n_updated} recs, "
+                    f"{n_with} have at least one outcome"
+                )
+            except Exception as e:  # noqa: BLE001 - sweep failure is not fatal
+                print(f"[memory-sweep] error: {e}")
+            if stop_event.wait(interval_min * 60):
+                return
+
+    t = threading.Thread(
+        target=_sweep, name="memory-outcomes-sweeper", daemon=True,
+    )
+    t.start()
+    return t
+
+
 def run_experiment(
     experiment: Experiment,
     *,
@@ -76,6 +109,7 @@ def run_experiment(
     dry_run_launch: bool = False,
     serve_dashboard: bool = False,
     dashboard_port: int = 8000,
+    memory_sweep_interval_min: int = 30,
 ) -> int:
     """Spawn one paper-loop subprocess per arm and wait until all finish.
 
@@ -185,9 +219,26 @@ def run_experiment(
         # Stagger keeps arm FinBERT / cache loads from colliding.
         time.sleep(2)
     if dry_run_launch:
+        if memory_sweep_interval_min > 0:
+            print(
+                f"  memory-sweep interval: {memory_sweep_interval_min} min "
+                f"(background thread, in-process)"
+            )
         return 0
 
+    sweeper_stop = threading.Event()
+    if (
+        memory_sweep_interval_min > 0
+        and os.environ.get("AGENTIC_MEMORY_RAG", "1") == "1"
+    ):
+        print(
+            f"[memory-sweep] starting background sweeper "
+            f"every {memory_sweep_interval_min} min"
+        )
+        _start_outcome_sweeper(memory_sweep_interval_min, sweeper_stop)
+
     def _shutdown(_sig=None, _frame=None):
+        sweeper_stop.set()
         for arm_id, p in procs:
             if p.poll() is None:
                 print(f"\n[{arm_id}] sending SIGINT")
