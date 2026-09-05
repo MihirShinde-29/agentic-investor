@@ -213,6 +213,41 @@ def _load_rec_blobs(db_url: str | None) -> list[tuple[int, str, str]]:
         ).fetchall()
 
 
+def index_arm_rec(
+    rec: Recommendation,
+    rec_id: int,
+    *,
+    arm_id: str | None = None,
+    collection=None,
+    embedder: Callable[[list[str]], list[list[float]]] | None = None,
+) -> bool:
+    """Index a fresh live rec under source=f"arm_{id}".
+
+    Reads AGENTIC_ARM_ID env when arm_id is not passed (solo paper-loop
+    runs get arm_id="solo" so their memory is isolated from any A/B
+    experiment). Honors AGENTIC_MEMORY_RAG kill-switch. Never raises -
+    failure returns False and the loop moves on.
+    """
+    import os
+    from datetime import UTC, datetime
+
+    if os.environ.get("AGENTIC_MEMORY_RAG", "1") != "1":
+        return False
+    resolved_arm = arm_id or os.environ.get("AGENTIC_ARM_ID") or "solo"
+    try:
+        return upsert_rec(
+            rec,
+            rec_id=rec_id,
+            created_at=datetime.now(UTC).isoformat(),
+            source=f"arm_{resolved_arm}",
+            collection=collection,
+            embedder=embedder if embedder is not None else _default_embed,
+        )
+    except Exception as e:  # noqa: BLE001 - ingestion failure never blocks trading
+        logger.debug("memory ingest failed for rec %d: %s", rec_id, e)
+        return False
+
+
 def _flush(coll, batch: Iterable[tuple[str, str, dict]], embedder) -> None:
     items = list(batch)
     coll.upsert(

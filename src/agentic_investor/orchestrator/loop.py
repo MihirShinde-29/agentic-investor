@@ -1255,6 +1255,11 @@ def run_tick(
                     )
             else:
                 rec_id = save_rec(rec)
+                try:
+                    from agentic_investor.memory.rec_index import index_arm_rec
+                    index_arm_rec(rec, rec_id)
+                except Exception:  # noqa: BLE001
+                    pass
                 state.last_rec_id = rec_id
                 state.last_rec_date = today
                 state.frozen_picker_tickers = tickers_used
@@ -1309,6 +1314,11 @@ def run_tick(
             # First-ever regen or new-day reset: no prior rec to compare
             # against, so the drift filter can't fire. Save straight through.
             rec_id = save_rec(rec)
+            try:
+                from agentic_investor.memory.rec_index import index_arm_rec
+                index_arm_rec(rec, rec_id)
+            except Exception:  # noqa: BLE001
+                pass
             state.last_rec_id = rec_id
             state.last_rec_date = today
             state.frozen_picker_tickers = tickers_used

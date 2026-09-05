@@ -169,3 +169,62 @@ def test_arm_source_writes_distinct_doc_id(tmp_path):
     upsert_rec(rec, 1, "2026-09-01T10:00:00", "arm_A",
                collection=coll, embedder=_fake_embedder)
     assert coll.count() == 2
+
+
+def test_index_arm_rec_tags_source_from_env(tmp_path, monkeypatch):
+    from agentic_investor.memory.rec_index import index_arm_rec
+
+    monkeypatch.setenv("AGENTIC_MEMORY_RAG", "1")
+    monkeypatch.setenv("AGENTIC_ARM_ID", "B")
+    coll = _tmp_collection(tmp_path)
+    ok = index_arm_rec(
+        _make_rec(["NVDA"]), rec_id=42,
+        collection=coll, embedder=_fake_embedder,
+    )
+    assert ok is True
+    res = coll.get()
+    assert res["metadatas"][0]["source"] == "arm_B"
+
+
+def test_index_arm_rec_defaults_to_solo(tmp_path, monkeypatch):
+    """Unset AGENTIC_ARM_ID = solo tag so single-arm loops still get memory."""
+    from agentic_investor.memory.rec_index import index_arm_rec
+
+    monkeypatch.setenv("AGENTIC_MEMORY_RAG", "1")
+    monkeypatch.delenv("AGENTIC_ARM_ID", raising=False)
+    coll = _tmp_collection(tmp_path)
+    index_arm_rec(
+        _make_rec(["AAPL"]), rec_id=1,
+        collection=coll, embedder=_fake_embedder,
+    )
+    assert coll.get()["metadatas"][0]["source"] == "arm_solo"
+
+
+def test_index_arm_rec_skips_when_disabled(tmp_path, monkeypatch):
+    from agentic_investor.memory.rec_index import index_arm_rec
+
+    monkeypatch.setenv("AGENTIC_MEMORY_RAG", "0")
+    coll = _tmp_collection(tmp_path)
+    ok = index_arm_rec(
+        _make_rec(["AAPL"]), rec_id=1,
+        collection=coll, embedder=_fake_embedder,
+    )
+    assert ok is False
+    assert coll.count() == 0
+
+
+def test_index_arm_rec_never_raises_on_failure(tmp_path, monkeypatch):
+    """A chroma outage during ingestion cannot take down the loop."""
+    from agentic_investor.memory import rec_index as mod
+    from agentic_investor.memory.rec_index import index_arm_rec
+
+    monkeypatch.setenv("AGENTIC_MEMORY_RAG", "1")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated chroma outage")
+
+    monkeypatch.setattr(mod, "upsert_rec", _boom)
+    # Would raise if not caught; returning False is the contract.
+    assert index_arm_rec(
+        _make_rec(["AAPL"]), rec_id=1,
+    ) is False
