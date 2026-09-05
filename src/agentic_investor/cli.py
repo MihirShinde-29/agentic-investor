@@ -864,6 +864,21 @@ def _paper_ab_report(experiment_name: str) -> None:
     print(report)
 
 
+def _memory_outcomes(*, db_url: str | None) -> None:
+    import logging as _lg
+
+    _lg.basicConfig(
+        level=_lg.INFO, format="%(levelname)s %(message)s", force=True,
+    )
+    from agentic_investor.memory.outcomes import attach_outcomes_to_index
+
+    n_updated, n_with = attach_outcomes_to_index(db_url=db_url)
+    print(
+        f"\nupdated {n_updated} chroma docs "
+        f"({n_with} have >=1 horizon; rest kept as sentinels)"
+    )
+
+
 def _memory_index(*, historical: bool, db_url: str | None) -> None:
     import logging as _lg
 
@@ -1610,6 +1625,12 @@ def main() -> None:
     pmi.add_argument("--db-url", default=None,
                      help="sqlite URL to read from (default: settings.database_url)")
 
+    pmo = sub.add_parser("memory-outcomes",
+                         help="compute multi-horizon P/L outcomes for every "
+                              "historical rec in Chroma and merge into metadata")
+    pmo.add_argument("--db-url", default=None,
+                     help="sqlite URL for snapshot+bar lookups (default: settings.database_url)")
+
     prst = sub.add_parser("paper-reset",
                           help="flush a paper account: cancel all open "
                                "orders + close all positions. Alpaca doesn't "
@@ -1760,6 +1781,8 @@ def main() -> None:
         _paper_reset(args.account, confirm=not args.yes)
     elif args.cmd == "memory-index":
         _memory_index(historical=args.historical, db_url=args.db_url)
+    elif args.cmd == "memory-outcomes":
+        _memory_outcomes(db_url=args.db_url)
     elif args.cmd == "paper-session-diff":
         _paper_session_diff(args.session_a, args.session_b)
     elif args.cmd == "paper-calibration":
