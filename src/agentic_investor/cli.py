@@ -864,6 +864,21 @@ def _paper_ab_report(experiment_name: str) -> None:
     print(report)
 
 
+def _memory_index(*, historical: bool, db_url: str | None) -> None:
+    import logging as _lg
+
+    _lg.basicConfig(
+        level=_lg.INFO, format="%(levelname)s %(message)s", force=True,
+    )
+    if not historical:
+        print("nothing to do; pass --historical to index the seed corpus")
+        return
+    from agentic_investor.memory.rec_index import index_historical
+
+    n = index_historical(db_url=db_url)
+    print(f"\nindexed {n} recommendations into Chroma collection 'recommendations'")
+
+
 def _paper_reset(account: str, *, confirm: bool = True) -> None:
     from agentic_investor.tools.paper_broker import get_broker
 
@@ -1587,6 +1602,14 @@ def main() -> None:
     pdb.add_argument("--port", type=int, default=8000,
                      help="TCP port to listen on (default 8000)")
 
+    pmi = sub.add_parser("memory-index",
+                         help="build/refresh the M17 recommendations index "
+                              "in Chroma (semantic RAG over past decisions)")
+    pmi.add_argument("--historical", action="store_true",
+                     help="index every rec from --db-url as source='historical'")
+    pmi.add_argument("--db-url", default=None,
+                     help="sqlite URL to read from (default: settings.database_url)")
+
     prst = sub.add_parser("paper-reset",
                           help="flush a paper account: cancel all open "
                                "orders + close all positions. Alpaca doesn't "
@@ -1735,6 +1758,8 @@ def main() -> None:
         return serve_forever(port=args.port, experiment=exp_ctx)
     elif args.cmd == "paper-reset":
         _paper_reset(args.account, confirm=not args.yes)
+    elif args.cmd == "memory-index":
+        _memory_index(historical=args.historical, db_url=args.db_url)
     elif args.cmd == "paper-session-diff":
         _paper_session_diff(args.session_a, args.session_b)
     elif args.cmd == "paper-calibration":
