@@ -72,8 +72,66 @@ export type RecResp = {
   }>;
 };
 
+/**
+ * In experiment mode the dashboard serves multiple arms; each API request
+ * needs `?arm=<id>` so the server middleware routes DB + broker calls to
+ * that arm's SQLite + Alpaca account. We drive the arm off the URL query
+ * string so it survives page reload + is copy-pasteable.
+ */
+export function currentArm(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("arm");
+}
+
+/** Append ?arm=X to any API url, if we're in experiment mode. */
+export function withArm(path: string): string {
+  const arm = currentArm();
+  if (!arm) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}arm=${encodeURIComponent(arm)}`;
+}
+
 export const fetcher = async <T>(url: string): Promise<T> => {
-  const r = await fetch(url);
+  const r = await fetch(withArm(url));
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   return r.json();
+};
+
+export type ExperimentMeta =
+  | { mode: "single" }
+  | {
+      mode: "experiment";
+      name: string;
+      default_arm: string;
+      arms: Array<{ id: string; account: string }>;
+    };
+
+export type ArmSummaryRow = {
+  arm_id: string;
+  account: string;
+  equity?: number;
+  cash?: number;
+  portfolio_value?: number;
+  n_orders?: number;
+  buys_notional?: number;
+  sells_notional?: number;
+  last_snapshot_at?: string;
+  broker_error?: string;
+  orders_error?: string;
+};
+
+export type CompareSummaryResp = {
+  experiment: string;
+  arms: ArmSummaryRow[];
+};
+
+export type ArmEquitySeries = {
+  arm_id: string;
+  points: Array<{ ts: string; equity: number }>;
+};
+
+export type CompareEquityResp = {
+  experiment: string;
+  period: string;
+  arms: ArmEquitySeries[];
 };

@@ -386,6 +386,16 @@ def _alpaca_order_to_domain(o) -> PaperOrder:
     )
 
 
-def get_broker(*, account: str = "primary") -> PaperBroker:
-    """Default factory: real Alpaca paper broker on the given account."""
+def get_broker(*, account: str | None = None) -> PaperBroker:
+    """Default factory: real Alpaca paper broker on the given account.
+
+    When `account` is not passed and the dashboard has set a per-request
+    arm context (via runtime_context), routes to that arm's account.
+    Otherwise defaults to "primary" - the ambient single-arm behavior.
+    """
+    if account is None:
+        from agentic_investor.runtime_context import (
+            get_active_alpaca_account,
+        )
+        account = get_active_alpaca_account() or "primary"
     return AlpacaPaperBroker(account=account)

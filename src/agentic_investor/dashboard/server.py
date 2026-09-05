@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from agentic_investor.dashboard.arm_context import ExperimentContext
 from agentic_investor.dashboard.events import get_bus
 
 logger = logging.getLogger(__name__)
@@ -88,12 +89,15 @@ def _basic_auth_guard(request: Request) -> Response | None:
     )
 
 
-def create_app() -> FastAPI:
+def create_app(
+    experiment: ExperimentContext | None = None,
+) -> FastAPI:
     app = FastAPI(
         title="Agentic Investor dashboard",
         version="0.1.0",
         lifespan=_lifespan,
     )
+    app.state.experiment = experiment  # None => legacy single-arm mode
     # Dev-mode CORS so `npm run dev` on :5173 can hit the API on :8000.
     app.add_middleware(
         CORSMiddleware,
@@ -109,9 +113,178 @@ def create_app() -> FastAPI:
             return blocked
         return await call_next(request)
 
+    @app.middleware("http")
+    async def _arm_ctx(request: Request, call_next):
+        """When the dashboard is serving an experiment, read `?arm=X` and
+        set the runtime context so paper_store / broker calls transparently
+        route to that arm's SQLite + Alpaca account for the duration of
+        the request."""
+        exp = app.state.experiment
+        if exp is None:
+            return await call_next(request)
+        arm_id = request.query_params.get("arm")
+        arm = exp.arm(arm_id) if arm_id else exp.default_arm()
+        if arm is None:
+            return await call_next(request)
+        from agentic_investor.runtime_context import (
+            reset_arm_context,
+            set_arm_context,
+        )
+        tokens = set_arm_context(arm.db_url, arm.alpaca_account)
+        try:
+            return await call_next(request)
+        finally:
+            reset_arm_context(tokens)
+
     @app.get("/api/health")
     def health() -> dict:
         return {"status": "ok"}
+
+    @app.get("/api/experiment/meta")
+    def experiment_meta() -> dict:
+        """Advertise the experiment context (or absence of one) to the frontend.
+
+        `{"mode": "single"}`                     - legacy single-arm dashboard,
+                                                   no arm picker rendered
+        `{"mode": "experiment", "name": ...,
+          "arms": [{"id": "A", "account": "primary"}, ...]}`
+                                                 - experiment mode, arm
+                                                   picker + compare tab shown
+        """
+        exp = app.state.experiment
+        if exp is None:
+            return {"mode": "single"}
+        return {
+            "mode": "experiment",
+            "name": exp.name,
+            "arms": [
+                {"id": a.arm_id, "account": a.alpaca_account}
+                for a in exp.arms
+            ],
+            "default_arm": exp.default_arm().arm_id,
+        }
+
+    @app.get("/api/experiment/compare/summary")
+    def experiment_compare_summary() -> dict:
+        """Per-arm summary for the shared /compare view.
+
+        Iterates arms, temporarily switches runtime context to each arm,
+        pulls the same shape the single-arm summary would return. Frontend
+        renders these side by side in a comparison table.
+        """
+        exp = app.state.experiment
+        if exp is None:
+            return JSONResponse(
+                {"error": "not in experiment mode"}, status_code=400,
+            )
+        from agentic_investor.runtime_context import (
+            reset_arm_context,
+            set_arm_context,
+        )
+        from agentic_investor.tools.paper_broker import get_broker
+        from agentic_investor.tools.paper_store import (
+            list_orders,
+            list_snapshots,
+        )
+
+        rows = []
+        for arm in exp.arms:
+            tokens = set_arm_context(arm.db_url, arm.alpaca_account)
+            try:
+                summary: dict = {
+                    "arm_id": arm.arm_id,
+                    "account": arm.alpaca_account,
+                }
+                try:
+                    acct = get_broker().get_account()
+                    summary["equity"] = float(acct.equity)
+                    summary["cash"] = float(acct.cash)
+                    summary["portfolio_value"] = float(acct.portfolio_value)
+                except Exception as e:  # noqa: BLE001
+                    summary["broker_error"] = str(e)
+                try:
+                    orders = list_orders(limit=1000)
+                    summary["n_orders"] = len(orders)
+                    filled = [
+                        o for o in orders
+                        if o.get("status") in ("filled", "partially_filled")
+                    ]
+                    buys = sum(
+                        float(o.get("qty") or 0)
+                        * float(o.get("filled_avg_price") or 0)
+                        for o in filled if o.get("side") == "buy"
+                    )
+                    sells = sum(
+                        float(o.get("qty") or 0)
+                        * float(o.get("filled_avg_price") or 0)
+                        for o in filled if o.get("side") == "sell"
+                    )
+                    summary["buys_notional"] = round(buys, 2)
+                    summary["sells_notional"] = round(sells, 2)
+                except Exception as e:  # noqa: BLE001
+                    summary["orders_error"] = str(e)
+                try:
+                    snaps = list_snapshots(limit=1)
+                    if snaps:
+                        summary["last_snapshot_at"] = snaps[0]["captured_at"]
+                except Exception:  # noqa: BLE001
+                    pass
+            finally:
+                reset_arm_context(tokens)
+            rows.append(summary)
+        return {"experiment": exp.name, "arms": rows}
+
+    @app.get("/api/experiment/compare/equity")
+    def experiment_compare_equity(period: str = "1d") -> dict:
+        """Per-arm equity timeseries for the overlaid comparison chart."""
+        exp = app.state.experiment
+        if exp is None:
+            return JSONResponse(
+                {"error": "not in experiment mode"}, status_code=400,
+            )
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from agentic_investor.runtime_context import (
+            reset_arm_context,
+            set_arm_context,
+        )
+        from agentic_investor.tools.paper_store import list_snapshots
+
+        # Simple period -> lookback mapping; keeps parity with /api/snapshots
+        # but doesn't handle the session-open edge cases (compare view is
+        # meant for whole-session A/B, not intra-day scoping).
+        days_map = {
+            "1d": 1, "3d": 3, "1w": 7, "1mo": 31, "3mo": 93, "1y": 366,
+        }
+        n = days_map.get(period.lower(), 1)
+        cutoff = _dt.now(_UTC) - _td(days=n)
+
+        def _fresh(iso: str) -> bool:
+            try:
+                return _dt.fromisoformat(iso.replace("Z", "+00:00")) >= cutoff
+            except ValueError:
+                return True
+
+        series = []
+        for arm in exp.arms:
+            tokens = set_arm_context(arm.db_url, arm.alpaca_account)
+            try:
+                raw = list_snapshots(limit=5000)
+                pts = [
+                    {"ts": s["captured_at"],
+                     "equity": float(s["account"]["equity"])}
+                    for s in raw if _fresh(s["captured_at"])
+                ]
+                # oldest first for time-series rendering
+                pts.reverse()
+            except Exception:  # noqa: BLE001
+                pts = []
+            finally:
+                reset_arm_context(tokens)
+            series.append({"arm_id": arm.arm_id, "points": pts})
+        return {"experiment": exp.name, "period": period, "arms": series}
 
     @app.get("/api/portfolio")
     def portfolio() -> dict:
@@ -757,11 +930,20 @@ def create_app() -> FastAPI:
     return app
 
 
-def serve_in_thread(port: int = 8000) -> threading.Thread:
-    """Start uvicorn in a daemon thread. Returns the thread handle."""
+def serve_in_thread(
+    port: int = 8000,
+    experiment: ExperimentContext | None = None,
+) -> threading.Thread:
+    """Start uvicorn in a daemon thread. Returns the thread handle.
+
+    In legacy paper-loop mode `experiment` stays None. The experiment
+    runner spawns a separate `paper-dashboard` subprocess (see
+    `serve_forever`) instead of embedding the dashboard in the loop
+    process - keeps the two lifecycles independent.
+    """
     import uvicorn
 
-    app = create_app()
+    app = create_app(experiment=experiment)
     config = uvicorn.Config(
         app, host="0.0.0.0", port=port, log_level="warning",
         access_log=False,
@@ -777,3 +959,38 @@ def serve_in_thread(port: int = 8000) -> threading.Thread:
     t.start()
     logger.info("dashboard listening on http://localhost:%d", port)
     return t
+
+
+def serve_forever(
+    port: int = 8000,
+    experiment: ExperimentContext | None = None,
+) -> int:
+    """Blocking uvicorn.run for the standalone `paper-dashboard` subprocess.
+
+    Configures logging so the subprocess's INFO lines reach stdout (same
+    pattern the bus writers use).
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+    import uvicorn
+
+    app = create_app(experiment=experiment)
+    if experiment is not None:
+        logger.info(
+            "experiment dashboard: name=%s arms=%s -> http://localhost:%d",
+            experiment.name,
+            [a.arm_id for a in experiment.arms],
+            port,
+        )
+    else:
+        logger.info(
+            "single-arm dashboard -> http://localhost:%d", port,
+        )
+    uvicorn.run(
+        app, host="0.0.0.0", port=port, log_level="warning",
+        access_log=False,
+    )
+    return 0

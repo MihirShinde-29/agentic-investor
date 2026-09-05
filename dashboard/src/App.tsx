@@ -1,4 +1,5 @@
 import { useState } from "react";
+import useSWR from "swr";
 import { TrendingUp } from "lucide-react";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { useLatestRecId, useSessionStartedAt } from "@/hooks/useLatestRecId";
@@ -17,7 +18,11 @@ import { HealthStrip } from "@/components/HealthStrip";
 import { SessionPicker } from "@/components/SessionPicker";
 import { WatchlistPanel } from "@/components/WatchlistPanel";
 import { TimeframeSelector } from "@/components/TimeframeSelector";
+import { ArmPicker } from "@/components/ArmPicker";
+import { ExperimentCompare } from "@/components/ExperimentCompare";
 import type { Timeframe } from "@/lib/timeframe";
+import type { ExperimentMeta } from "@/lib/api";
+import { currentArm, fetcher } from "@/lib/api";
 
 function StatusPill({ status }: { status: "connecting" | "open" | "closed" }) {
   const color =
@@ -47,6 +52,13 @@ function StatusPill({ status }: { status: "connecting" | "open" | "closed" }) {
   );
 }
 
+function useView(): "single" | "compare" {
+  if (typeof window === "undefined") return "single";
+  return new URLSearchParams(window.location.search).get("view") === "compare"
+    ? "compare"
+    : "single";
+}
+
 function App() {
   const { events: liveEvents, status } = useLiveEvents(500);
   const [selectedSession, setSelectedSession] = useState<string | "live">("live");
@@ -56,9 +68,22 @@ function App() {
   const events = replayEvents ?? liveEvents;
   const recId = useLatestRecId(events);
   const sessionStartedAt = useSessionStartedAt(events);
+  const view = useView();
+  const arm = currentArm();
+  const { data: meta } = useSWR<ExperimentMeta>(
+    "/api/experiment/meta",
+    fetcher,
+    { revalidateOnFocus: false },
+  );
 
   const dismissAlert = (key: string) =>
     setDismissedAlerts((prev) => new Set(prev).add(key));
+
+  const headerLabel = (() => {
+    if (!meta || meta.mode === "single") return "Live paper trading dashboard";
+    if (view === "compare") return `Experiment ${meta.name} · comparison`;
+    return `Experiment ${meta.name} · arm ${arm || meta.default_arm}`;
+  })();
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -72,31 +97,43 @@ function App() {
               <h1 className="text-sm font-semibold leading-tight">
                 Agentic Investor
               </h1>
-              <p className="text-xs text-muted-foreground">
-                Live paper trading dashboard
-              </p>
+              <p className="text-xs text-muted-foreground">{headerLabel}</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <TimeframeSelector value={timeframe} onChange={setTimeframe} />
-            <SessionPicker
-              selected={selectedSession}
-              onChange={setSelectedSession}
-            />
-            <FilterAttribution sessionStartedAt={sessionStartedAt} />
-            <span className="hidden text-xs text-muted-foreground md:inline">
-              {events.length} events
-            </span>
+            {meta && meta.mode === "experiment" ? (
+              <ArmPicker meta={meta} currentArm={arm} view={view} />
+            ) : null}
+            {view === "single" ? (
+              <>
+                <TimeframeSelector value={timeframe} onChange={setTimeframe} />
+                <SessionPicker
+                  selected={selectedSession}
+                  onChange={setSelectedSession}
+                />
+                <FilterAttribution sessionStartedAt={sessionStartedAt} />
+                <span className="hidden text-xs text-muted-foreground md:inline">
+                  {events.length} events
+                </span>
+              </>
+            ) : null}
             <StatusPill
               status={selectedSession === "live" ? status : "closed"}
             />
           </div>
         </div>
-        <div className="mx-auto max-w-[1600px] px-6 pb-3">
-          <HeaderStrip events={events} />
-        </div>
+        {view === "single" ? (
+          <div className="mx-auto max-w-[1600px] px-6 pb-3">
+            <HeaderStrip events={events} />
+          </div>
+        ) : null}
       </header>
 
+      {view === "compare" ? (
+        <main className="mx-auto max-w-[1600px] space-y-4 px-6 py-6">
+          <ExperimentCompare />
+        </main>
+      ) : (
       <main className="mx-auto max-w-[1600px] space-y-4 px-6 py-6">
         {/*
           Right-pad on desktop so the banner clears the fixed event feed
@@ -146,19 +183,17 @@ function App() {
           <HealthStrip events={events} wsStatus={status} />
         </div>
       </main>
+      )}
 
-      {/*
-        Viewport-fixed event feed (desktop only). pointer-events-none on
-        the outer overlay lets clicks pass through the empty space to the
-        chart underneath; the inner panel re-enables events for itself.
-      */}
+      {view === "single" ? (
       <div className="pointer-events-none fixed inset-x-0 bottom-4 z-10 hidden lg:block lg:top-[235px] xl:top-[169px]">
         <div className="mx-auto flex h-full max-w-[1600px] justify-end px-6">
-          <div className="pointer-events-auto w-[360px]"> 
+          <div className="pointer-events-auto w-[360px]">
             <EventFeed events={events} />
           </div>
         </div>
       </div>
+      ) : null}
     </div>
   );
 }

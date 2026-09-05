@@ -99,6 +99,8 @@ def run_experiment(
     *,
     base_paper_loop_args: list[str] | None = None,
     dry_run_launch: bool = False,
+    serve_dashboard: bool = False,
+    dashboard_port: int = 8000,
 ) -> int:
     """Spawn one paper-loop subprocess per arm and wait until all finish.
 
@@ -155,6 +157,32 @@ def run_experiment(
         # Give the writers a moment to CREATE TABLE before arms start
         # polling / registering.
         time.sleep(2)
+
+    # Spawn the shared experiment dashboard subprocess (arm picker +
+    # /compare view). One dashboard for the whole experiment - not
+    # per-arm - so the user has a single URL that swaps between arm A/B/C
+    # via the picker and shows the cross-arm compare view.
+    if serve_dashboard:
+        dash_cmd = [
+            sys.executable, "-m", "agentic_investor.cli",
+            "paper-dashboard", experiment.name,
+            "--port", str(dashboard_port),
+        ]
+        print(f"  dashboard cmd: {' '.join(dash_cmd)}")
+        if not dry_run_launch:
+            dash_proc = subprocess.Popen(
+                dash_cmd, env=dict(os.environ),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                bufsize=1,
+            )
+            procs.append(("dashboard", dash_proc))
+            t = threading.Thread(
+                target=_stream_prefixed,
+                args=(dash_proc.stdout, "dashboard"),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
 
     for arm in experiment.arms:
         arm_db = exp_dir / f"{arm.arm_id}.db"

@@ -841,6 +841,8 @@ def _paper_attribution(sessions_dir: str, out_path: str) -> None:
 def _paper_experiment(
     experiment_path: str, forwarded_args: list[str], *,
     dry_run_launch: bool = False,
+    serve_dashboard: bool = False,
+    dashboard_port: int = 8000,
 ) -> None:
     from agentic_investor.experiments.manifest import load_experiment
     from agentic_investor.experiments.runner import run_experiment
@@ -849,6 +851,8 @@ def _paper_experiment(
     rc = run_experiment(
         exp, base_paper_loop_args=forwarded_args,
         dry_run_launch=dry_run_launch,
+        serve_dashboard=serve_dashboard,
+        dashboard_port=dashboard_port,
     )
     raise SystemExit(rc)
 
@@ -1491,6 +1495,11 @@ def main() -> None:
                                        "(bare name resolved under ./experiments/)")
     pex.add_argument("--dry-run-launch", action="store_true",
                      help="print the per-arm commands but don't spawn")
+    pex.add_argument("--serve-dashboard", action="store_true",
+                     help="also spawn a paper-dashboard subprocess for the "
+                          "experiment (arm picker + /compare view)")
+    pex.add_argument("--dashboard-port", type=int, default=8000,
+                     help="port for --serve-dashboard (default 8000)")
     pex.add_argument("--paper-loop-args", nargs=argparse.REMAINDER,
                      default=[],
                      help="all args after this are forwarded to each arm's "
@@ -1519,6 +1528,17 @@ def main() -> None:
     ppb.add_argument("bus_url",
                      help="sqlite:///path/to/price_bus.db - each arm should "
                           "have AGENTIC_PRICE_BUS set to this same URL")
+
+    pdb = sub.add_parser("paper-dashboard",
+                         help="serve the multi-arm experiment dashboard "
+                              "for an experiment; single process, one URL, "
+                              "arm picker + /compare view for all arms")
+    pdb.add_argument("experiment", nargs="?", default=None,
+                     help="experiment name (bare name resolves under "
+                          "./experiments/{name}.yaml). Omit for legacy "
+                          "single-arm mode.")
+    pdb.add_argument("--port", type=int, default=8000,
+                     help="TCP port to listen on (default 8000)")
 
     psd = sub.add_parser("paper-session-diff",
                          help="compare two session.jsonl runs on knob "
@@ -1635,7 +1655,9 @@ def main() -> None:
         _paper_report(args.session)
     elif args.cmd == "paper-experiment":
         _paper_experiment(args.experiment, args.paper_loop_args,
-                          dry_run_launch=args.dry_run_launch)
+                          dry_run_launch=args.dry_run_launch,
+                          serve_dashboard=args.serve_dashboard,
+                          dashboard_port=args.dashboard_port)
     elif args.cmd == "paper-ab-report":
         _paper_ab_report(args.experiment)
     elif args.cmd == "paper-news-bus":
@@ -1644,6 +1666,15 @@ def main() -> None:
     elif args.cmd == "paper-price-bus":
         from agentic_investor.experiments.price_bus import run_price_bus_writer
         return run_price_bus_writer(args.bus_url)
+    elif args.cmd == "paper-dashboard":
+        from agentic_investor.dashboard.server import serve_forever
+        exp_ctx = None
+        if args.experiment:
+            from agentic_investor.dashboard.arm_context import (
+                load_experiment_context,
+            )
+            exp_ctx = load_experiment_context(args.experiment)
+        return serve_forever(port=args.port, experiment=exp_ctx)
     elif args.cmd == "paper-session-diff":
         _paper_session_diff(args.session_a, args.session_b)
     elif args.cmd == "paper-calibration":
