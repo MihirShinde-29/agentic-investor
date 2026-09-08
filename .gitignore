@@ -19,6 +19,7 @@ out/*
 *.db
 *.sqlite3
 *.png
+*.bak
 
 # Track the eval baseline so CI's regression gate has something to compare to.
 !out/eval/
