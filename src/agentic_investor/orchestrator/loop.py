@@ -792,6 +792,35 @@ def _drift_exceeds_band(
     return False
 
 
+def _log_reasoning_and_ensemble(session, rec, rec_id: int) -> None:
+    """Log the CoT scratchpad + any ensemble metadata for a fresh rec.
+    Both are opt-in on the LLM/env side; skip cleanly when unset."""
+    if not session:
+        return
+    reasoning = getattr(rec.allocation, "reasoning", None)
+    if reasoning is not None:
+        try:
+            session.log("allocation_reasoning", {
+                "rec_id": rec_id,
+                "bull_case": reasoning.bull_case,
+                "bear_case": reasoning.bear_case,
+                "disqualifiers": list(reasoning.disqualifiers or []),
+                "verdict": reasoning.verdict,
+            })
+        except Exception:  # noqa: BLE001
+            pass
+    meta = getattr(rec, "ensemble_meta", None)
+    if meta:
+        try:
+            session.log("knob_fired", {
+                "name": meta.get("kind") or "ensemble_allocate",
+                "rec_id": rec_id,
+                **meta,
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _generate_recommendation(
     cfg: LoopConfig,
     *,
@@ -1335,6 +1364,7 @@ def run_tick(
                     })
                     for ev in getattr(rec, "repair_events", []) or []:
                         session.log("alloc_repair", {"rec_id": rec_id, **ev})
+                    _log_reasoning_and_ensemble(session, rec, rec_id)
 
         else:
             # First-ever regen or new-day reset: no prior rec to compare

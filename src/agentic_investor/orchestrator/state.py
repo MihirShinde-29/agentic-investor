@@ -44,7 +44,52 @@ class Position(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+class AllocationReasoning(BaseModel):
+    """CoT scratchpad emitted before weights. Logged by the loop for
+    audit; nothing here drives sizing. Forcing an explicit bear_case
+    before positions catches reflex trades the model would otherwise
+    post without weighing disconfirming evidence.
+    """
+
+    bull_case: str = Field(
+        description=(
+            "1-2 sentences summarizing the strongest bullish evidence this "
+            "tick (specific tickers + signals). If nothing bullish, say so."
+        ),
+    )
+    bear_case: str = Field(
+        description=(
+            "1-2 sentences summarizing the strongest bearish evidence this "
+            "tick (specific tickers + signals). If nothing bearish, say so."
+        ),
+    )
+    disqualifiers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tickers you are DELIBERATELY not sizing up despite one bullish "
+            "signal, each with a one-line reason (cooldown, correlation, "
+            "cash floor, stale thesis)."
+        ),
+    )
+    verdict: str = Field(
+        description=(
+            "1-2 sentences: what changed vs the previous allocation and why. "
+            "If nothing meaningful changed, say so and expect the loop's "
+            "drift filter to skip the regen."
+        ),
+    )
+
+
 class Allocation(BaseModel):
+    # Optional so pre-CoT DB rows still deserialize; new regens fill it.
+    reasoning: AllocationReasoning | None = Field(
+        default=None,
+        description=(
+            "Emit this BEFORE positions/cash_pct. Structured bull/bear/"
+            "disqualifier/verdict trace. The loop logs it for post-hoc "
+            "calibration; nothing in it drives sizing directly."
+        ),
+    )
     positions: list[Position]
     cash_pct: float = Field(ge=0.0, le=100.0)
     cash_dollars: float = Field(ge=0.0)
@@ -311,10 +356,12 @@ def repair_allocation(
         cash_pct = round(cash_pct + residual, 2)
 
     repaired = Allocation(
+        reasoning=allocation.reasoning,
         positions=positions,
         cash_pct=cash_pct,
         cash_dollars=cash_dollars,
         portfolio_rationale=allocation.portfolio_rationale,
+        on_deck_purge=allocation.on_deck_purge,
     )
     return repaired, notes, events
 
@@ -329,6 +376,8 @@ class Recommendation(BaseModel):
     # cash-floor lifts). Loop forwards each to the session recorder so
     # phantom pressure can be counted across runs.
     repair_events: list[dict] = Field(default_factory=list)
+    # Only populated when self-consistency or cross-model ensembling ran.
+    ensemble_meta: dict | None = None
 
 
 class GraphState(TypedDict, total=False):
@@ -354,3 +403,5 @@ class GraphState(TypedDict, total=False):
     # Current regime label ("bull"/"bear"/"sideways"/"high_vol"/"unknown"),
     # used by repair/validate to know why the profile was tightened.
     macro_regime: str
+    # Threaded up to Recommendation when ensemble sampling ran.
+    ensemble_meta: dict

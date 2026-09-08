@@ -1,0 +1,36 @@
+# M14: does spending extra tokens on reasoning quality actually change
+# outcomes, or is it just cargo-cult? Three-arm ablation:
+#
+# A: baseline — single LLM call per regen, current prod model. Reference
+#    line for both cost and returns; every other arm has to beat this to
+#    justify its cost multiplier.
+# B: self-consistency N=3 — same model, sampled 3x at temp 0.4, median
+#    pick. Costs ~3x LLM output tokens (input cached across all 3 samples
+#    on Anthropic; OpenAI cache_read is 50%). Tests whether sampling
+#    variance across a single model buys signal, or if the same model
+#    keeps making the same call regardless of temperature.
+# C: cross-model ensemble — one call each to gpt-4o-mini and
+#    anthropic/claude-haiku-4-5, median pick. Costs ~2x plus loses the
+#    prompt cache on the second provider. Tests whether disagreement
+#    across model families flags decisions where a single model would
+#    have moved on autopilot.
+#
+# Same news bus + market prices + broker discipline for all 3. B vs A =
+# marginal value of self-consistency; C vs A = marginal value of cross-
+# model ensembling; B vs C = which "spend more per decision" strategy
+# has better $/pp return.
+name: reasoning-quality
+arms:
+  A:
+    alpaca_account: primary
+    config_diff: {}
+  B:
+    alpaca_account: secondary
+    config_diff: {}
+    env:
+      AGENTIC_SELF_CONSISTENCY_N: "3"
+  C:
+    alpaca_account: tertiary
+    config_diff: {}
+    env:
+      AGENTIC_ENSEMBLE_MODELS: "gpt-4o-mini,anthropic/claude-haiku-4-5"

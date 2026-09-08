@@ -49,6 +49,21 @@ You are a disciplined portfolio allocator. Given per-ticker signals from a
 technical-analysis agent and a news-sentiment agent, plus the user's amount,
 risk tolerance, and target, produce a paper-portfolio allocation.
 
+# Reasoning trace (fill BEFORE positions/cash_pct)
+Emit a `reasoning` block first:
+  - bull_case: 1-2 sentences on the strongest bull evidence this tick,
+    with named tickers + specific signals. If nothing bullish, say so.
+  - bear_case: same for the strongest bear evidence. Argue the other
+    side even when you feel bullish.
+  - disqualifiers: any ticker you did NOT size up despite one bullish
+    signal, with a one-line reason (cooldown, correlation cap, cash
+    floor, stale thesis, thin liquidity, ...). Empty list is fine.
+  - verdict: 1-2 sentences on what changed vs the previous allocation.
+    If nothing meaningful changed, say so - the drift filter will skip.
+The trace does not drive sizing; the loop logs it for calibration.
+Forcing yourself to write bear_case before weights is what catches
+reflex trades.
+
 # Hard rules (output MUST satisfy)
 - All weights, including cash_pct, must sum to 100.
 - No single position weight may exceed the profile's max_single_pct cap.
@@ -169,6 +184,66 @@ Good allocation:
 Bad allocation to avoid: forcing 30-40% into any name when signals do not
 support it just because those tickers are in the request list. Cash IS a
 position; not being fully invested is a legitimate output.
+
+## Example 4 -- whipsaw suppression
+Signals: {"ZS": {"technical": {"stance":"bullish","confidence":0.6},
+                  "news": {"stance":"bullish","confidence":0.55,
+                            "reasoning":"analyst target raise, no fresh catalyst"}}}
+Recent trades block:
+  ZS:
+    10:14 UTC  BUY 8 @ $198.20
+    10:19 UTC  SELL 5 @ $199.10
+    10:22 UTC  SELL 3 @ $198.90  (exited)
+    current: $199.40 (+0.10% vs last trade)
+Profile: max_single 30%, cash_floor 5%.
+Good allocation:
+- ZS 0%  (JUST fully exited 4 min ago; the same weak-bullish signal that
+          was rejected then is not a reason to re-enter now. Sit out.)
+- cash 100%  (no fresh catalyst = no thesis change)
+And in disqualifiers: "ZS: fully exited < 15 min ago, no fresh news".
+Bad allocation to avoid: re-open ZS at 12% just because the analyst raise
+is still visible in the news feed. That IS the whipsaw pattern. Wait for
+either the cooldown to clear or a genuinely new catalyst.
+
+## Example 5 -- cash-floor pre-emptive trim
+Signals: 6 bullish names all with confidence 0.55-0.75, mostly overlapping
+theses (semi capex, AI infra). Profile: max_single 25%, cash_floor 15%.
+Wrong impulse: size each at 15% (6 * 15 = 90pp positions, 10pp cash).
+That leaves cash BELOW the floor. The repair pass will trim you back
+proportionally, which is worse than choosing.
+Good allocation:
+- Top-2 conviction names at 22-25% each (~47pp)
+- 3rd/4th conviction names at 12% each (~24pp)
+- 5th/6th dropped to 0% (small trim, low conviction)
+- cash 29%  (well above the 15% floor)
+Rationale: at 6 broadly-similar bullish theses, adding a 5th and 6th name
+is diversification theater - all six move together. Concentrate on
+strongest 4, keep dry powder for divergent-thesis names later.
+And in disqualifiers: "STOCK5, STOCK6: below cutoff after conviction sort;
+adding at 5-8% is friction without factor-orthogonal payoff".
+
+## Example 6 -- correlated-basket cap
+Signals: {"NVDA": {"technical": {"stance":"bullish","confidence":0.85},
+                    "news": {"stance":"bullish","confidence":0.8}},
+          "AMD": {"technical": {"stance":"bullish","confidence":0.75},
+                   "news": {"stance":"bullish","confidence":0.7}},
+          "AVGO": {"technical": {"stance":"bullish","confidence":0.7},
+                    "news": {"stance":"bullish","confidence":0.65}}}
+Correlation hints: NVDA+AMD +0.82, NVDA+AVGO +0.78, AMD+AVGO +0.75
+Profile: max_single 25%, max_joint_correlated_weight_pct 40%, cash_floor 10%.
+Wrong: NVDA 22%, AMD 20%, AVGO 18% (total 60% in one correlated basket).
+That IS a 60% concentrated bet on the semiconductor factor, not
+diversification. The correlation constraint would then re-trim you.
+Good allocation:
+- NVDA 22% (highest conviction of the pair, take the cap)
+- AMD 12%  (correlated with NVDA; joint 34% < 40% cap)
+- AVGO 6%  (correlated with both; kept small as scout stake)
+- cash 60%
+Rationale: highly-correlated names double your factor exposure without
+adding diversification. Pick the strongest and take a modest tail in the
+others; do NOT stack the basket to the max-single cap on each.
+And in disqualifiers: "AMD, AVGO: correlated > 0.75 with NVDA; sizing all
+three to their individual caps would be one 60% bet on semis".
 
 # Analyst-rating interpretation (READ CAREFULLY)
 News often includes analyst updates. Do not treat coverage inits or
@@ -790,11 +865,130 @@ def _messages(state: GraphState) -> list[dict]:
     return [system_msg, user_msg]
 
 
+def _agreement_score(samples: list[Allocation]) -> float:
+    """0-1 score: fraction of tickers appearing across ALL samples with
+    weights within 5pp of each other. 1.0 = perfect agreement, 0.0 = every
+    sample nominates a disjoint set of tickers."""
+    if len(samples) < 2:
+        return 1.0
+    per_sample_weights: list[dict[str, float]] = [
+        {p.ticker.upper(): p.weight_pct for p in s.positions}
+        for s in samples
+    ]
+    common = set.intersection(*(set(w) for w in per_sample_weights))
+    if not common:
+        return 0.0
+    n_agree = 0
+    for tk in common:
+        weights = [w[tk] for w in per_sample_weights]
+        if max(weights) - min(weights) <= 5.0:
+            n_agree += 1
+    union = set.union(*(set(w) for w in per_sample_weights))
+    return n_agree / max(1, len(union))
+
+
+def _pick_median_sample(samples: list[Allocation]) -> Allocation:
+    """Return the sample whose weight vector is closest (L1) to the
+    per-ticker median across all samples. Picking a real sample keeps
+    the rationale text consistent with the weights we ship."""
+    if len(samples) == 1:
+        return samples[0]
+    from statistics import median
+
+    all_tickers = sorted(
+        {p.ticker.upper() for s in samples for p in s.positions}
+    )
+    medians = {
+        tk: median(
+            next((p.weight_pct for p in s.positions if p.ticker.upper() == tk), 0.0)
+            for s in samples
+        )
+        for tk in all_tickers
+    }
+    def _l1(s: Allocation) -> float:
+        w = {p.ticker.upper(): p.weight_pct for p in s.positions}
+        return sum(abs(w.get(tk, 0.0) - medians[tk]) for tk in all_tickers)
+    return min(samples, key=_l1)
+
+
+def _ensemble_allocate(
+    state: GraphState, messages: list[dict],
+) -> tuple[Allocation, dict | None]:
+    """Run multiple samples (self-consistency or cross-model) and pick a
+    median. Env-controlled so the default remains a single LLM call.
+
+    AGENTIC_SELF_CONSISTENCY_N=int   -> sample N times, same model, temp 0.4.
+    AGENTIC_ENSEMBLE_MODELS=csv      -> sample one call per named model,
+                                        temp inherits default. Overrides
+                                        SELF_CONSISTENCY_N when both set.
+    """
+    import os as _os
+
+    models_csv = (_os.environ.get("AGENTIC_ENSEMBLE_MODELS") or "").strip()
+    models = [m.strip() for m in models_csv.split(",") if m.strip()] if models_csv else []
+    try:
+        n = int(_os.environ.get("AGENTIC_SELF_CONSISTENCY_N", "0") or "0")
+    except ValueError:
+        n = 0
+
+    if not models and n < 2:
+        return structured_complete(Allocation, messages), None
+
+    samples: list[Allocation] = []
+    if models:
+        for m in models:
+            try:
+                samples.append(structured_complete(Allocation, messages, model=m))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ensemble sample failed for model=%s: %s", m, e)
+        meta_kind = "cross_model"
+        meta_extra = {"models": models}
+    else:
+        for _ in range(n):
+            try:
+                samples.append(
+                    structured_complete(Allocation, messages, temperature=0.4)
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("self-consistency sample failed: %s", e)
+        meta_kind = "self_consistency"
+        meta_extra = {"n": n}
+
+    if not samples:
+        # All samples crashed; take one more deterministic call so the
+        # loop still gets an allocation this tick.
+        return structured_complete(Allocation, messages), None
+    if len(samples) == 1:
+        logger.warning(
+            "ensemble degraded to n=1 (%s); other samples raised",
+            meta_kind,
+        )
+        return samples[0], {"kind": meta_kind, "n_ok": 1, **meta_extra}
+
+    agreement = _agreement_score(samples)
+    picked = _pick_median_sample(samples)
+    meta = {
+        "kind": meta_kind,
+        "n_ok": len(samples),
+        "agreement": round(agreement, 3),
+        **meta_extra,
+    }
+    logger.info(
+        "%s: n=%d agreement=%.2f meta=%s",
+        meta_kind, len(samples), agreement, meta_extra,
+    )
+    return picked, meta
+
+
 def allocate(state: GraphState) -> dict:
     """Dispatch to the allocator selected by profile.allocator."""
     profile = _profile_from_state(state)
     if profile.allocator == "llm":
-        return {"allocation": structured_complete(Allocation, _messages(state))}
+        alloc, meta = _ensemble_allocate(state, _messages(state))
+        out: dict = {"allocation": alloc}
+        if meta:
+            out["ensemble_meta"] = meta
+        return out
     allocator_fn = get_allocator(profile.allocator)
     alloc = allocator_fn(
         state["request"],
@@ -909,4 +1103,5 @@ def run_orchestrator(
         news_signals=final.get("news_signals", []),
         violations=final.get("violations", []),
         repair_events=final.get("repair_events", []),
+        ensemble_meta=final.get("ensemble_meta"),
     )
