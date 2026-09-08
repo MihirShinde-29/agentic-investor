@@ -69,7 +69,16 @@ def _stream_prefixed(stream, prefix: str, out=sys.stdout) -> None:
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
         except Exception:  # noqa: BLE001
             continue
-        out.write(f"[{prefix}] {line}\n")
+        text = f"[{prefix}] {line}\n"
+        try:
+            out.write(text)
+        except UnicodeEncodeError:
+            # Windows cp1252 console can't encode some Unicode punctuation
+            # (Alpaca headlines sometimes carry U+FFFD replacement chars,
+            # smart quotes, em-dashes). ASCII-fallback keeps the relay
+            # thread alive; a dead thread stalls the arm on pipe
+            # backpressure once its stdout buffer fills.
+            out.write(text.encode("ascii", errors="replace").decode("ascii"))
         out.flush()
 
 

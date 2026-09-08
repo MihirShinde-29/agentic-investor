@@ -1,5 +1,7 @@
 /** Fetch wrappers for the FastAPI backend, used with SWR. */
 
+import { useEffect, useState } from "react";
+
 export type PortfolioResp = {
   equity: number;
   cash: number;
@@ -77,11 +79,64 @@ export function currentArm(): string | null {
   return new URLSearchParams(window.location.search).get("arm");
 }
 
+export function currentView(): "single" | "compare" {
+  if (typeof window === "undefined") return "single";
+  return new URLSearchParams(window.location.search).get("view") === "compare"
+    ? "compare"
+    : "single";
+}
+
 export function withArm(path: string): string {
   const arm = currentArm();
   if (!arm) return path;
   const sep = path.includes("?") ? "&" : "?";
   return `${path}${sep}arm=${encodeURIComponent(arm)}`;
+}
+
+/**
+ * Navigate to a different arm/view. Uses a full page reload rather
+ * than history.replaceState + SWR cache invalidation. Reason: SWR's
+ * global cache is keyed by URL string and doesn't include the arm,
+ * so the "reactive" approach kept serving stale data from the
+ * previous arm to fresh mounts even with cache clearing (subscriber-
+ * attach vs mutate-return race). A reload is guaranteed correct.
+ */
+export function navigateArmView(
+  arm: string | null,
+  view: "single" | "compare",
+): void {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams(window.location.search);
+  if (arm) params.set("arm", arm);
+  else params.delete("arm");
+  if (view === "compare") params.set("view", "compare");
+  else params.delete("view");
+  const qs = params.toString();
+  window.location.href = qs
+    ? `${window.location.pathname}?${qs}`
+    : window.location.pathname;
+}
+
+function useUrlParam<T>(read: () => T): T {
+  const [value, setValue] = useState<T>(() => read());
+  useEffect(() => {
+    const handler = () => setValue(read());
+    window.addEventListener("armchange", handler);
+    window.addEventListener("popstate", handler);
+    return () => {
+      window.removeEventListener("armchange", handler);
+      window.removeEventListener("popstate", handler);
+    };
+  }, []);
+  return value;
+}
+
+export function useArmParam(): string | null {
+  return useUrlParam(currentArm);
+}
+
+export function useViewParam(): "single" | "compare" {
+  return useUrlParam(currentView);
 }
 
 export const fetcher = async <T>(url: string): Promise<T> => {
@@ -104,10 +159,22 @@ export type ArmSummaryRow = {
   account: string;
   equity?: number;
   cash?: number;
+  cash_pct?: number;
   portfolio_value?: number;
+  positions_count?: number;
+  positions?: Array<{
+    ticker: string;
+    qty: number;
+    market_value: number;
+    unrealized_pl_pct: number;
+  }>;
+  opening_equity?: number;
+  delta_dollars?: number;
+  delta_pct?: number;
   n_orders?: number;
   buys_notional?: number;
   sells_notional?: number;
+  turnover?: number;
   last_snapshot_at?: string;
   broker_error?: string;
   orders_error?: string;
@@ -127,4 +194,37 @@ export type CompareEquityResp = {
   experiment: string;
   period: string;
   arms: ArmEquitySeries[];
+};
+
+export type ReactionOrder = {
+  ticker: string;
+  side: "buy" | "sell" | string;
+  qty: number;
+};
+
+export type ArmReaction =
+  | { reacted: "none" }
+  | { reacted: "skip"; seconds: number; kind: string }
+  | {
+      reacted: "regen" | "orders";
+      regen: {
+        seconds: number;
+        rec_id: number;
+        targets_count: number;
+        cash_pct: number | null;
+        trigger: string | null;
+      } | null;
+      orders: ReactionOrder[];
+    };
+
+export type NewsReactionRow = {
+  ts: string;
+  ticker: string | null;
+  headline: string;
+  per_arm: Record<string, ArmReaction>;
+};
+
+export type NewsReactionsResp = {
+  experiment: string;
+  news_reactions: NewsReactionRow[];
 };

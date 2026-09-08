@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import mimetypes
 import os
 import secrets
 import threading
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -42,6 +45,70 @@ mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("image/svg+xml", ".svg")
 
 _DIST = Path(__file__).parent.parent.parent.parent / "dashboard" / "dist"
+
+# arm_id -> (session_dir, cached_at_epoch). Refreshed lazily every
+# _ARM_SESSION_CACHE_TTL seconds since arms can (in principle) rotate
+# session dirs mid-run (e.g. streamer restart).
+_ARM_SESSION_DIRS: dict[str, tuple[Path, float]] = {}
+_ARM_SESSION_CACHE_TTL = 60.0
+
+
+def _resolve_arm_session_dir(arm_id: str) -> Path | None:
+    """Find the most-recent session dir whose events are tagged arm_id."""
+    cached = _ARM_SESSION_DIRS.get(arm_id)
+    if cached and (time.time() - cached[1]) < _ARM_SESSION_CACHE_TTL:
+        if cached[0].exists():
+            return cached[0]
+    root = Path("out/sessions")
+    if not root.exists():
+        return None
+    # Newest first — first hit wins.
+    for d in sorted(root.iterdir(), key=lambda p: p.name, reverse=True):
+        jl = d / "session.jsonl"
+        if not jl.exists():
+            continue
+        try:
+            with jl.open("r", encoding="utf-8", errors="replace") as f:
+                # Peek up to 5 lines; session_start may not have arm_id
+                # but subsequent events will (arm_id is stamped in the
+                # SessionRecorder.log path, so anything after startup is
+                # tagged).
+                for _ in range(5):
+                    line = f.readline()
+                    if not line:
+                        break
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if row.get("arm_id") == arm_id:
+                        _ARM_SESSION_DIRS[arm_id] = (d, time.time())
+                        return d
+        except OSError:
+            continue
+    return None
+
+
+def _tail_arm_session_events(arm_id: str, limit: int) -> list[dict]:
+    """Return the last `limit` events from arm's session.jsonl on disk."""
+    d = _resolve_arm_session_dir(arm_id)
+    if d is None:
+        return []
+    jl = d / "session.jsonl"
+    if not jl.exists():
+        return []
+    # deque(maxlen=limit) keeps only the tail without loading everything.
+    buf: deque[dict] = deque(maxlen=limit)
+    try:
+        with jl.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    buf.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return list(buf)
 
 
 @asynccontextmanager
@@ -177,10 +244,25 @@ def create_app(
                     "account": arm.alpaca_account,
                 }
                 try:
-                    acct = get_broker().get_account()
+                    broker = get_broker()
+                    acct = broker.get_account()
                     summary["equity"] = float(acct.equity)
                     summary["cash"] = float(acct.cash)
                     summary["portfolio_value"] = float(acct.portfolio_value)
+                    positions = broker.get_positions()
+                    summary["positions_count"] = len(positions)
+                    summary["positions"] = [
+                        {
+                            "ticker": p.ticker,
+                            "qty": p.qty,
+                            "market_value": p.market_value,
+                            "unrealized_pl_pct": p.unrealized_pl_pct,
+                        }
+                        for p in positions
+                    ]
+                    summary["cash_pct"] = round(
+                        (float(acct.cash) / float(acct.equity)) * 100, 2
+                    ) if float(acct.equity) > 0 else None
                 except Exception as e:  # noqa: BLE001
                     summary["broker_error"] = str(e)
                 try:
@@ -202,18 +284,306 @@ def create_app(
                     )
                     summary["buys_notional"] = round(buys, 2)
                     summary["sells_notional"] = round(sells, 2)
+                    summary["turnover"] = round(buys + sells, 2)
                 except Exception as e:  # noqa: BLE001
                     summary["orders_error"] = str(e)
                 try:
-                    snaps = list_snapshots(limit=1)
+                    snaps = list_snapshots(limit=5000)
                     if snaps:
                         summary["last_snapshot_at"] = snaps[0]["captured_at"]
+                        # Snapshots are captured chronologically; the oldest
+                        # (last in the list, since list_snapshots orders
+                        # newest-first) is the arm's session-open baseline.
+                        open_equity = float(snaps[-1]["equity"])
+                        summary["opening_equity"] = round(open_equity, 2)
+                        if "equity" in summary and open_equity > 0:
+                            delta = summary["equity"] - open_equity
+                            summary["delta_dollars"] = round(delta, 2)
+                            summary["delta_pct"] = round(
+                                (delta / open_equity) * 100, 4
+                            )
                 except Exception:  # noqa: BLE001
                     pass
             finally:
                 reset_arm_context(tokens)
             rows.append(summary)
         return {"experiment": exp.name, "arms": rows}
+
+    @app.get("/api/experiment/compare/news-reactions")
+    def experiment_compare_news_reactions(
+        limit: int = 30,
+        scan_limit: int = 500,
+        only_matched: bool = True,
+    ) -> dict:
+        """For each recent news event, show which arms fired a regen
+        within a short window after it.
+
+        All arms share the same news bus so news_received events are
+        identical across arm logs. We pick arm A's log as the canonical
+        news list, then correlate each news_ts against per-arm regen_done
+        events in a fixed lookahead window. Not a causal claim - a regen
+        firing within 5 min of a news event might be triggered by other
+        news / price / interval - but a useful "reactivity" signal for
+        A/B comparison at a glance.
+        """
+        exp = app.state.experiment
+        if exp is None:
+            return JSONResponse(
+                {"error": "not in experiment mode"}, status_code=400,
+            )
+        from datetime import datetime as _dt
+
+        WINDOW_SEC = 300
+
+        def _parse_ts(s: str) -> _dt | None:
+            try:
+                return _dt.fromisoformat(s.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                return None
+
+        def _load_events(arm_id: str, wanted: set[str]) -> list[dict]:
+            d = _resolve_arm_session_dir(arm_id)
+            out: list[dict] = []
+            if d is None or not (d / "session.jsonl").exists():
+                return out
+            try:
+                with (d / "session.jsonl").open(
+                    "r", encoding="utf-8", errors="replace",
+                ) as f:
+                    for line in f:
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if row.get("event") in wanted:
+                            out.append(row)
+            except OSError:
+                return []
+            return out
+
+        first_arm = exp.arms[0].arm_id
+        news = _load_events(first_arm, {"news_received"})
+        if not news:
+            return {"experiment": exp.name, "news_reactions": []}
+
+        # Per-arm indexes: regens + skips + order submissions + hot
+        # signals. finbert_hot_signal events tell us *which specific
+        # news ticker* fast-triggered a subsequent finbert-hot-headline
+        # regen; the ticker's regen orders may not include the news
+        # ticker (rotation cases like "ABBV upgrade -> A rotates
+        # MRK -> ABBV") but the news IS causally the trigger.
+        per_arm_regens: dict[str, list[tuple[_dt, dict]]] = {}
+        per_arm_skips: dict[str, list[tuple[_dt, dict]]] = {}
+        per_arm_orders: dict[str, list[tuple[_dt, dict]]] = {}
+        per_arm_hot_signals: dict[str, list[tuple[_dt, dict]]] = {}
+        for arm in exp.arms:
+            evs = _load_events(
+                arm.arm_id,
+                {
+                    "regen_done",
+                    "materiality_skip",
+                    "materiality_bypass_promoted",
+                    "order_submitted",
+                    "finbert_hot_signal",
+                },
+            )
+            regens: list[tuple[_dt, dict]] = []
+            skips: list[tuple[_dt, dict]] = []
+            orders: list[tuple[_dt, dict]] = []
+            hots: list[tuple[_dt, dict]] = []
+            for ev in evs:
+                ts = _parse_ts(ev.get("ts", ""))
+                if ts is None:
+                    continue
+                if ev["event"] == "regen_done":
+                    regens.append((ts, ev))
+                elif ev["event"] == "order_submitted":
+                    orders.append((ts, ev))
+                elif ev["event"] == "finbert_hot_signal":
+                    hots.append((ts, ev))
+                else:
+                    skips.append((ts, ev))
+            per_arm_regens[arm.arm_id] = regens
+            per_arm_skips[arm.arm_id] = skips
+            per_arm_orders[arm.arm_id] = orders
+            per_arm_hot_signals[arm.arm_id] = hots
+
+        # A regen counts as "reacting to news" only if its trigger came
+        # from the news pipeline. Startup regens (no-unprocessed-news),
+        # force-regens (force-regen), price-move triggers, etc. would
+        # dump their orders under whatever news happened to arrive
+        # nearby - noise, not signal.
+        news_driven_triggers = {
+            "finbert-hot-headline",
+            "batch-window-closed",
+            "materiality-bypass-fire",
+        }
+        # Broad ETFs: macro news often tags SPY/QQQ but the LLM might
+        # act on any held name (Fed rate change -> trim tech). Allow
+        # attribution when the news is one of these even if the traded
+        # tickers don't match by name.
+        macro_news_tickers = {
+            "SPY", "QQQ", "DIA", "IWM", "VOO", "VTI", "VGK", "EEM",
+        }
+        # Once a regen has been "claimed" by a news event, don't let a
+        # second news event also claim it (avoid one regen appearing
+        # under multiple headlines).
+        claimed_regens: dict[str, set[int]] = {a.arm_id: set() for a in exp.arms}
+
+        # Orders come from a regen. Group orders that landed within a
+        # tight window (<=5s) after each regen_done into that regen's
+        # "trades" list. That's the canonical attribution.
+        ORDER_GRACE = 5.0
+        per_arm_regen_orders: dict[str, dict[int, list[dict]]] = {
+            a.arm_id: {} for a in exp.arms
+        }
+        for arm in exp.arms:
+            regens_ts_sorted = sorted(per_arm_regens.get(arm.arm_id, []))
+            for i, (r_ts, r) in enumerate(regens_ts_sorted):
+                rec_id = r.get("rec_id")
+                if rec_id is None:
+                    continue
+                cutoff = (
+                    regens_ts_sorted[i + 1][0]
+                    if i + 1 < len(regens_ts_sorted)
+                    else None
+                )
+                bucket: list[dict] = []
+                for o_ts, o in per_arm_orders.get(arm.arm_id, []):
+                    delta = (o_ts - r_ts).total_seconds()
+                    if delta < 0 or delta > ORDER_GRACE:
+                        continue
+                    if cutoff is not None and o_ts >= cutoff:
+                        continue
+                    try:
+                        qty = float(o.get("qty") or 0)
+                    except (TypeError, ValueError):
+                        qty = 0.0
+                    bucket.append({
+                        "ticker": (o.get("ticker") or "?").upper(),
+                        "side": (o.get("side") or "?").lower(),
+                        "qty": round(qty, 4),
+                    })
+                per_arm_regen_orders[arm.arm_id][rec_id] = bucket
+
+        # Scan a wider window of news than we return so we don't miss
+        # older-but-matched events (news arrives faster than reactions
+        # log, so a fresh limit=20 window can push out a matched news
+        # from 3 min ago that has an arm reaction).
+        news = news[-scan_limit:]
+        reactions: list[dict] = []
+        for n in news:
+            n_ts = _parse_ts(n.get("ts", ""))
+            if n_ts is None:
+                continue
+            news_ticker = (n.get("ticker") or "").upper() or None
+            is_macro = news_ticker in macro_news_tickers if news_ticker else False
+            per_arm: dict[str, dict] = {}
+            for arm in exp.arms:
+                # A regen R attributes to news N if either N.ticker is
+                # in R's orders (direct trade), OR an arm-local
+                # finbert_hot_signal for N.ticker fired within ~90s
+                # before R (causal trigger, even if R rotated to a peer
+                # instead), OR N is a broad-market macro ticker. On
+                # match, all orders in R are shown so rotations count as
+                # reactions, not just the ticker-matching leg.
+                HOT_LOOKBACK_SEC = 90.0
+                matching_orders: list[dict] = []
+                matched_regen: dict | None = None
+                arm_hots = per_arm_hot_signals.get(arm.arm_id, [])
+                for r_ts, r in per_arm_regens.get(arm.arm_id, []):
+                    delta = (r_ts - n_ts).total_seconds()
+                    if delta < 0 or delta > WINDOW_SEC:
+                        continue
+                    trigger = r.get("trigger") or ""
+                    if trigger not in news_driven_triggers:
+                        continue
+                    rec_id = r.get("rec_id")
+                    if rec_id is None:
+                        continue
+                    candidate_orders = per_arm_regen_orders[arm.arm_id].get(
+                        rec_id, [],
+                    )
+                    order_tickers = {
+                        (o.get("ticker") or "").upper() for o in candidate_orders
+                    }
+                    # Rule (a): direct order-ticker match.
+                    matches = bool(news_ticker and news_ticker in order_tickers)
+                    # Rule (b): news ticker triggered a hot-signal within
+                    # the ~90s before the regen.
+                    if not matches and news_ticker:
+                        for h_ts, h in arm_hots:
+                            gap = (r_ts - h_ts).total_seconds()
+                            if gap < 0 or gap > HOT_LOOKBACK_SEC:
+                                continue
+                            if (h.get("ticker") or "").upper() == news_ticker:
+                                matches = True
+                                break
+                    # Rule (c): broad-market macro news.
+                    if not matches and is_macro:
+                        matches = True
+                    if not matches:
+                        continue
+                    if not candidate_orders:
+                        # regen fired but no trades (allocation within
+                        # bands). Skip so the cell shows "no reaction"
+                        # rather than an empty regen badge.
+                        continue
+                    if rec_id in claimed_regens[arm.arm_id]:
+                        # This regen has already been attributed to an
+                        # earlier news event - don't duplicate it under
+                        # every nearby SPY/QQQ macro row. First
+                        # matching news wins.
+                        continue
+                    matching_orders = candidate_orders
+                    matched_regen = {
+                        "seconds": round(delta, 1),
+                        "rec_id": rec_id,
+                        "targets_count": len(r.get("targets") or {}),
+                        "cash_pct": r.get("cash_pct"),
+                        "trigger": trigger,
+                    }
+                    claimed_regens[arm.arm_id].add(rec_id)
+                    break
+                regen_info = matched_regen
+                orders_list = matching_orders
+                # Skip only counts when there's no matched regen.
+                skip_info: dict | None = None
+                if regen_info is None:
+                    for s_ts, s in per_arm_skips.get(arm.arm_id, []):
+                        delta = (s_ts - n_ts).total_seconds()
+                        if 0 <= delta <= 30:
+                            skip_info = {
+                                "seconds": round(delta, 1),
+                                "kind": s.get("event"),
+                            }
+                            break
+                if regen_info:
+                    per_arm[arm.arm_id] = {
+                        "reacted": "regen",
+                        "regen": regen_info,
+                        "orders": orders_list,
+                    }
+                elif skip_info:
+                    per_arm[arm.arm_id] = {"reacted": "skip", **skip_info}
+                else:
+                    per_arm[arm.arm_id] = {"reacted": "none"}
+            reactions.append({
+                "ts": n.get("ts"),
+                "ticker": n.get("ticker"),
+                "headline": (n.get("headline") or "")[:140],
+                "per_arm": per_arm,
+            })
+        if only_matched:
+            reactions = [
+                r for r in reactions
+                if any(
+                    a.get("reacted") in ("regen", "orders")
+                    for a in r["per_arm"].values()
+                )
+            ]
+        reactions = reactions[-limit:]
+        return {"experiment": exp.name, "news_reactions": list(reversed(reactions))}
 
     @app.get("/api/experiment/compare/equity")
     def experiment_compare_equity(period: str = "1d") -> dict:
@@ -307,8 +677,18 @@ def create_app(
         return list_orders(limit=limit)
 
     @app.get("/api/events")
-    def events(limit: int = 200) -> list[dict]:
-        """Recent buffered events (used by the frontend on initial load)."""
+    def events(limit: int = 200, arm: str | None = None) -> list[dict]:
+        """Recent buffered events (used by the frontend on initial load).
+
+        In experiment mode, `?arm=X` tails the corresponding arm's
+        session.jsonl from disk (each arm subprocess writes its own file,
+        tagged with `arm_id` via AGENTIC_ARM_ID). The dashboard subprocess
+        can't see the arms' in-process event bus, so disk-tail is the only
+        way to feed the live event panel per-arm.
+        """
+        exp = app.state.experiment
+        if exp is not None and arm is not None:
+            return _tail_arm_session_events(arm, limit)
         return get_bus().recent(limit=limit)
 
     @app.get("/api/sessions")

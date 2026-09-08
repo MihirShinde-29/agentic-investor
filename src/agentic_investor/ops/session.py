@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -22,6 +23,11 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("session")
+
+# Tagging events with the arm_id lets the dashboard-subprocess (which
+# doesn't share the in-process event bus with the arm subprocess) locate
+# the right session.jsonl per arm and stream events to the frontend.
+_ARM_ID = os.environ.get("AGENTIC_ARM_ID")
 
 
 @dataclass
@@ -59,6 +65,8 @@ class SessionRecorder:
             "event": event,
             **payload,
         }
+        if _ARM_ID:
+            row["arm_id"] = _ARM_ID
         with self._lock:
             self._counts[event] = self._counts.get(event, 0) + 1
             with self.jsonl_path.open("a", encoding="utf-8") as f:

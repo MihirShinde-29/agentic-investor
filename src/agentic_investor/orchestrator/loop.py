@@ -70,7 +70,10 @@ class LoopConfig:
 
     # Triggers
     price_move_threshold_pct: float = 2.0
-    force_regen_seconds: int = 30 * 60
+    # Safety-net regen cadence when no material news / batch triggers
+    # fire. 10 min (was 30) so quiet news windows don't leave the loop
+    # cold. Each fire is ~$0.003-0.005 with prompt caching.
+    force_regen_seconds: int = 10 * 60
     # Disabled: LLM-based technical stance is too noisy to trigger regens.
     # Re-enable once stance derives from deterministic indicators.
     enable_technical_change_trigger: bool = False
@@ -526,18 +529,32 @@ def _same_session_exits(broker, *, since_minutes: int) -> set[str]:
     return sold - held
 
 
+_BROAD_MARKET_TICKERS: frozenset[str] = frozenset({
+    # Broad ETFs: news about them (macro shifts, SPX moves, Fed) is
+    # always A/B-relevant even when the arm doesn't hold the ETF
+    # directly, since it moves the whole book's context.
+    "SPY", "QQQ", "DIA", "IWM", "VOO", "VTI",
+    # Regional ETFs sometimes appear in market-context headlines
+    # (Europe/EAFE via VGK, EM via EEM). Included for the same reason.
+    "VGK", "EEM",
+})
+
+
 def _material_ticker_set(state, broker) -> set[str]:
-    """Union of tickers we care about: held + picker-frozen + recent exits.
+    """Union of tickers we care about: held + picker-frozen + recent
+    exits + broad-market ETFs.
 
     A news batch touching only non-material tickers isn't worth burning an
     LLM regen on. Recent exits stay material for 2h so a same-session
     whipsaw-back can still be prompted by real news, but stale exits from
     yesterday no longer bloat the material set (was 24h → 2h on 2026-09-04
-    to reduce noise wake-ups).
+    to reduce noise wake-ups). Broad-market ETFs are always material so
+    macro headlines wake the loop even on quiet single-name news days.
     """
     material = _held_ticker_set(broker)
     for t in (state.frozen_picker_tickers or []):
         material.add(t.upper())
+    material |= _BROAD_MARKET_TICKERS
     try:
         from datetime import UTC as _UTC
         from datetime import datetime as _dt
@@ -1985,12 +2002,25 @@ def run_event_loop(
                                 "name": "materiality",
                                 "reason": "promoted_to_on_deck",
                             })
-                        # Keep the news in decision_state.unprocessed so it
-                        # renders in the next natural batch context. Don't
-                        # fire the regen now — that's the whole point.
-                        # Advance last_fire_at so the next iteration doesn't
-                        # immediately re-trigger the natural fire path on
-                        # the same buffer.
+                        # Drop hot events on tickers is_actionable rejected
+                        # (micro-caps, warrants, foreign listings). Without
+                        # this they sit in unprocessed, re-trigger this
+                        # promote path every tick, keep resetting
+                        # last_fire_at, and starve the batch window
+                        # indefinitely.
+                        rejected = {
+                            t.upper() for t in promoted_tickers
+                            if not is_actionable_ticker(t)
+                        }
+                        if rejected:
+                            decision_state.unprocessed = [
+                                e for e in decision_state.unprocessed
+                                if (e.ticker or "").upper() not in rejected
+                            ]
+                        # Actionable remainder stays in unprocessed for the
+                        # next natural batch context. Advance last_fire_at
+                        # so the next iteration doesn't re-fire on the same
+                        # buffer.
                         fire = False
                         reason = ""
                         decision_state.last_fire_at = now

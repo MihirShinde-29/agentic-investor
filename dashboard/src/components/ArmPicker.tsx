@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { ExperimentMeta } from "@/lib/api";
+import { navigateArmView } from "@/lib/api";
 
 export function ArmPicker({
   meta,
@@ -12,16 +13,6 @@ export function ArmPicker({
 }) {
   if (meta.mode !== "experiment") return null;
 
-  const setUrl = (arm: string | null, nextView: "single" | "compare") => {
-    const params = new URLSearchParams(window.location.search);
-    if (arm) params.set("arm", arm);
-    else params.delete("arm");
-    if (nextView === "compare") params.set("view", "compare");
-    else params.delete("view");
-    const qs = params.toString();
-    window.location.search = qs ? `?${qs}` : "";
-  };
-
   const activeArm = currentArm || meta.default_arm;
 
   return (
@@ -32,7 +23,7 @@ export function ArmPicker({
       {meta.arms.map((a) => (
         <button
           key={a.id}
-          onClick={() => setUrl(a.id, "single")}
+          onClick={() => navigateArmView(a.id, "single")}
           className={cn(
             "rounded px-1.5 py-0.5 font-medium transition-colors",
             view === "single" && a.id === activeArm
@@ -45,7 +36,7 @@ export function ArmPicker({
         </button>
       ))}
       <button
-        onClick={() => setUrl(null, "compare")}
+        onClick={() => navigateArmView(null, "compare")}
         className={cn(
           "ml-1 rounded px-1.5 py-0.5 font-medium transition-colors",
           view === "compare"

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { TrendingUp } from "lucide-react";
-import { useLiveEvents } from "@/hooks/useLiveEvents";
+import { useArmEvents } from "@/hooks/useArmEvents";
 import { useLatestRecId, useSessionStartedAt } from "@/hooks/useLatestRecId";
 import { useReplayEvents } from "@/hooks/useReplayEvents";
 import { cn } from "@/lib/utils";
@@ -22,7 +22,7 @@ import { ArmPicker } from "@/components/ArmPicker";
 import { ExperimentCompare } from "@/components/ExperimentCompare";
 import type { Timeframe } from "@/lib/timeframe";
 import type { ExperimentMeta } from "@/lib/api";
-import { currentArm, fetcher } from "@/lib/api";
+import { fetcher, useArmParam, useViewParam } from "@/lib/api";
 
 function StatusPill({ status }: { status: "connecting" | "open" | "closed" }) {
   const color =
@@ -52,15 +52,8 @@ function StatusPill({ status }: { status: "connecting" | "open" | "closed" }) {
   );
 }
 
-function useView(): "single" | "compare" {
-  if (typeof window === "undefined") return "single";
-  return new URLSearchParams(window.location.search).get("view") === "compare"
-    ? "compare"
-    : "single";
-}
-
 function App() {
-  const { events: liveEvents, status } = useLiveEvents(500);
+  const { events: liveEvents, status } = useArmEvents(500);
   const [selectedSession, setSelectedSession] = useState<string | "live">("live");
   const [dismissedAlerts, setDismissedAlerts] = useState<Set<string>>(new Set());
   const [timeframe, setTimeframe] = useState<Timeframe>("1D");
@@ -68,8 +61,8 @@ function App() {
   const events = replayEvents ?? liveEvents;
   const recId = useLatestRecId(events);
   const sessionStartedAt = useSessionStartedAt(events);
-  const view = useView();
-  const arm = currentArm();
+  const view = useViewParam();
+  const arm = useArmParam();
   const { data: meta } = useSWR<ExperimentMeta>(
     "/api/experiment/meta",
     fetcher,
@@ -123,9 +116,9 @@ function App() {
             {meta && meta.mode === "experiment" ? (
               <ArmPicker meta={meta} currentArm={arm} view={view} />
             ) : null}
+            <TimeframeSelector value={timeframe} onChange={setTimeframe} />
             {view === "single" ? (
               <>
-                <TimeframeSelector value={timeframe} onChange={setTimeframe} />
                 <SessionPicker
                   selected={selectedSession}
                   onChange={setSelectedSession}
@@ -150,7 +143,7 @@ function App() {
 
       {view === "compare" ? (
         <main className="mx-auto max-w-[1600px] space-y-4 px-6 py-6">
-          <ExperimentCompare />
+          <ExperimentCompare timeframe={timeframe} />
         </main>
       ) : (
       <main className="mx-auto max-w-[1600px] space-y-4 px-6 py-6">
