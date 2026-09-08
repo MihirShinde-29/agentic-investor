@@ -127,6 +127,7 @@ def run_experiment(
     serve_dashboard: bool = False,
     dashboard_port: int = 8000,
     memory_sweep_interval_min: int = 30,
+    fresh: bool = False,
 ) -> int:
     """Spawn one paper-loop subprocess per arm and wait until all finish.
 
@@ -149,7 +150,34 @@ def run_experiment(
     print(f"arms: {[a.arm_id for a in experiment.arms]}")
     print(f"working dir: {exp_dir}")
     print(f"shared news bus:  {news_bus_path}")
-    print(f"shared price bus: {price_bus_path}\n")
+    print(f"shared price bus: {price_bus_path}")
+
+    # --fresh wipes each arm's DB + log so the run starts from an empty
+    # LoopState. Bus DBs are preserved so the writers don't have to
+    # rebuild schemas on every restart.
+    if fresh:
+        targets = [
+            exp_dir / f"{arm.arm_id}{sfx}"
+            for arm in experiment.arms for sfx in (".db", ".log")
+            if (exp_dir / f"{arm.arm_id}{sfx}").exists()
+        ]
+        if dry_run_launch:
+            print(f"--fresh (dry-run): WOULD wipe {[p.name for p in targets]}")
+        else:
+            for p in targets:
+                p.unlink()
+            print(f"--fresh: wiped {len(targets)} file(s): "
+                  f"{[p.name for p in targets]}")
+    else:
+        existing = [
+            arm.arm_id for arm in experiment.arms
+            if (exp_dir / f"{arm.arm_id}.db").exists()
+        ]
+        if existing:
+            print(f"resume: {len(existing)}/{len(experiment.arms)} arm(s) "
+                  f"have existing state and will resume: {existing}")
+            print("(pass --fresh to wipe arm DBs and start clean)")
+    print()
 
     # Bus writers own the single Alpaca news + market-data websockets
     # for the whole experiment; arms fan out through the bus DBs instead

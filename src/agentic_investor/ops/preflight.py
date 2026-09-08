@@ -95,22 +95,65 @@ def check_port_available(port: int) -> tuple[str, bool, str]:
 
 def check_experiment_dir(experiment_name: str) -> tuple[str, bool, str]:
     """Verify the experiment dir either doesn't exist (clean start) or
-    only contains leftover bus DBs / logs from a prior stopped run."""
+    is present with the expected shape. Arm DBs are not treated as
+    stale - resume is the default; check_arm_state_resumable reports
+    what will actually be picked up."""
     exp_dir = Path("out") / "experiments" / experiment_name
     if not exp_dir.exists():
         return (f"exp-dir:{experiment_name}", True, "clean (will create)")
     files = list(exp_dir.glob("*"))
-    stale_arm_dbs = [
-        f for f in files
-        if f.suffix == ".db" and f.stem not in ("news_bus", "price_bus")
-    ]
-    if not stale_arm_dbs:
-        return (f"exp-dir:{experiment_name}", True,
-                f"exists but no stale arm DBs ({len(files)} files)")
-    return (
-        f"exp-dir:{experiment_name}", False,
-        f"stale arm DBs from prior run: {[f.name for f in stale_arm_dbs]}",
-    )
+    return (f"exp-dir:{experiment_name}", True,
+            f"exists ({len(files)} files) - will resume")
+
+
+def check_arm_state_resumable(
+    experiment_name: str, arm_ids: list[str],
+) -> list[tuple[str, bool, str]]:
+    """For every arm with an existing DB, report how much loop state
+    would be picked up on next launch. Never fails - resume is desired
+    behavior; this exists so the operator sees it before hitting enter."""
+    import sqlite3
+
+    exp_dir = Path("out") / "experiments" / experiment_name
+    results: list[tuple[str, bool, str]] = []
+    for arm_id in arm_ids:
+        arm_db = exp_dir / f"{arm_id}.db"
+        if not arm_db.exists():
+            results.append((f"arm-state:{arm_id}", True, "no prior state (fresh)"))
+            continue
+        try:
+            with sqlite3.connect(f"file:{arm_db}?mode=ro", uri=True) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='loop_state'"
+                )
+                loop_rows = 0
+                if cur.fetchone() is not None:
+                    cur.execute("SELECT COUNT(*) FROM loop_state")
+                    loop_rows = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='paper_snapshots'"
+                )
+                snap_rows = 0
+                if cur.fetchone() is not None:
+                    cur.execute("SELECT COUNT(*) FROM paper_snapshots")
+                    snap_rows = cur.fetchone()[0]
+        except Exception as e:  # noqa: BLE001
+            results.append((f"arm-state:{arm_id}", True,
+                            f"db present but unreadable ({e})"))
+            continue
+        if loop_rows == 0 and snap_rows == 0:
+            results.append((f"arm-state:{arm_id}", True,
+                            "db present but empty"))
+        else:
+            results.append((
+                f"arm-state:{arm_id}", True,
+                f"WILL RESUME: {loop_rows} loop_state, "
+                f"{snap_rows} snapshots - pass --fresh to wipe",
+            ))
+    return results
 
 
 def check_arm_db_writable(
@@ -149,14 +192,24 @@ def run_preflight(experiment_name: str, dashboard_port: int = 8000) -> int:
     checks.append(check_port_available(dashboard_port))
     checks.append(check_experiment_dir(experiment_name))
     checks.extend(check_arm_db_writable(experiment_name, arm_ids))
+    resume_checks = check_arm_state_resumable(experiment_name, arm_ids)
+    checks.extend(resume_checks)
 
     print(f"\nPre-flight for experiment '{experiment_name}' ({len(arm_ids)} arms):\n")
     for name, ok, detail in checks:
         print(_fmt_row(name, ok, detail))
+    resuming = [c for c in resume_checks if "WILL RESUME" in c[2]]
+    if resuming:
+        bar = "!" * 72
+        print(f"\n{bar}")
+        print(f"!!  {len(resuming)}/{len(arm_ids)} arm(s) have existing state and WILL RESUME on launch.")
+        print("!!  Positions, loop state, and history will be preserved.")
+        print("!!  Pass --fresh to `paper-experiment` to wipe arm DBs first.")
+        print(f"{bar}")
     failed = [c for c in checks if not c[1]]
     print()
     if failed:
-        print(f"[!] {len(failed)} check(s) FAILED — fix before launch.")
+        print(f"[!] {len(failed)} check(s) FAILED - fix before launch.")
         return 1
-    print("[+] all clear — safe to launch.")
+    print("[+] all clear - safe to launch.")
     return 0
