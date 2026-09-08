@@ -202,7 +202,8 @@ def run_preflight(experiment_name: str, dashboard_port: int = 8000) -> int:
     if resuming:
         bar = "!" * 72
         print(f"\n{bar}")
-        print(f"!!  {len(resuming)}/{len(arm_ids)} arm(s) have existing state and WILL RESUME on launch.")
+        print(f"!!  {len(resuming)}/{len(arm_ids)} arm(s) have existing "
+              f"state and WILL RESUME on launch.")
         print("!!  Positions, loop state, and history will be preserved.")
         print("!!  Pass --fresh to `paper-experiment` to wipe arm DBs first.")
         print(f"{bar}")
