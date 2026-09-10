@@ -282,7 +282,7 @@ def structured_complete[T: BaseModel](
     *,
     model: str | None = None,
     temperature: float | None = None,
-    max_retries: int = 1,
+    max_retries: int = 3,
     timeout: float = 30.0,
 ) -> T:
     """Call the LLM and return a validated instance of response_model.

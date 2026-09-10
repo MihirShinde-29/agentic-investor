@@ -694,15 +694,20 @@ def _messages(state: GraphState) -> list[dict]:
         f"  target:  {req.target}"
     )
 
-    macro_pb = state.get("macro_prompt_block")
-    if macro_pb:
-        slow_sections.append(f"## 2. Market regime\n{macro_pb}")
-
     slow_sections.append(
         "## 3. Profile guardrails\n" + _profile_ruleset_block(profile)
     )
 
     fast_sections: list[str] = []
+
+    # Macro regime moved from slow -> fast on 2026-09-10 after the
+    # prompt_shape_changed instrumentation showed section 2 cycling
+    # through ~15 stable states, invalidating the cache boundary on
+    # ~50% of ticks. yfinance recomputes VIX/regime confidence with
+    # tick-timing noise, so this block is functionally volatile.
+    macro_pb = state.get("macro_prompt_block")
+    if macro_pb:
+        fast_sections.append(f"## 2. Market regime\n{macro_pb}")
 
     if req.tickers:
         fast_sections.append(
