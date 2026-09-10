@@ -71,9 +71,12 @@ class LoopConfig:
     # Triggers
     price_move_threshold_pct: float = 2.0
     # Safety-net regen cadence when no material news / batch triggers
-    # fire. 10 min (was 30) so quiet news windows don't leave the loop
-    # cold. Each fire is ~$0.003-0.005 with prompt caching.
-    force_regen_seconds: int = 10 * 60
+    # fire. Bumped 10 -> 20 min on 2026-09-09 after the reasoning-quality
+    # A/B showed both ensemble arms trading materially on force-regens
+    # with no fresh news (LLM rationalized a rebalance each time instead
+    # of concluding "nothing changed"). 20 min halves the churn while
+    # still keeping state fresh through quiet windows.
+    force_regen_seconds: int = 20 * 60
     # Disabled: LLM-based technical stance is too noisy to trigger regens.
     # Re-enable once stance derives from deterministic indicators.
     enable_technical_change_trigger: bool = False
@@ -792,9 +795,12 @@ def _drift_exceeds_band(
     return False
 
 
-def _log_reasoning_and_ensemble(session, rec, rec_id: int) -> None:
+def _log_reasoning_and_ensemble(session, rec, rec_id: int, prev_rec=None) -> None:
     """Log the CoT scratchpad + any ensemble metadata for a fresh rec.
-    Both are opt-in on the LLM/env side; skip cleanly when unset."""
+    Also emits a self-inconsistency signal when the model claimed
+    no_material_change but shipped weights that moved > 5pp on any
+    ticker vs the previous allocation. All opt-in on the LLM side;
+    skip cleanly when unset."""
     if not session:
         return
     reasoning = getattr(rec.allocation, "reasoning", None)
@@ -806,9 +812,39 @@ def _log_reasoning_and_ensemble(session, rec, rec_id: int) -> None:
                 "bear_case": reasoning.bear_case,
                 "disqualifiers": list(reasoning.disqualifiers or []),
                 "verdict": reasoning.verdict,
+                "no_material_change": bool(
+                    getattr(reasoning, "no_material_change", False)
+                ),
             })
         except Exception:  # noqa: BLE001
             pass
+        # Self-inconsistency check: model said "no change" but shipped one.
+        if (
+            getattr(reasoning, "no_material_change", False)
+            and prev_rec is not None
+        ):
+            try:
+                prev_w = {
+                    p.ticker.upper(): p.weight_pct
+                    for p in prev_rec.allocation.positions
+                }
+                new_w = {
+                    p.ticker.upper(): p.weight_pct
+                    for p in rec.allocation.positions
+                }
+                max_delta = max(
+                    (abs(new_w.get(t, 0.0) - prev_w.get(t, 0.0))
+                     for t in set(prev_w) | set(new_w)),
+                    default=0.0,
+                )
+                if max_delta > 5.0:
+                    session.log("knob_fired", {
+                        "name": "no_material_change_inconsistent",
+                        "rec_id": rec_id,
+                        "max_delta_pp": round(max_delta, 2),
+                    })
+            except Exception:  # noqa: BLE001
+                pass
     meta = getattr(rec, "ensemble_meta", None)
     if meta:
         try:
@@ -1364,7 +1400,7 @@ def run_tick(
                     })
                     for ev in getattr(rec, "repair_events", []) or []:
                         session.log("alloc_repair", {"rec_id": rec_id, **ev})
-                    _log_reasoning_and_ensemble(session, rec, rec_id)
+                    _log_reasoning_and_ensemble(session, rec, rec_id, prev_rec)
 
         else:
             # First-ever regen or new-day reset: no prior rec to compare
@@ -1411,6 +1447,7 @@ def run_tick(
                 })
                 for ev in getattr(rec, "repair_events", []) or []:
                     session.log("alloc_repair", {"rec_id": rec_id, **ev})
+                _log_reasoning_and_ensemble(session, rec, rec_id, None)
     else:
         from agentic_investor.orchestrator.store import load_recommendation
 

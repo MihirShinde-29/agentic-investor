@@ -60,6 +60,13 @@ Emit a `reasoning` block first:
     floor, stale thesis, thin liquidity, ...). Empty list is fine.
   - verdict: 1-2 sentences on what changed vs the previous allocation.
     If nothing meaningful changed, say so - the drift filter will skip.
+  - no_material_change: SET TRUE when the current tick has no fresh
+    evidence that justifies a weight change (force-regens on quiet
+    windows, cook timers with no new signal, batch closes on noise).
+    When True you MUST return the previous allocation's weights
+    verbatim - do not rationalize a rebalance. The loop cross-checks
+    and logs a self-inconsistency signal if you set True but ship
+    weights that moved > 5pp on any ticker.
 The trace does not drive sizing; the loop logs it for calibration.
 Forcing yourself to write bear_case before weights is what catches
 reflex trades.

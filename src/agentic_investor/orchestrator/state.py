@@ -78,6 +78,19 @@ class AllocationReasoning(BaseModel):
             "drift filter to skip the regen."
         ),
     )
+    no_material_change: bool = Field(
+        default=False,
+        description=(
+            "Set True when the current tick's evidence does NOT justify any "
+            "weight change from the previous allocation. When True, the loop "
+            "compares your positions to the previous allocation; any actual "
+            "delta > 5pp is logged as a self-inconsistency (you said no "
+            "change but shipped one). Use this to short-circuit force-regens "
+            "and stale-evidence re-thinks: if you're about to rationalize a "
+            "rebalance with no fresh signal, set this True and keep the "
+            "previous weights."
+        ),
+    )
 
 
 class Allocation(BaseModel):
