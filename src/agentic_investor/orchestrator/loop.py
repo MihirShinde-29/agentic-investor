@@ -892,6 +892,7 @@ def _generate_recommendation(
     previous_rec: Recommendation | None = None,
     extra_tickers: list[str] | None = None,
     on_deck_watchlist: list[str] | None = None,
+    stale_evidence_hint: bool = False,
 ) -> tuple[Recommendation, list[str]]:
     """Run the orchestrator once for today's decision. Uses the M6 profile.
 
@@ -952,6 +953,7 @@ def _generate_recommendation(
         news_batch_context=news_batch_context,
         previous_allocation=prev_alloc,
         on_deck_watchlist=on_deck_watchlist,
+        stale_evidence_hint=stale_evidence_hint,
     )
     return rec, final_tickers
 
@@ -1224,11 +1226,17 @@ def run_tick(
                     except Exception:  # noqa: BLE001
                         pass
                 on_deck_meta.append(entry)
+            # force-regen / interval triggers fire when nothing else did -
+            # no fresh news, no price move, no correlation shift. Hint the
+            # model that unless it finds something new, it should set
+            # no_material_change=True and keep the previous weights.
+            stale_hint = reason in {"force-regen", "interval"}
             rec, tickers_used = _generate_recommendation(
                 cfg, news_batch_context=combined_ctx, pre_picked_tickers=pre_picked,
                 previous_rec=prev_rec_for_prompt,
                 extra_tickers=promoted or None,
                 on_deck_watchlist=on_deck_meta,
+                stale_evidence_hint=stale_hint,
             )
             state.last_batch_fingerprint = batch_fp
             # Honor the LLM's on-deck purge nominations. Never drops held

@@ -67,6 +67,11 @@ Emit a `reasoning` block first:
     verbatim - do not rationalize a rebalance. The loop cross-checks
     and logs a self-inconsistency signal if you set True but ship
     weights that moved > 5pp on any ticker.
+    When the user message includes a "STALE EVIDENCE HINT" block, the
+    default answer is no_material_change=True. Override only by naming
+    the specific catalyst (news headline, price move, correlation
+    shift) you found in the signals below that justifies the change.
+    Absent such a citation, keep the previous weights.
 The trace does not drive sizing; the loop logs it for calibration.
 Forcing yourself to write bear_case before weights is what catches
 reflex trades.
@@ -709,6 +714,17 @@ def _messages(state: GraphState) -> list[dict]:
     if macro_pb:
         fast_sections.append(f"## 2. Market regime\n{macro_pb}")
 
+    if state.get("stale_evidence_hint"):
+        fast_sections.append(
+            "## STALE EVIDENCE HINT (loop-side)\n"
+            "This regen fired on force-regen / interval, NOT on fresh "
+            "news or a price move. Unless you find a specific new signal "
+            "in the sections below that justifies a rebalance, you MUST "
+            "set `reasoning.no_material_change=True` and emit the "
+            "previous allocation's weights verbatim. Rebalancing on "
+            "stale evidence is friction with no expected return."
+        )
+
     if req.tickers:
         fast_sections.append(
             "## 4. Universe under consideration (picker's frozen top-N)\n"
@@ -1080,6 +1096,7 @@ def run_orchestrator(
     news_batch_context: str | None = None,
     previous_allocation: "Allocation | None" = None,
     on_deck_watchlist: list[str] | None = None,
+    stale_evidence_hint: bool = False,
 ) -> Recommendation:
     """Run the orchestrator graph. If profile is None, uses the risk-tier preset.
 
@@ -1122,6 +1139,8 @@ def run_orchestrator(
         initial["previous_allocation"] = previous_allocation
     if on_deck_watchlist:
         initial["on_deck_watchlist"] = list(on_deck_watchlist)
+    if stale_evidence_hint:
+        initial["stale_evidence_hint"] = True
     final = _get_graph().invoke(initial)
     return Recommendation(
         request=request,

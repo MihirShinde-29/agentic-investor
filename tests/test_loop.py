@@ -32,7 +32,8 @@ from agentic_investor.tools.paper_broker import (
 
 def _fake_generate(cfg, as_of=None, news_batch_context=None,
                    pre_picked_tickers=None, previous_rec=None,
-                   extra_tickers=None, on_deck_watchlist=None):
+                   extra_tickers=None, on_deck_watchlist=None,
+                   stale_evidence_hint=False):
     return _rec(cfg.amount), list(cfg.tickers) or ["AAPL", "NVDA"]
 
 
@@ -487,7 +488,8 @@ def test_promotion_extracts_beneficiaries_from_batch_and_caps(monkeypatch):
 
     def _capture_generate(cfg, as_of=None, news_batch_context=None,
                           pre_picked_tickers=None, previous_rec=None,
-                          extra_tickers=None, on_deck_watchlist=None):
+                          extra_tickers=None, on_deck_watchlist=None,
+                          stale_evidence_hint=False):
         captured["extra_tickers"] = extra_tickers
         return _rec(cfg.amount), list(cfg.tickers) or ["AAPL"]
 

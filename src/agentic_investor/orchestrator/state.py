@@ -418,3 +418,7 @@ class GraphState(TypedDict, total=False):
     macro_regime: str
     # Threaded up to Recommendation when ensemble sampling ran.
     ensemble_meta: dict
+    # Loop-side hint that this regen was fired by force-regen / interval
+    # (no news, no price move, no correlation shift). The prompt uses
+    # this to push the LLM toward no_material_change=True on stale ticks.
+    stale_evidence_hint: bool
