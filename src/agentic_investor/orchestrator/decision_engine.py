@@ -184,6 +184,22 @@ def render_batch_context(batch: DecisionBatch) -> str:
     return "\n".join(lines) if lines else ""
 
 
+def _looks_like_equity_ticker(ticker: str) -> bool:
+    """Accept only symbols that plausibly resolve on yfinance's equity feed.
+    Rejects crypto pairs (TRUMPUSD, BTCUSD), index symbols (^VIX), and
+    anything else that would waste a yfinance round-trip only to 404."""
+    if not ticker:
+        return False
+    t = ticker.upper()
+    if t.startswith("^") or "-" in t or "/" in t:
+        return False
+    # Crypto pairs the Alpaca news feed tags as ticker=BTCUSD, TRUMPUSD, etc.
+    if any(t.endswith(sfx) for sfx in ("USD", "USDT", "USDC", "EUR", "GBP", "JPY", "BTC", "ETH")):
+        return False
+    base = t.split(".")[0]
+    return 1 <= len(base) <= 5 and base.isalpha()
+
+
 def default_reaction_price_fetcher(event: NewsEvent) -> float | None:
     """Real news_reaction_pct: intraday price change from published_at to now.
 
@@ -191,6 +207,8 @@ def default_reaction_price_fetcher(event: NewsEvent) -> float | None:
     when we can't compute a reaction - the LLM prompt handles missing values
     gracefully (COOKED entries without reaction data just omit the field).
     """
+    if not _looks_like_equity_ticker(event.ticker):
+        return None
     try:
         import pandas as pd
 

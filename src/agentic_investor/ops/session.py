@@ -42,6 +42,10 @@ class SessionRecorder:
     @classmethod
     def start(cls, base_dir: str = "out/sessions") -> SessionRecorder:
         stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
+        # Append arm_id so two arm subprocesses starting the same clock
+        # second get separate session dirs. Silent shared-jsonl bug otherwise.
+        if _ARM_ID:
+            stamp = f"{stamp}_{_ARM_ID}"
         out = Path(base_dir) / stamp
         out.mkdir(parents=True, exist_ok=True)
         rec = cls(out_dir=out)
