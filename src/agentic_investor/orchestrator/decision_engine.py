@@ -28,6 +28,20 @@ logger = logging.getLogger(__name__)
 
 
 HOT_MAX_AGE_SEC = 120       # <2 min = HOT
+
+
+# Regen trigger reason strings that indicate the loop fired because of the
+# news pipeline (as opposed to interval / force-regen / price-move). Both
+# the loop and the dashboard news-reactions endpoint import this; keeping
+# a single source of truth prevents the "endpoint silently drops N% of
+# regens because someone added a trigger name in loop.py" bug (found live
+# 2026-09-09 when cooked-news-ready wasn't in the dashboard whitelist).
+NEWS_DRIVEN_TRIGGERS: frozenset[str] = frozenset({
+    "finbert-hot-headline",
+    "batch-window-closed",
+    "cooked-news-ready",
+    "materiality-bypass-fire",
+})
 COOKED_MIN_AGE_SEC = 15 * 60  # >=15 min = COOKED
 STALE_MIN_AGE_SEC = 60 * 60   # >=60 min = STALE (background only)
 

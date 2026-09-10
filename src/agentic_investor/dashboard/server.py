@@ -427,12 +427,9 @@ def create_app(
         # force-regens (force-regen), price-move triggers, etc. would
         # dump their orders under whatever news happened to arrive
         # nearby - noise, not signal.
-        news_driven_triggers = {
-            "finbert-hot-headline",
-            "batch-window-closed",
-            "materiality-bypass-fire",
-            "cooked-news-ready",
-        }
+        from agentic_investor.orchestrator.decision_engine import (
+            NEWS_DRIVEN_TRIGGERS as news_driven_triggers,
+        )
         # Broad ETFs: macro news often tags SPY/QQQ but the LLM might
         # act on any held name (Fed rate change -> trim tech). Allow
         # attribution when the news is one of these even if the traded
