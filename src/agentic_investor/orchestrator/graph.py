@@ -841,6 +841,21 @@ def _messages(state: GraphState) -> list[dict]:
             len(slow_prefix), _sp_tokens, _sp_tokens >= 1024, _sp_hash,
             len(fast_tail),
         )
+        # Louder INFO log when the cacheable prefix changes tick-to-tick;
+        # cache misses ride on this. Includes per-section hashes so we
+        # can attribute drift to a specific slow_section (request/regime/
+        # profile). Only fires on delta so quiet ticks stay quiet.
+        prev = getattr(_messages, "_last_slow_prefix_hash", None)
+        if prev is not None and prev != _sp_hash:
+            per_section = [
+                _hashlib.sha1(s.encode("utf-8")).hexdigest()[:8]
+                for s in slow_sections
+            ]
+            logger.info(
+                "prompt_shape_changed: prev=%s new=%s sections=%s bytes=%d",
+                prev, _sp_hash, per_section, len(slow_prefix),
+            )
+        _messages._last_slow_prefix_hash = _sp_hash  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
         pass
 
