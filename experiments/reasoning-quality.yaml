@@ -9,11 +9,13 @@
 #    on Anthropic; OpenAI cache_read is 50%). Tests whether sampling
 #    variance across a single model buys signal, or if the same model
 #    keeps making the same call regardless of temperature.
-# C: cross-model ensemble — one call each to gpt-4o-mini and
-#    anthropic/claude-haiku-4-5, median pick. Costs ~2x plus loses the
-#    prompt cache on the second provider. Tests whether disagreement
-#    across model families flags decisions where a single model would
-#    have moved on autopilot.
+# C: cross-tier ensemble — one call each to gpt-4o-mini and gpt-4o,
+#    median pick. Same family (both OpenAI) but different reasoning
+#    capacity: gpt-4o costs ~6x mini and generally reasons better on
+#    multi-constraint problems. Tests whether the "bigger sibling
+#    disagrees" signal is worth the cost multiplier. (Original plan
+#    was cross-family via claude-haiku but we don't have an
+#    ANTHROPIC_API_KEY set.)
 #
 # Same news bus + market prices + broker discipline for all 3. B vs A =
 # marginal value of self-consistency; C vs A = marginal value of cross-
@@ -33,4 +35,4 @@ arms:
     alpaca_account: tertiary
     config_diff: {}
     env:
-      AGENTIC_ENSEMBLE_MODELS: "gpt-4o-mini,anthropic/claude-haiku-4-5"
+      AGENTIC_ENSEMBLE_MODELS: "gpt-4o-mini,gpt-4o"

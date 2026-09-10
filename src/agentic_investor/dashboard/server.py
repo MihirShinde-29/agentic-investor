@@ -376,6 +376,13 @@ def create_app(
         per_arm_skips: dict[str, list[tuple[_dt, dict]]] = {}
         per_arm_orders: dict[str, list[tuple[_dt, dict]]] = {}
         per_arm_hot_signals: dict[str, list[tuple[_dt, dict]]] = {}
+        # rec_id -> trigger_tickers, per arm. The loop already computed which
+        # news tickers fired each regen via regen_attribution; using it here
+        # catches rotation cases (news about MRK causes LLM to sell MRK by
+        # buying CRM instead) that order-ticker matching alone misses.
+        per_arm_trigger_tickers: dict[str, dict[int, set[str]]] = {
+            a.arm_id: {} for a in exp.arms
+        }
         for arm in exp.arms:
             evs = _load_events(
                 arm.arm_id,
@@ -385,6 +392,7 @@ def create_app(
                     "materiality_bypass_promoted",
                     "order_submitted",
                     "finbert_hot_signal",
+                    "regen_attribution",
                 },
             )
             regens: list[tuple[_dt, dict]] = []
@@ -401,6 +409,12 @@ def create_app(
                     orders.append((ts, ev))
                 elif ev["event"] == "finbert_hot_signal":
                     hots.append((ts, ev))
+                elif ev["event"] == "regen_attribution":
+                    rid = ev.get("rec_id")
+                    if rid is not None:
+                        per_arm_trigger_tickers[arm.arm_id][int(rid)] = {
+                            t.upper() for t in (ev.get("trigger_tickers") or [])
+                        }
                 else:
                     skips.append((ts, ev))
             per_arm_regens[arm.arm_id] = regens
@@ -417,6 +431,7 @@ def create_app(
             "finbert-hot-headline",
             "batch-window-closed",
             "materiality-bypass-fire",
+            "cooked-news-ready",
         }
         # Broad ETFs: macro news often tags SPY/QQQ but the LLM might
         # act on any held name (Fed rate change -> trim tech). Allow
@@ -522,12 +537,17 @@ def create_app(
                     # Rule (c): broad-market macro news.
                     if not matches and is_macro:
                         matches = True
+                    # Rule (d): loop's own attribution. If the regen's
+                    # regen_attribution.trigger_tickers lists this news
+                    # ticker, count it as attributed even if the LLM
+                    # rotated away to a different name.
+                    if not matches and news_ticker:
+                        rec_triggers = per_arm_trigger_tickers[arm.arm_id].get(
+                            rec_id, set(),
+                        )
+                        if news_ticker in rec_triggers:
+                            matches = True
                     if not matches:
-                        continue
-                    if not candidate_orders:
-                        # regen fired but no trades (allocation within
-                        # bands). Skip so the cell shows "no reaction"
-                        # rather than an empty regen badge.
                         continue
                     if rec_id in claimed_regens[arm.arm_id]:
                         # This regen has already been attributed to an
