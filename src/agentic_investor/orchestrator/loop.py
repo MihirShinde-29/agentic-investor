@@ -87,7 +87,14 @@ class LoopConfig:
     # single-delta caps keep the outer bounds tight so hallucinated blowups
     # (TEAM +30pp on unrelated batches) still get caught.
     opinion_drift_threshold_pct: float = 5.0
-    max_avg_drift_pct: float = 5.0
+    # Bumped 5 -> 8 on 2026-09-10 after the reasoning-quality A/B showed
+    # the 5pp ceiling was blocking ~95% of arm A's regens (114 avg-drift
+    # skips vs 6 orders). The M14 CoT-equipped model naturally proposes
+    # 7-15pp rebalances by design; the old ceiling assumed those were
+    # noise. Ensemble arms (B/C) get an additional bypass via the
+    # ensemble_agreement >= 0.7 trust check in _filter_should_skip;
+    # baseline A benefits from the wider ceiling here.
+    max_avg_drift_pct: float = 8.0
     max_single_delta_pct: float = 15.0
 
     # 0w: cap on beneficiary tickers promoted from news bodies per regen.
@@ -668,6 +675,9 @@ def _opinion_barely_moved(
     return barely, deltas
 
 
+_ENSEMBLE_TRUST_AGREEMENT: float = 0.7
+
+
 def _filter_should_skip(
     new_rec: Recommendation,
     prev_rec: Recommendation | None,
@@ -677,6 +687,7 @@ def _filter_should_skip(
     max_single_delta_pct: float,
     news_batch_tickers: set[str] | None = None,
     confidence_by_ticker: dict[str, float] | None = None,
+    ensemble_agreement: float | None = None,
 ) -> tuple[bool, str, dict[str, float], dict[str, float]]:
     """Filter v2: scale-invariant + context-aware skip decision.
 
@@ -686,6 +697,14 @@ def _filter_should_skip(
       (c) max_single_delta > max_single_delta_pct AND the moving ticker is
           NOT in news_batch_tickers AND its confidence < 0.7
           (dramatic single move without justification)
+
+    ensemble_agreement is the M14 ensemble-agreement score for this rec
+    (0-1, from self-consistency N=3 or cross-tier median-pick). When
+    provided and >= 0.7, bypass rules (b) and (c) - a rebalance that
+    multiple samples/models agreed on is trusted even if it swings
+    hard. Rule (a) still fires because the barely-moved skip is about
+    trade friction, not about trust. Falls back to threshold-only for
+    baseline (non-ensemble) arms.
 
     Returns (should_skip, skip_reason, deltas, stats). stats has
     "avg_drift", "max_delta", "max_delta_ticker", "n_tickers".
@@ -710,6 +729,13 @@ def _filter_should_skip(
         "max_delta_ticker": max_ticker,
         "n_tickers": n,
     }
+    high_trust = (
+        ensemble_agreement is not None
+        and ensemble_agreement >= _ENSEMBLE_TRUST_AGREEMENT
+    )
+    if high_trust:
+        stats["ensemble_trust_bypass"] = round(ensemble_agreement, 3)
+        return False, "", deltas, stats
     # Rule (b): scale-invariant avg-drift check
     if avg_drift > max_avg_drift_pct:
         return True, "avg-drift-too-high", deltas, stats
@@ -1250,6 +1276,8 @@ def run_tick(
                 p.ticker.upper(): (p.confidence or 0.5)
                 for p in rec.allocation.positions
             }
+            ensemble_meta = getattr(rec, "ensemble_meta", None) or {}
+            ensemble_agreement = ensemble_meta.get("agreement")
             should_skip, skip_reason, deltas, stats = _filter_should_skip(
                 rec, prev_rec,
                 opinion_drift_threshold_pct=cfg.opinion_drift_threshold_pct,
@@ -1257,6 +1285,7 @@ def run_tick(
                 max_single_delta_pct=cfg.max_single_delta_pct,
                 news_batch_tickers=batch_tickers_for_filter,
                 confidence_by_ticker=confidence_lookup,
+                ensemble_agreement=ensemble_agreement,
             )
             if should_skip:
                 logger.info(
@@ -1306,6 +1335,12 @@ def run_tick(
                         deltas={t: round(d, 2) for t, d in deltas.items()},
                         prev_rec_id=state.last_rec_id,
                     )
+                    # Also write a paper_snapshot so the dashboard equity
+                    # chart tracks broker state on skip ticks (2026-09-10:
+                    # arm A skipped 114 regens today and the chart went
+                    # flat because snapshot capture sat AFTER the early
+                    # return below).
+                    record_snapshot(skip_acct, skip_positions)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("record_filter_skip failed: %s", e)
                 if session:
