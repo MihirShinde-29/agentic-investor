@@ -70,6 +70,14 @@ export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
   const chartData = useMemo(() => {
     if (!equity || equity.arms.length === 0) return [];
     const now = Date.now();
+    // On 1D, clip to today's local midnight so the chart shows only
+    // today's session, matching how PortfolioChart / ticker charts feel.
+    // Wider timeframes (3D, 1W, etc) still show the full window from
+    // the backend period param.
+    const todayStart =
+      timeframe === "1D"
+        ? new Date(new Date().setHours(0, 0, 0, 0)).getTime()
+        : 0;
     // Normalize each arm to % change from its own baseline. Baseline is
     // opening_equity from summary (session-open) if available, else the
     // arm's first snapshot in the window. Always append a synthetic
@@ -77,13 +85,16 @@ export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
     const perArmNormalized: Record<string, { ts: number; pct: number }[]> = {};
     for (const arm of equity.arms) {
       const live = liveByArm[arm.arm_id];
+      const inWindow = arm.points.filter(
+        (p) => new Date(p.ts).getTime() >= todayStart,
+      );
       const baseline =
-        live?.open ?? (arm.points.length > 0 ? arm.points[0].equity : null);
+        live?.open ?? (inWindow.length > 0 ? inWindow[0].equity : null);
       if (baseline === null || baseline <= 0) {
         perArmNormalized[arm.arm_id] = [];
         continue;
       }
-      const series = arm.points.map((p) => ({
+      const series = inWindow.map((p) => ({
         ts: new Date(p.ts).getTime(),
         pct: (p.equity / baseline - 1) * 100,
       }));
@@ -113,7 +124,7 @@ export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
       }
       return row;
     });
-  }, [equity, liveByArm]);
+  }, [equity, liveByArm, timeframe]);
 
   const armIds = equity?.arms.map((a) => a.arm_id) ?? [];
 
