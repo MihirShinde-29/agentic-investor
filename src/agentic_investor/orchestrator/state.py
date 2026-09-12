@@ -91,6 +91,23 @@ class AllocationReasoning(BaseModel):
             "previous weights."
         ),
     )
+    # Observability only. NOT gated on today - we log it and (after
+    # enough ticks) correlate with realized 1d P/L to see if the
+    # self-reported number is calibrated. Prior LLM-calibration work
+    # (Kadavath 2022, Tian 2023) expects systematic overconfidence, so
+    # treat this as a hypothesis to test, not a signal to trust yet.
+    confidence: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        description=(
+            "Your self-assessed probability that this allocation outperforms "
+            "the previous one over the next 1-day horizon (0.0 = certain "
+            "worse, 0.5 = coin flip, 1.0 = certain better). Consider your "
+            "signal strength, how much of the thesis is already priced in, "
+            "and whether disqualifiers apply. Nothing in the loop reads this "
+            "yet - it is logged for post-hoc calibration analysis. Do NOT "
+            "default to 0.5; give a real estimate."
+        ),
+    )
 
 
 class Allocation(BaseModel):

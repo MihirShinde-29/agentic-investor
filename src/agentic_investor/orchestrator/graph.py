@@ -72,6 +72,15 @@ Emit a `reasoning` block first:
     the specific catalyst (news headline, price move, correlation
     shift) you found in the signals below that justifies the change.
     Absent such a citation, keep the previous weights.
+  - confidence: your self-assessed probability in [0.0, 1.0] that THIS
+    allocation outperforms the previous one over the next 1 trading day.
+    0.5 = coin flip. 0.8+ = strong signal, low noise, thesis not yet
+    priced in. 0.2-0.4 = forced sizing on conflicting signals. Consider
+    signal strength, how much of the move is already in the price, and
+    whether disqualifiers apply. Do NOT default to 0.5 - give an actual
+    estimate. Nothing in the loop gates on this yet; it is logged so we
+    can measure how well-calibrated your self-report is against
+    realized P/L.
 The trace does not drive sizing; the loop logs it for calibration.
 Forcing yourself to write bear_case before weights is what catches
 reflex trades.

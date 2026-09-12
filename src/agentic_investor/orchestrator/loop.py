@@ -848,6 +848,9 @@ def _log_reasoning_and_ensemble(session, rec, rec_id: int, prev_rec=None) -> Non
                 "no_material_change": bool(
                     getattr(reasoning, "no_material_change", False)
                 ),
+                "confidence": float(
+                    getattr(reasoning, "confidence", 0.5) or 0.5
+                ),
             })
         except Exception:  # noqa: BLE001
             pass
