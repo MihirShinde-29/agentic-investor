@@ -1542,9 +1542,11 @@ def main() -> None:
     pl.add_argument("--max-single-delta-pct", type=float, default=15.0,
                     help="opinion-drift filter: max weight change on a "
                          "single ticker per regen (default 15pp)")
-    pl.add_argument("--max-avg-drift-pct", type=float, default=5.0,
+    pl.add_argument("--max-avg-drift-pct", type=float, default=8.0,
                     help="opinion-drift filter: max avg drift across "
-                         "positions per regen (default 5pp)")
+                         "positions per regen (default 8pp; bumped from "
+                         "5pp on 2026-09-10 after ~95%% rejection rate on "
+                         "the M14 baseline arm)")
     pl.add_argument("--opinion-drift-threshold-pct", type=float, default=5.0,
                     help="opinion-drift filter: min per-position drift to "
                          "consider a regen substantive (default 5pp)")
