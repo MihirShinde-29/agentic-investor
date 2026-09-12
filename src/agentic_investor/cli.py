@@ -1162,6 +1162,7 @@ def _paper_loop(
     max_positions: int | None,
     news_batch_window_sec: int = 60,
     alpaca_account: str = "primary",
+    pre_market_lead_min: int = 0,
 ) -> None:
     import logging
 
@@ -1216,6 +1217,7 @@ def _paper_loop(
         opinion_drift_threshold_pct=opinion_drift_threshold_pct,
         max_positions_override=max_positions,
         news_batch_window_sec=news_batch_window_sec,
+        pre_market_lead_min=pre_market_lead_min,
     )
     broker = get_broker(account=alpaca_account)
     if alpaca_account != "primary":
@@ -1555,6 +1557,11 @@ def main() -> None:
                          "events before firing a regen (default 60s). Larger "
                          "= fewer LLM calls + more context; hot-signal "
                          "fast-path still fires immediately")
+    pl.add_argument("--pre-market-lead-min", type=int, default=0,
+                    help="wake up N minutes before market open, run news + "
+                         "regen pipeline, but hold orders until 9:30 EDT. "
+                         "0 = disabled (default). Absorbs overnight news "
+                         "gradually instead of firehose-at-open.")
     pl.add_argument("--max-positions", type=int, default=None,
                     help="override profile max_positions cap (moderate "
                          "default 12); repair pass drops smallest names "
@@ -1864,6 +1871,7 @@ def main() -> None:
             args.max_positions,
             news_batch_window_sec=args.news_batch_window_sec,
             alpaca_account=args.alpaca_account,
+            pre_market_lead_min=args.pre_market_lead_min,
         )
     else:
         _print_config()

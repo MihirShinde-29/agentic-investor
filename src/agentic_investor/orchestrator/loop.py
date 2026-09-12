@@ -187,6 +187,13 @@ class LoopConfig:
     once: bool = False
     force_open: bool = False
 
+    # Pre-market lead: wake up N minutes before market open, run the news
+    # pipeline + regen normally, but hold orders until 9:30 EDT so the
+    # first market-open tick already reflects overnight/pre-market news
+    # instead of processing 1000+ backlog headlines in a single tick.
+    # 0 = disabled (default; no behavior change).
+    pre_market_lead_min: int = 0
+
 
 @dataclass
 class TickResult:
@@ -958,6 +965,24 @@ def _generate_recommendation(
     return rec, final_tickers
 
 
+def _pre_market_active(clock, cfg: LoopConfig, now: datetime) -> bool:
+    """True if we're inside the pre-market lead window.
+
+    Runs news + regen normally but suppresses order submission - lets the
+    model absorb overnight/pre-market news before 9:30 EDT instead of
+    seeing the whole backlog on the first market-open tick.
+    """
+    if cfg.pre_market_lead_min <= 0 or clock.is_open:
+        return False
+    next_open = getattr(clock, "next_open", None)
+    if next_open is None:
+        return False
+    if next_open.tzinfo is None:
+        next_open = next_open.replace(tzinfo=UTC)
+    seconds_to_open = (next_open - now).total_seconds()
+    return 0 < seconds_to_open <= cfg.pre_market_lead_min * 60
+
+
 def run_tick(
     cfg: LoopConfig,
     state: LoopState,
@@ -968,6 +993,7 @@ def run_tick(
     now: datetime | None = None,
     session=None,  # SessionRecorder | None - optional live logging
     trigger: str | None = None,
+    pre_market: bool = False,
 ) -> TickResult:
     """One iteration of the loop. Callable independently for cron-style ops."""
     from agentic_investor.llm.client import get_call_stats
@@ -1707,6 +1733,23 @@ def run_tick(
             "trigger_matches_decision": sorted(overlap),
             "n_trades": len(plans),
         })
+    if pre_market:
+        # Pre-market lead: model has already generated the trade plan
+        # (news processed, regen done) but market isn't open yet. Hold
+        # the plan - first market-open tick will re-regen with fresh
+        # state and submit then. Logging so we can audit "how much
+        # signal did we absorb pre-market vs at open."
+        if session:
+            session.log("pre_market_hold", {
+                "rec_id": state.last_rec_id,
+                "plan_count": len(plans),
+                "tickers": sorted({p.ticker.upper() for p in plans}),
+            })
+        return TickResult(
+            tick_at=tick_at, rec_id=state.last_rec_id,
+            regenerated_rec=regenerated, plan_count=len(plans),
+            submitted=[], equity=acct.equity,
+        )
     submitted = execute_trade_plan(
         plans, broker, rec_id=state.last_rec_id,
         stop_loss_pct=cfg.stop_loss_pct, take_profit_pct=cfg.take_profit_pct,
@@ -1880,15 +1923,33 @@ def run_event_loop(
                     session.log("clock_error", {"error": str(e)})
                 time.sleep(15)
                 continue
+            _now_utc = _dt.now(_UTC)
+            pre_market_this_tick = False
             if not clock.is_open and not cfg.force_open:
-                if session:
-                    session.log("market_closed", {"next_open": clock.next_open})
-                if cfg.once:
-                    break
-                _sleep_until(clock.next_open, now=_dt.now(_UTC))
-                continue
+                if _pre_market_active(clock, cfg, _now_utc):
+                    pre_market_this_tick = True
+                    if session:
+                        session.log("pre_market_active", {
+                            "next_open": str(clock.next_open),
+                            "lead_min": cfg.pre_market_lead_min,
+                        })
+                else:
+                    if session:
+                        session.log("market_closed", {"next_open": clock.next_open})
+                    if cfg.once:
+                        break
+                    # If a lead window is configured, wake up N min early
+                    # so we enter pre-market processing on the next iter.
+                    lead = cfg.pre_market_lead_min
+                    target = clock.next_open
+                    if lead > 0 and target is not None:
+                        if target.tzinfo is None:
+                            target = target.replace(tzinfo=_UTC)
+                        target = target - _td(minutes=lead)
+                    _sleep_until(target, now=_now_utc)
+                    continue
 
-            now = _dt.now(_UTC)
+            now = _now_utc
             # Poll broker for order fill updates; keeps paper_orders mirror
             # in sync with real Alpaca state. Throttled to every 60s so the
             # dashboard event feed doesn't fill with reconcile pings when
@@ -2379,7 +2440,7 @@ def run_event_loop(
                 try:
                     result = run_tick(
                         cfg, state, broker, now=now, session=session,
-                        trigger=reason,
+                        trigger=reason, pre_market=pre_market_this_tick,
                     )
                     state.ticks_run += 1
                     last_interval_tick = now
@@ -2428,18 +2489,38 @@ def run_loop(
                     session.log("clock_error", {"error": str(e)})
                 time.sleep(15)
                 continue
+            _now = now_fn()
+            pre_market_this_tick = False
             if not clock.is_open and not cfg.force_open:
-                if cfg.once:
-                    logger.info("market closed; --once specified - exiting")
-                    return state
-                logger.info(
-                    "market closed; sleeping until next_open=%s", clock.next_open
-                )
-                _sleep_until(clock.next_open, now=now_fn())
-                continue
+                if _pre_market_active(clock, cfg, _now):
+                    pre_market_this_tick = True
+                    if session:
+                        session.log("pre_market_active", {
+                            "next_open": str(clock.next_open),
+                            "lead_min": cfg.pre_market_lead_min,
+                        })
+                else:
+                    if cfg.once:
+                        logger.info("market closed; --once specified - exiting")
+                        return state
+                    logger.info(
+                        "market closed; sleeping until next_open=%s",
+                        clock.next_open,
+                    )
+                    lead = cfg.pre_market_lead_min
+                    target = clock.next_open
+                    if lead > 0 and target is not None:
+                        if target.tzinfo is None:
+                            target = target.replace(tzinfo=UTC)
+                        target = target - timedelta(minutes=lead)
+                    _sleep_until(target, now=_now)
+                    continue
 
             try:
-                result = run_tick(cfg, state, broker, now=now_fn(), session=session)
+                result = run_tick(
+                    cfg, state, broker, now=_now, session=session,
+                    pre_market=pre_market_this_tick,
+                )
                 state.ticks_run += 1
                 _log_tick(result)
             except Exception as e:  # noqa: BLE001 - one tick failing must not kill the loop
