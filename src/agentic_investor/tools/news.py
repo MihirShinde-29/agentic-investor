@@ -43,9 +43,22 @@ def _alpaca_news_client():
     return NewsClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_api_secret)
 
 
+_ALPACA_NEWS_MAX_RETRIES = 3
+_ALPACA_NEWS_RETRY_BACKOFF_SEC = 0.5
+
+
 @lru_cache(maxsize=512)
 def _cached_alpaca_news(ticker: str, frm_iso: str, to_iso: str) -> tuple[dict, ...]:
-    """In-process cache keyed on (ticker, from, to). Same call reuses result."""
+    """In-process cache keyed on (ticker, from, to). Same call reuses result.
+
+    Retry loop covers the OSError: [Errno 22] "Invalid argument" that
+    Windows raises when a socket recv gets torn down mid-read under
+    concurrent httpx load (multiple tickers fetching Alpaca News in
+    parallel from the graph's ThreadPoolExecutor). Rare per-call but
+    frequent enough at 20-ticker batches to hurt signal coverage.
+    """
+    import time
+
     from alpaca.data.requests import NewsRequest
 
     client = _alpaca_news_client()
@@ -56,7 +69,34 @@ def _cached_alpaca_news(ticker: str, frm_iso: str, to_iso: str) -> tuple[dict, .
         end=datetime.fromisoformat(to_iso),
         limit=50,
     )
-    resp = client.get_news(req)
+    last_err: Exception | None = None
+    for attempt in range(_ALPACA_NEWS_MAX_RETRIES):
+        try:
+            resp = client.get_news(req)
+            break
+        except OSError as e:
+            # Errno 22 (EINVAL) on Windows is the "recv on torn-down
+            # socket" pattern - retry with backoff. Other OSErrors
+            # (auth, DNS, connection refused) also transient enough.
+            last_err = e
+            if attempt < _ALPACA_NEWS_MAX_RETRIES - 1:
+                time.sleep(_ALPACA_NEWS_RETRY_BACKOFF_SEC * (2 ** attempt))
+                continue
+            raise
+        except Exception as e:  # noqa: BLE001 - upstream lib may wrap OSError
+            # Some alpaca-py versions wrap the httpx exception; retry a
+            # small subset of message patterns that historically mask
+            # the underlying socket issue.
+            msg = str(e)
+            if "Errno 22" in msg or "Invalid argument" in msg:
+                last_err = e
+                if attempt < _ALPACA_NEWS_MAX_RETRIES - 1:
+                    time.sleep(_ALPACA_NEWS_RETRY_BACKOFF_SEC * (2 ** attempt))
+                    continue
+            raise
+    else:
+        # Loop exhausted without break; re-raise the last error.
+        raise last_err if last_err else RuntimeError("alpaca news fetch failed")
     # alpaca-py returns a NewsSet; .data is dict[symbol, list[News]]
     articles = []
     for arts in resp.data.values():
