@@ -1,8 +1,11 @@
 """Spawn one paper-loop subprocess per experiment arm.
 
 Each arm runs the unmodified single-arm loop with its own Alpaca
-account routing + DATABASE_URL. Runner streams prefixed logs and
-forwards Ctrl+C to all children.
+account routing + DATABASE_URL. Runner streams prefixed logs, tees
+its own stdout to orchestrator.log so logs survive the launching
+shell exit, forwards Ctrl+C to all children, and restart-supervises
+each child up to a per-name budget so a single crash does not orphan
+the rest of the run.
 """
 
 from __future__ import annotations
@@ -13,9 +16,67 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_investor.experiments.manifest import Experiment
+
+
+# Priority 3: TeeStream so orchestrator prints land in the log file even
+# after the launching shell exits. Before this, `python ... > log &` on
+# Windows-via-Git-Bash left python without a working stdout once the
+# shell closed the redirection, so the log froze seconds after startup
+# and the memory-sweep refresh lines were never captured.
+class _TeeStream:
+    """Write to multiple underlying streams; tolerate any single failure.
+
+    The typical pair is (real stdout, orchestrator.log). If either dies
+    (broken pipe, unicode error, closed file) we keep writing to the
+    other so we never lose observability from both channels at once.
+    """
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, text: str) -> int:
+        n = 0
+        for s in self._streams:
+            try:
+                n = s.write(text) or n
+            except (BrokenPipeError, UnicodeEncodeError, OSError, ValueError):
+                try:
+                    n = s.write(
+                        text.encode("ascii", errors="replace").decode("ascii"),
+                    ) or n
+                except Exception:  # noqa: BLE001
+                    pass
+        return n
+
+    def flush(self) -> None:
+        for s in self._streams:
+            try:
+                s.flush()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+# Priority 2: retain spawn recipe alongside the live handle so a crashed
+# child can be respawned with its original cmd + env.
+@dataclass
+class _ProcSpec:
+    name: str
+    cmd: list[str]
+    env: dict[str, str]
+    proc: subprocess.Popen
+    # "crash_only" -> respawn iff rc != 0; "never" -> never respawn even on
+    # crash (use for children that intentionally exit, e.g. --once modes).
+    restart_kind: str = "crash_only"
+    restarts: int = 0
+
+
+_DEFAULT_MAX_RESTARTS = 5
+_SUPERVISOR_POLL_SEC = 2
+_SHUTDOWN_DRAIN_SEC = 10
 
 
 def _arm_env(
@@ -63,7 +124,9 @@ def _config_diff_to_cli_args(diff: dict) -> list[str]:
     return args
 
 
-def _stream_prefixed(stream, prefix: str, out=sys.stdout) -> None:
+def _stream_prefixed(stream, prefix: str, out=None) -> None:
+    if out is None:
+        out = sys.stdout  # picked up dynamically so the TeeStream wraps it
     for raw in iter(stream.readline, b""):
         try:
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
@@ -82,41 +145,133 @@ def _stream_prefixed(stream, prefix: str, out=sys.stdout) -> None:
         out.flush()
 
 
-def _start_outcome_sweeper(
-    interval_min: int, stop_event: threading.Event,
-) -> threading.Thread:
-    """Background loop that refreshes M17 outcome metadata every N min.
+def _spawn_supervised(
+    name: str, cmd: list[str], env: dict[str, str],
+    procs: dict[str, _ProcSpec], threads: list[threading.Thread],
+    *, restart_kind: str = "crash_only",
+) -> _ProcSpec:
+    """Popen + start a stdout relay thread + register a supervised spec.
 
-    Runs in-process on the runner - reads paper_snapshots + daily_bars
-    per arm (arms stash their db_url in each doc's metadata at ingest,
-    so the sweep routes to the right SQLite automatically).
+    The relay thread reads the child's stdout and prefixes each line with
+    `[name]` so grepping is one-step. The spec lives in `procs` so the
+    supervisor loop can respawn on crash.
     """
-    def _sweep() -> None:
-        stop_event.wait(60)  # brief warmup so arms have written at least one rec
-        while not stop_event.is_set():
-            try:
-                from agentic_investor.memory.outcomes import (
-                    attach_outcomes_to_index,
-                )
-                n_updated, n_with = attach_outcomes_to_index()
-                # flush=True: this daemon thread prints to the runner's own
-                # stdout which is block-buffered when captured to a file;
-                # without it the events pile up invisibly for minutes.
-                print(
-                    f"[memory-sweep] refreshed {n_updated} recs, "
-                    f"{n_with} have at least one outcome",
-                    flush=True,
-                )
-            except Exception as e:  # noqa: BLE001 - sweep failure is not fatal
-                print(f"[memory-sweep] error: {e}", flush=True)
-            if stop_event.wait(interval_min * 60):
-                return
-
+    p = subprocess.Popen(
+        cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    spec = _ProcSpec(
+        name=name, cmd=cmd, env=env, proc=p, restart_kind=restart_kind,
+    )
+    procs[name] = spec
     t = threading.Thread(
-        target=_sweep, name="memory-outcomes-sweeper", daemon=True,
+        target=_stream_prefixed, args=(p.stdout, name), daemon=True,
     )
     t.start()
-    return t
+    threads.append(t)
+    return spec
+
+
+# Priority 4: run one sync sweep before starting the daemon so chromadb
+# corruption is loud at launch instead of manifesting 30 min later.
+def _healthcheck_outcome_sweeper(timeout_sec: int = 60) -> bool:
+    """Return True iff one sync memory-outcomes call completes cleanly."""
+    print("[preflight] running outcome-sweeper healthcheck (sync)...")
+    try:
+        check = subprocess.run(
+            [sys.executable, "-m", "agentic_investor.cli", "memory-outcomes"],
+            capture_output=True, text=True, timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"[preflight] outcome-sweeper healthcheck TIMEOUT after {timeout_sec}s"
+        )
+        return False
+    except Exception as e:  # noqa: BLE001
+        print(f"[preflight] outcome-sweeper healthcheck spawn error: {e}")
+        return False
+    if check.returncode == 0:
+        print("[preflight] outcome-sweeper healthcheck OK")
+        return True
+    tail = ((check.stderr or "") + (check.stdout or "")).strip()[-500:]
+    print(
+        f"[preflight] outcome-sweeper healthcheck FAILED "
+        f"(rc={check.returncode}); tail: {tail}"
+    )
+    return False
+
+
+def _supervise(
+    procs: dict[str, _ProcSpec], threads: list[threading.Thread],
+    *, max_restarts: int, shutdown_flag: threading.Event,
+    poll_sec: int = _SUPERVISOR_POLL_SEC,
+) -> int:
+    """Poll every child; respawn any that crash up to max_restarts each.
+
+    Priority 2: without this, `for _, p in procs: p.wait()` would block on
+    procs[0] (news-bus, designed to run forever) and never notice arm B or
+    arm C dying. Also, a crashed arm would just log-and-forget with no way
+    to recover during an unattended multi-day A/B.
+
+    Returns 0 iff every child either exited cleanly OR was respawned back
+    to a live state at loop exit; otherwise the last non-zero rc seen.
+    """
+    aggregate_rc = 0
+    while procs and not shutdown_flag.is_set():
+        time.sleep(poll_sec)
+        for name in list(procs.keys()):
+            spec = procs[name]
+            rc = spec.proc.poll()
+            if rc is None:
+                continue  # still running
+            if rc == 0:
+                print(f"[{name}] exited cleanly (rc=0)")
+                del procs[name]
+                continue
+            aggregate_rc = rc
+            print(f"[{name}] crashed with rc={rc}")
+            if spec.restart_kind == "never":
+                del procs[name]
+                continue
+            if spec.restarts >= max_restarts:
+                print(
+                    f"[{name}] restart budget exhausted "
+                    f"({spec.restarts}/{max_restarts}); removing from supervision"
+                )
+                del procs[name]
+                continue
+            spec.restarts += 1
+            print(
+                f"[{name}] respawning (attempt {spec.restarts}/{max_restarts})"
+            )
+            try:
+                new_proc = subprocess.Popen(
+                    spec.cmd, env=spec.env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    bufsize=1,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[{name}] respawn failed: {e}; removing")
+                del procs[name]
+                continue
+            spec.proc = new_proc
+            t = threading.Thread(
+                target=_stream_prefixed, args=(new_proc.stdout, name),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+    # Drain: wait a bounded amount for children to notice shutdown.
+    for name, spec in list(procs.items()):
+        try:
+            spec.proc.wait(timeout=_SHUTDOWN_DRAIN_SEC)
+        except subprocess.TimeoutExpired:
+            print(f"[{name}] didn't exit in {_SHUTDOWN_DRAIN_SEC}s; terminating")
+            try:
+                spec.proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+    return aggregate_rc
 
 
 def run_experiment(
@@ -128,20 +283,36 @@ def run_experiment(
     dashboard_port: int = 8000,
     memory_sweep_interval_min: int = 30,
     fresh: bool = False,
+    max_restarts: int = _DEFAULT_MAX_RESTARTS,
 ) -> int:
-    """Spawn one paper-loop subprocess per arm and wait until all finish.
+    """Spawn one paper-loop subprocess per arm and supervise until done.
 
     base_paper_loop_args are shared paper-loop flags (--auto, --top-n,
     --regen-mode, --serve-dashboard, --finbert-prefilter, etc).
-    Returns aggregate exit code (0 iff all arms exited cleanly).
+    max_restarts caps per-child respawn attempts for the whole run.
+    Returns aggregate exit code (0 iff all children ended cleanly).
     """
     if not experiment.arms:
         raise ValueError(f"experiment {experiment.name!r} has no arms")
     base = list(base_paper_loop_args or [])
-    procs: list[tuple[str, subprocess.Popen]] = []
+    procs: dict[str, _ProcSpec] = {}
     threads: list[threading.Thread] = []
     exp_dir = Path("out") / "experiments" / experiment.name
     exp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Priority 3: tee stdout into orchestrator.log so logs survive the
+    # launching shell exit. Owned by this process, so writes don't depend
+    # on the shell redirection staying open.
+    log_path = exp_dir / "orchestrator.log"
+    log_file = None
+    original_stdout = sys.stdout
+    if not dry_run_launch:
+        log_file = open(  # noqa: SIM115 - closed in finally below
+            log_path, "a", buffering=1, encoding="utf-8", errors="replace",
+        )
+        sys.stdout = _TeeStream(sys.__stdout__, log_file)
+        print(f"[log] orchestrator log: {log_path}")
+
     news_bus_path = exp_dir / "news_bus.db"
     news_bus_url = f"sqlite:///{news_bus_path}"
     price_bus_path = exp_dir / "price_bus.db"
@@ -193,21 +364,30 @@ def run_experiment(
         print(f"  {bus_name} writer cmd: {' '.join(bus_cmd)}")
         if dry_run_launch:
             continue
-        bus_proc = subprocess.Popen(
-            bus_cmd, env=dict(os.environ),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            bufsize=1,
-        )
-        procs.append((bus_name, bus_proc))
-        t = threading.Thread(
-            target=_stream_prefixed, args=(bus_proc.stdout, bus_name),
-            daemon=True,
-        )
-        t.start()
-        threads.append(t)
+        _spawn_supervised(bus_name, bus_cmd, dict(os.environ), procs, threads)
     if not dry_run_launch:
         # Let the writers CREATE TABLE before arms start polling.
         time.sleep(2)
+
+    # M17 outcome sweeper: subprocess (priority 1) with startup
+    # healthcheck (priority 4) so chromadb corruption is loud NOW instead
+    # of surfacing 30 min into the run.
+    if (
+        memory_sweep_interval_min > 0
+        and os.environ.get("AGENTIC_MEMORY_RAG", "1") == "1"
+    ):
+        sweep_cmd = [
+            sys.executable, "-m", "agentic_investor.cli",
+            "paper-outcome-sweeper",
+            "--interval-min", str(memory_sweep_interval_min),
+        ]
+        print(f"  outcome-sweeper cmd: {' '.join(sweep_cmd)}")
+        if not dry_run_launch:
+            _healthcheck_outcome_sweeper()
+            _spawn_supervised(
+                "outcome-sweeper", sweep_cmd, dict(os.environ),
+                procs, threads,
+            )
 
     if serve_dashboard:
         dash_cmd = [
@@ -217,19 +397,9 @@ def run_experiment(
         ]
         print(f"  dashboard cmd: {' '.join(dash_cmd)}")
         if not dry_run_launch:
-            dash_proc = subprocess.Popen(
-                dash_cmd, env=dict(os.environ),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                bufsize=1,
+            _spawn_supervised(
+                "dashboard", dash_cmd, dict(os.environ), procs, threads,
             )
-            procs.append(("dashboard", dash_proc))
-            t = threading.Thread(
-                target=_stream_prefixed,
-                args=(dash_proc.stdout, "dashboard"),
-                daemon=True,
-            )
-            t.start()
-            threads.append(t)
 
     for arm in experiment.arms:
         arm_db = exp_dir / f"{arm.arm_id}.db"
@@ -250,49 +420,24 @@ def run_experiment(
         print(f"    cmd: {' '.join(cmd)}")
         if dry_run_launch:
             continue
-        p = subprocess.Popen(
-            cmd, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            bufsize=1,
-        )
-        procs.append((arm.arm_id, p))
-        t = threading.Thread(
-            target=_stream_prefixed, args=(p.stdout, arm.arm_id),
-            daemon=True,
-        )
-        t.start()
-        threads.append(t)
+        _spawn_supervised(arm.arm_id, cmd, env, procs, threads)
         # Stagger keeps arm FinBERT / cache loads from colliding.
         time.sleep(2)
     if dry_run_launch:
-        if memory_sweep_interval_min > 0:
-            print(
-                f"  memory-sweep interval: {memory_sweep_interval_min} min "
-                f"(background thread, in-process)"
-            )
         return 0
 
-    sweeper_stop = threading.Event()
-    if (
-        memory_sweep_interval_min > 0
-        and os.environ.get("AGENTIC_MEMORY_RAG", "1") == "1"
-    ):
-        print(
-            f"[memory-sweep] starting background sweeper "
-            f"every {memory_sweep_interval_min} min"
-        )
-        _start_outcome_sweeper(memory_sweep_interval_min, sweeper_stop)
+    shutdown_flag = threading.Event()
 
     def _shutdown(_sig=None, _frame=None):
-        sweeper_stop.set()
-        for arm_id, p in procs:
-            if p.poll() is None:
-                print(f"\n[{arm_id}] sending SIGINT")
+        shutdown_flag.set()
+        for name, spec in list(procs.items()):
+            if spec.proc.poll() is None:
+                print(f"\n[{name}] sending SIGINT")
                 try:
-                    p.send_signal(signal.SIGINT)
+                    spec.proc.send_signal(signal.SIGINT)
                 except Exception:  # noqa: BLE001
                     try:
-                        p.terminate()
+                        spec.proc.terminate()
                     except Exception:  # noqa: BLE001
                         pass
 
@@ -302,10 +447,22 @@ def run_experiment(
     except (ValueError, AttributeError):
         pass  # SIGTERM not settable on Windows in some contexts
 
-    rc = 0
-    for arm_id, p in procs:
-        r = p.wait()
-        print(f"[{arm_id}] exited with code {r}")
-        if r != 0:
-            rc = r
+    try:
+        rc = _supervise(
+            procs, threads,
+            max_restarts=max_restarts,
+            shutdown_flag=shutdown_flag,
+        )
+    finally:
+        # Restore stdout and flush the log file before exit.
+        if log_file is not None:
+            try:
+                sys.stdout = original_stdout
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                log_file.flush()
+                log_file.close()
+            except Exception:  # noqa: BLE001
+                pass
     return rc

@@ -845,6 +845,7 @@ def _paper_experiment(
     dashboard_port: int = 8000,
     memory_sweep_interval_min: int = 30,
     fresh: bool = False,
+    max_restarts: int = 5,
 ) -> None:
     from agentic_investor.experiments.manifest import load_experiment
     from agentic_investor.experiments.runner import run_experiment
@@ -857,6 +858,7 @@ def _paper_experiment(
         dashboard_port=dashboard_port,
         memory_sweep_interval_min=memory_sweep_interval_min,
         fresh=fresh,
+        max_restarts=max_restarts,
     )
     raise SystemExit(rc)
 
@@ -1589,8 +1591,11 @@ def main() -> None:
     pex.add_argument("--dashboard-port", type=int, default=8000,
                      help="port for --serve-dashboard (default 8000)")
     pex.add_argument("--memory-sweep-interval-min", type=int, default=30,
-                     help="how often to refresh M17 outcome metadata via "
-                          "background thread (default 30 min; 0 = disabled)")
+                     help="how often to refresh M17 outcome metadata via a "
+                          "subprocess (default 30 min; 0 = disabled)")
+    pex.add_argument("--max-restarts", type=int, default=5,
+                     help="per-child respawn budget when a subprocess crashes "
+                          "(default 5). 0 disables restarts.")
     pex.add_argument("--fresh", action="store_true",
                      help="wipe each arm's DB + log before launch. Default "
                           "preserves state so a stopped run resumes cleanly "
@@ -1623,6 +1628,14 @@ def main() -> None:
     ppb.add_argument("bus_url",
                      help="sqlite:///path/to/price_bus.db - each arm should "
                           "have AGENTIC_PRICE_BUS set to this same URL")
+
+    pos = sub.add_parser("paper-outcome-sweeper",
+                         help="standalone M17 outcome-sweeper subprocess for "
+                              "a paper-experiment; typically spawned by the "
+                              "runner so a chromadb crash isolates from the "
+                              "supervisor process")
+    pos.add_argument("--interval-min", type=int, default=30,
+                     help="minutes between sweeps (default 30; 0 disables)")
 
     pdb = sub.add_parser("paper-dashboard",
                          help="serve the multi-arm experiment dashboard "
@@ -1790,7 +1803,8 @@ def main() -> None:
                           memory_sweep_interval_min=(
                               args.memory_sweep_interval_min
                           ),
-                          fresh=args.fresh)
+                          fresh=args.fresh,
+                          max_restarts=args.max_restarts)
     elif args.cmd == "paper-ab-report":
         _paper_ab_report(args.experiment)
     elif args.cmd == "paper-news-bus":
@@ -1799,6 +1813,11 @@ def main() -> None:
     elif args.cmd == "paper-price-bus":
         from agentic_investor.experiments.price_bus import run_price_bus_writer
         return run_price_bus_writer(args.bus_url)
+    elif args.cmd == "paper-outcome-sweeper":
+        from agentic_investor.experiments.outcome_sweeper import (
+            run_outcome_sweeper,
+        )
+        return run_outcome_sweeper(args.interval_min)
     elif args.cmd == "paper-dashboard":
         from agentic_investor.dashboard.server import serve_forever
         exp_ctx = None
