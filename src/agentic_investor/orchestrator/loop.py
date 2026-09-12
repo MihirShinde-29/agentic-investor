@@ -15,6 +15,7 @@ market hours the loop sleeps until next_open rather than ticking uselessly.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -133,14 +134,11 @@ class LoopConfig:
     # a TOML.
     max_positions_override: int | None = None
 
-    # Discipline layer (vetoes at the rebalancer boundary)
-    cooldown_seconds: int = 1500             # 25min per-ticker flip lockout
-    # News-convergence bypass: waive the per-ticker cooldown only when at
-    # least N distinct news URLs on the same ticker landed in the window
-    # below. Blocks single-note re-flips; lets convergent multi-broker
-    # stories through.
-    news_convergence_min_sources: int = 2
-    news_convergence_window_sec: int = 900   # 15min rolling window
+    # Discipline layer (vetoes at the rebalancer boundary).
+    # The wall-clock per-ticker cooldown that used to live here was
+    # removed when cite-to-trade shipped - cooldown was a proxy for
+    # "is this trade actually justified?" and cite-to-trade tests for
+    # that directly by requiring the ticker to appear in the CoT.
     force_loss_cut_pct: float = 8.0          # capital-preservation circuit breaker
     # Concentration ceiling on any BUY execution. Tighter than the profile's
     # max_single_pct proposal cap - this stops the mechanical rebalancer from
@@ -233,9 +231,6 @@ class LoopState:
     # Portfolio-level cooldown: when the last big rebalance (>=N trades)
     # happened, so a subsequent big rebalance is blocked until Y seconds pass.
     last_big_rebalance_at: datetime | None = None
-    # {ticker: (side, iso_ts)} - most-recent trade per ticker, used by the
-    # temporal-cooldown veto in compute_trade_plan.
-    recent_trades: dict[str, tuple[str, str]] = field(default_factory=dict)
     # Fingerprint of the news-batch context that drove the last saved rec.
     # If the next tick's batch fingerprint matches, we reuse the prior rec
     # instead of firing the LLM again - same input, same output, save the
@@ -295,7 +290,6 @@ class LoopState:
                 self.last_regen_at.isoformat() if self.last_regen_at else None
             ),
             "last_stances": dict(self.last_stances),
-            "recent_trades": dict(self.recent_trades),
             "last_finbert_score": self.last_finbert_score,
             "last_big_rebalance_at": (
                 self.last_big_rebalance_at.isoformat()
@@ -335,10 +329,6 @@ class LoopState:
             baseline_prices=dict(d.get("baseline_prices") or {}),
             last_regen_at=last_regen_at,
             last_stances=dict(d.get("last_stances") or {}),
-            recent_trades={
-                k: (v[0], v[1]) if isinstance(v, list | tuple) else v
-                for k, v in (d.get("recent_trades") or {}).items()
-            },
             last_finbert_score=d.get("last_finbert_score"),
             last_big_rebalance_at=(
                 datetime.fromisoformat(d["last_big_rebalance_at"])
@@ -516,6 +506,123 @@ def _render_news_effect_log(state) -> str:
             parts.append(f"{ts_short} {head}{delta_str}")
         lines.append(f"{ticker}: " + " | ".join(parts))
     return "\n".join(lines)
+
+
+def _ticker_cited(ticker: str, reasoning) -> bool:
+    """True if ticker appears (word-boundary) in the rec's CoT text.
+
+    Cite-to-trade gate: any planned trade whose ticker is not named in
+    bull_case, bear_case, verdict, or disqualifiers gets blocked at
+    execution time. Replaces the wall-clock per-ticker cooldown with a
+    structural test - "did the model actually justify this trade?"
+    """
+    if reasoning is None:
+        return False
+    tkr = (ticker or "").upper().strip()
+    if not tkr:
+        return False
+    parts = [
+        reasoning.bull_case or "",
+        reasoning.bear_case or "",
+        reasoning.verdict or "",
+    ]
+    if reasoning.disqualifiers:
+        parts.extend(str(x) for x in reasoning.disqualifiers)
+    text = " ".join(parts).upper()
+    return bool(re.search(rf"\b{re.escape(tkr)}\b", text))
+
+
+def _direction_of_citation(ticker: str, reasoning) -> str | None:
+    """Return 'bull', 'bear', or None. Used for direction-consistency logging.
+
+    None means either not cited, or cited in both cases (ambiguous) - we
+    only flag unambiguous direction violations (bull-cited + sell, or
+    bear-cited + buy). Observational, not blocking.
+    """
+    if reasoning is None:
+        return None
+    tkr = (ticker or "").upper().strip()
+    if not tkr:
+        return None
+    pat = re.compile(rf"\b{re.escape(tkr)}\b")
+    in_bull = bool(pat.search((reasoning.bull_case or "").upper()))
+    in_bear = bool(pat.search((reasoning.bear_case or "").upper()))
+    if in_bull and not in_bear:
+        return "bull"
+    if in_bear and not in_bull:
+        return "bear"
+    return None
+
+
+def _apply_cite_to_trade(plans, rec, prev_rec, session, rec_id):
+    """Filter trade plans by whether the LLM cited the ticker in its CoT.
+
+    Rules:
+      - Blocked: ticker absent from bull_case + bear_case + verdict +
+        disqualifiers. Logged as `cite_violation`.
+      - Exempt: drift-rebalance where the current rec's target weight
+        for the ticker equals the previous rec's target. That's the
+        mechanical rebalancer catching market drift - not an intentional
+        weight change, so no CoT text is required.
+      - Exempt: force loss-cut trades (safety plumbing, not a decision).
+      - Allowed with direction-consistency logging when the trade side
+        contradicts the citation (bull-cited SELL or bear-cited BUY).
+    """
+    reasoning = getattr(rec.allocation, "reasoning", None) if rec is not None else None
+    if reasoning is None:
+        # No CoT scratchpad on this rec - can't gate. Fall through.
+        return plans
+    prev_targets: dict[str, float] = {}
+    if prev_rec is not None and prev_rec.allocation is not None:
+        prev_targets = {
+            p.ticker.upper(): round(float(p.weight_pct), 2)
+            for p in prev_rec.allocation.positions
+        }
+    curr_targets = {
+        p.ticker.upper(): round(float(p.weight_pct), 2)
+        for p in rec.allocation.positions
+    }
+    kept = []
+    for p in plans:
+        tkr = p.ticker.upper()
+        # Force loss-cut: safety, bypasses cite.
+        if "loss-cut" in (p.reason or "").lower():
+            kept.append(p)
+            continue
+        # Drift-rebalance exemption: unchanged target weight vs prev rec.
+        prev_tgt = prev_targets.get(tkr)
+        curr_tgt = curr_targets.get(tkr)
+        if (
+            prev_tgt is not None
+            and curr_tgt is not None
+            and prev_tgt == curr_tgt
+        ):
+            kept.append(p)
+            continue
+        if _ticker_cited(tkr, reasoning):
+            cited_as = _direction_of_citation(tkr, reasoning)
+            if session and (
+                (cited_as == "bull" and p.side == "sell")
+                or (cited_as == "bear" and p.side == "buy")
+            ):
+                session.log("direction_violation", {
+                    "rec_id": rec_id,
+                    "ticker": tkr,
+                    "side": p.side,
+                    "cited_as": cited_as,
+                })
+            kept.append(p)
+            continue
+        # Ticker absent from CoT and not a drift-rebalance - block.
+        if session:
+            session.log("cite_violation", {
+                "rec_id": rec_id,
+                "ticker": tkr,
+                "side": p.side,
+                "qty": float(p.qty),
+                "reason": "ticker_not_in_cot",
+            })
+    return kept
 
 
 def _held_ticker_set(broker) -> set[str]:
@@ -1560,27 +1667,16 @@ def run_tick(
         except Exception as e:  # noqa: BLE001
             logger.warning("price fetch failed for %s: %s", t, e)
 
-    # Deserialize state.recent_trades timestamps + prep news_batch tickers
-    # for cooldown-bypass logic in compute_trade_plan.
-    recent_typed: dict[str, tuple[str, datetime]] = {}
-    for tk, entry in state.recent_trades.items():
-        try:
-            side_v, ts_v = entry
-            ts_dt = datetime.fromisoformat(ts_v) if isinstance(ts_v, str) else ts_v
-            if ts_dt.tzinfo is None:
-                ts_dt = ts_dt.replace(tzinfo=UTC)
-            recent_typed[tk] = (side_v, ts_dt)
-        except Exception:  # noqa: BLE001
-            continue
+    # The trigger-attribution log below needs the set of tickers whose
+    # news drove this regen; extraction stays even though the cooldown
+    # bypass that used to consume it is gone.
     batch_tickers_for_cooldown = set(
         _extract_tickers_from_batch_ctx(batch_ctx)
     ) if batch_ctx else set()
 
-    # Distinct-source count per ticker over the convergence window. Prune
-    # stale entries in place so state doesn't grow unbounded.
-    conv_window = int(getattr(cfg, "news_convergence_window_sec", 900))
-    cutoff = now - timedelta(seconds=conv_window)
-    news_source_counts: dict[str, int] = {}
+    # Garbage-collect news_source_urls so state doesn't grow unbounded.
+    # Fixed 24h TTL - this is cache eviction, not a decision knob.
+    cutoff = now - timedelta(hours=24)
     empty_keys: list[str] = []
     for ticker_up, entries in state.news_source_urls.items():
         kept: list[tuple[str, str]] = []
@@ -1595,7 +1691,6 @@ def run_tick(
                 kept.append((url_key, ts_iso))
         if kept:
             state.news_source_urls[ticker_up] = kept
-            news_source_counts[ticker_up] = len(kept)
         else:
             empty_keys.append(ticker_up)
     for k in empty_keys:
@@ -1620,17 +1715,37 @@ def run_tick(
         min_open_dollars=cfg.min_open_dollars,
         min_add_dollars=cfg.min_add_dollars,
         min_trim_dollars=cfg.min_trim_dollars,
-        recent_trades=recent_typed,
-        cooldown_seconds=getattr(cfg, "cooldown_seconds", 900),
         now=now,
-        news_batch_tickers=batch_tickers_for_cooldown,
-        news_source_counts=news_source_counts,
-        min_bypass_sources=int(getattr(cfg, "news_convergence_min_sources", 1)),
         ticker_recent_moves=ticker_recent_moves,
         avg_entry_prices=avg_entry_prices,
         force_loss_cut_pct=cfg.force_loss_cut_pct,
         max_add_concentration_pct=cfg.max_add_concentration_pct,
     )
+
+    # Cite-to-trade: block any planned trade whose ticker isn't named in
+    # the rec's bull/bear/verdict/disqualifiers. Structural replacement
+    # for the wall-clock per-ticker cooldown we deleted - "did the model
+    # justify this trade?" instead of "did enough time pass since the
+    # last trade?" Load prev_rec so unchanged-target drift-rebalances
+    # get exempted (they're mechanical, not decisions).
+    prev_rec_for_cite = None
+    if state.last_rec_id is not None:
+        try:
+            from agentic_investor.orchestrator.store import (
+                load_recommendation as _load_for_cite,
+            )
+            prev_rec_for_cite = _load_for_cite(state.last_rec_id)
+        except Exception:  # noqa: BLE001 - cite gate is best-effort
+            prev_rec_for_cite = None
+    n_before_cite = len(plans)
+    plans = _apply_cite_to_trade(
+        plans, rec, prev_rec_for_cite, session, state.last_rec_id,
+    )
+    if session and n_before_cite != len(plans):
+        session.log("knob_fired", {
+            "name": "cite_to_trade",
+            "reason": f"blocked_{n_before_cite - len(plans)}",
+        })
 
     # On barely-moved fall-through the LLM offered no fresh conviction, so
     # ADDs would be silent-drift executions of accumulated small target
@@ -1772,8 +1887,6 @@ def run_tick(
     }
     for o in submitted:
         record_order(o, source="loop", rec_id=state.last_rec_id)
-        # Record for temporal cooldown lookup on next tick.
-        state.recent_trades[o.ticker.upper()] = (o.side, now.isoformat())
         if session:
             session.log("order_submitted", {
                 "ticker": o.ticker, "side": o.side, "qty": o.qty,
@@ -1808,8 +1921,8 @@ def run_tick(
                         "rationale": (rationale_by_ticker.get(tkr) or "")[:300],
                     })
     state.orders_submitted += len(submitted)
-    # Persist post-execution state so recent_trades + trade counters survive
-    # restart. The earlier post-regen save runs BEFORE trade execution.
+    # Persist post-execution state so trade counters survive restart.
+    # The earlier post-regen save runs BEFORE trade execution.
     try:
         from agentic_investor.tools.paper_store import save_loop_state as _sls
         _sls(state.to_dict())

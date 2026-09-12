@@ -41,13 +41,7 @@ def compute_trade_plan(
     min_open_dollars: float | None = None,
     min_add_dollars: float | None = None,
     min_trim_dollars: float | None = None,
-    recent_trades: dict[str, tuple[str, datetime]] | None = None,
-    cooldown_seconds: int = 900,
     now: datetime | None = None,
-    news_batch_tickers: set[str] | None = None,
-    news_bypass_cooldown: bool = True,
-    news_source_counts: dict[str, int] | None = None,
-    min_bypass_sources: int = 1,
     ticker_recent_moves: dict[str, float] | None = None,
     avg_entry_prices: dict[str, float] | None = None,
     force_loss_cut_pct: float = 8.0,
@@ -59,10 +53,6 @@ def compute_trade_plan(
       - Trade-size floors by direction: open / add / trim / close have
         separate thresholds so a ladder of small adds can't slip through.
         Full closes bypass the trim floor.
-      - Temporal cooldown: no reverse-side trade within cooldown_seconds.
-        Bypassed when news_source_counts crosses min_bypass_sources for
-        the ticker (multi-source convergence), or by the legacy any-in-
-        news path when source counts aren't supplied.
       - Add-concentration ceiling: skip any BUY whose target weight would
         leave the ticker above max_add_concentration_pct of NAV. Distinct
         from the profile's max_single_pct proposal cap - this fires at
@@ -70,15 +60,13 @@ def compute_trade_plan(
         the LLM's target sits under it.
       - Force loss-cut (post-plan): any held position down more than
         force_loss_cut_pct gets a forced full SELL, overriding the LLM.
+
+    The wall-clock temporal cooldown that used to live here was removed
+    when the cite-to-trade gate landed - cooldown was a proxy for "is
+    this trade actually justified?" and cite-to-trade tests for that
+    directly at the loop layer. See _apply_cite_to_trade in loop.py.
     """
     now = now or datetime.now(UTC)
-    recent_trades = recent_trades or {}
-    news_batch_tickers = news_batch_tickers or set()
-    # Explicit None marker so callers not passing source counts get the legacy
-    # "any in-news ticker bypasses" behavior. If the dict is supplied (even
-    # empty), the stricter multi-source path activates.
-    source_counts_supplied = news_source_counts is not None
-    news_source_counts = news_source_counts or {}
     ticker_recent_moves = ticker_recent_moves or {}
     avg_entry_prices = avg_entry_prices or {}
     # Category-specific floors default to the legacy single knob so callers
@@ -117,29 +105,6 @@ def compute_trade_plan(
         if qty <= 0:
             continue
         side = "buy" if delta > 0 else "sell"
-
-        # Cooldown veto: no reverse-side trade within window. News bypass is
-        # opt-in because the LLM will happily flip the same ticker every
-        # news batch otherwise.
-        recent = recent_trades.get(t.upper())
-        if recent is not None:
-            recent_side, recent_ts = recent
-            age = (now - recent_ts).total_seconds()
-            in_news = t.upper() in news_batch_tickers
-            # When source counts are supplied, gate the bypass on distinct-URL
-            # convergence: single-note re-flips stay blocked, multi-broker
-            # stories on the same name get through. Without source counts,
-            # fall back to the older any-in-news bypass.
-            if source_counts_supplied:
-                source_count = news_source_counts.get(t.upper(), 0)
-                bypassed = (
-                    news_bypass_cooldown
-                    and source_count >= min_bypass_sources
-                )
-            else:
-                bypassed = news_bypass_cooldown and in_news
-            if recent_side != side and age < cooldown_seconds and not bypassed:
-                continue
 
         if side == "buy":
             # Concentration ceiling: don't grow a ticker above the cap
