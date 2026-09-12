@@ -42,6 +42,8 @@ def compute_trade_plan(
     min_add_dollars: float | None = None,
     min_trim_dollars: float | None = None,
     now: datetime | None = None,
+    recent_trades: dict[str, tuple[str, datetime]] | None = None,
+    cooldown_seconds: int = 0,
     ticker_recent_moves: dict[str, float] | None = None,
     avg_entry_prices: dict[str, float] | None = None,
     force_loss_cut_pct: float = 8.0,
@@ -53,6 +55,10 @@ def compute_trade_plan(
       - Trade-size floors by direction: open / add / trim / close have
         separate thresholds so a ladder of small adds can't slip through.
         Full closes bypass the trim floor.
+      - Wall-clock cooldown (OPT-IN, cooldown_seconds > 0): no reverse-
+        side trade within cooldown_seconds. Kept for A/B against the
+        cite-to-trade gate; default 0 = disabled so callers not opting
+        in get the current cite-to-trade-only behavior.
       - Add-concentration ceiling: skip any BUY whose target weight would
         leave the ticker above max_add_concentration_pct of NAV. Distinct
         from the profile's max_single_pct proposal cap - this fires at
@@ -60,13 +66,9 @@ def compute_trade_plan(
         the LLM's target sits under it.
       - Force loss-cut (post-plan): any held position down more than
         force_loss_cut_pct gets a forced full SELL, overriding the LLM.
-
-    The wall-clock temporal cooldown that used to live here was removed
-    when the cite-to-trade gate landed - cooldown was a proxy for "is
-    this trade actually justified?" and cite-to-trade tests for that
-    directly at the loop layer. See _apply_cite_to_trade in loop.py.
     """
     now = now or datetime.now(UTC)
+    recent_trades = recent_trades or {}
     ticker_recent_moves = ticker_recent_moves or {}
     avg_entry_prices = avg_entry_prices or {}
     # Category-specific floors default to the legacy single knob so callers
@@ -105,6 +107,17 @@ def compute_trade_plan(
         if qty <= 0:
             continue
         side = "buy" if delta > 0 else "sell"
+
+        # Wall-clock cooldown veto (opt-in): block reverse-side trades
+        # within N seconds. Off by default; enabled per-arm for the
+        # cite-to-trade A/B via config_diff.
+        if cooldown_seconds > 0:
+            recent = recent_trades.get(t.upper())
+            if recent is not None:
+                recent_side, recent_ts = recent
+                age = (now - recent_ts).total_seconds()
+                if recent_side != side and age < cooldown_seconds:
+                    continue
 
         if side == "buy":
             # Concentration ceiling: don't grow a ticker above the cap

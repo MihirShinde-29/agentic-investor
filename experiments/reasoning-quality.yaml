@@ -1,40 +1,44 @@
-# M14: does spending extra tokens on reasoning quality actually change
-# outcomes, or is it just cargo-cult? Three-arm ablation:
+# M14.5 (Sept 15+): three-arm A/B testing two variables at once:
 #
-# A: baseline — single LLM call per regen, current prod model. Reference
-#    line for both cost and returns; every other arm has to beat this to
-#    justify its cost multiplier.
-# B: self-consistency N=3 — same model, sampled 3x at temp 0.4, median
-#    pick. Costs ~3x LLM output tokens (input cached across all 3 samples
-#    on Anthropic; OpenAI cache_read is 50%). Tests whether sampling
-#    variance across a single model buys signal, or if the same model
-#    keeps making the same call regardless of temperature.
-# C: cross-family ensemble — one call each to gpt-4o-mini and
-#    anthropic/claude-haiku-4-5, median pick. This is the original
-#    M14 design: two independently-trained models on the same news
-#    should agree more meaningfully than two OpenAI variants (which
-#    share pretraining data and RLHF distribution). Cost profile is
-#    ~2.5-3x baseline (Haiku 4.5 is priced close to gpt-4o-mini).
-#    Prior week ran cross-tier (4o-mini + 4.1-mini) as a fallback
-#    while awaiting the Anthropic key; that version showed
-#    same-family agreement patterns and did not clearly outperform
-#    self-consistency at similar cost. Replaced 2026-09-14.
+#   1. Trade gate: wall-clock cooldown (A) vs cite-to-trade (B, C)
+#   2. Model stack: single call (A, B) vs cross-family ensemble (C)
 #
-# Same news bus + market prices + broker discipline for all 3. B vs A =
-# marginal value of self-consistency; C vs A = marginal value of cross-
-# model ensembling; B vs C = which "spend more per decision" strategy
-# has better $/pp return.
+# Each arm differs from at least one other by exactly ONE variable so we
+# can attribute causally:
+#
+#   A vs B  -> did replacing cooldown with cite-to-trade help? (same
+#              model, only the gate differs)
+#   B vs C  -> does cross-family ensemble help ON TOP of cite-to-trade?
+#              (same gate, only the model stack differs)
+#   A vs C  -> combined effect (2 things differ; less clean but still
+#              interesting for the overall shipping decision)
+#
+# Shared across all three arms (feature toggles, not experimental):
+#   - pre-market lead 30 min (--pre-market-lead-min 30 on launch)
+#   - confidence field emitted on every rec (M15 calibration data)
+#   - all other loop config identical
+#
+# Prior week (Sept 9-11) ran a different reasoning-quality design; this
+# YAML supersedes it. Deleted old cross-tier config since M14 already
+# validated within-family ensemble under-earned at 3.5x cost.
 name: reasoning-quality
 arms:
-  A:
+  A:  # old-world reference - restores the wall-clock cooldown we
+      # deleted this weekend. Answers "was deleting cooldown a mistake?"
     alpaca_account: primary
-    config_diff: {}
-  B:
+    config_diff:
+      cooldown_seconds: 1500          # 25min per-ticker flip lockout
+    env:
+      AGENTIC_CITE_TO_TRADE: "0"      # disable new gate for A only
+
+  B:  # current world - cite-to-trade alone, single LLM call. This is
+      # what we shipped this weekend, isolated.
     alpaca_account: secondary
     config_diff: {}
-    env:
-      AGENTIC_SELF_CONSISTENCY_N: "3"
-  C:
+
+  C:  # M14 upside - cross-family ensemble on top of cite-to-trade.
+      # Tests whether two independently-trained models agree in a way
+      # that beats single-call at ~2x cost.
     alpaca_account: tertiary
     config_diff: {}
     env:

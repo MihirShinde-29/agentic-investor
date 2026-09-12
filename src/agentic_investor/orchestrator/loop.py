@@ -15,6 +15,7 @@ market hours the loop sleeps until next_open rather than ticking uselessly.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from collections.abc import Callable
@@ -135,10 +136,12 @@ class LoopConfig:
     max_positions_override: int | None = None
 
     # Discipline layer (vetoes at the rebalancer boundary).
-    # The wall-clock per-ticker cooldown that used to live here was
-    # removed when cite-to-trade shipped - cooldown was a proxy for
-    # "is this trade actually justified?" and cite-to-trade tests for
-    # that directly by requiring the ticker to appear in the CoT.
+    # Wall-clock per-ticker cooldown: kept as an opt-in for A/B against
+    # cite-to-trade (default 0 = disabled). When > 0, blocks reverse-
+    # side trades within N seconds. Cite-to-trade is the primary gate;
+    # this exists so we can measure them side-by-side in the Sept 15+
+    # experiment before deciding which to keep long-term.
+    cooldown_seconds: int = 0
     force_loss_cut_pct: float = 8.0          # capital-preservation circuit breaker
     # Concentration ceiling on any BUY execution. Tighter than the profile's
     # max_single_pct proposal cap - this stops the mechanical rebalancer from
@@ -231,6 +234,10 @@ class LoopState:
     # Portfolio-level cooldown: when the last big rebalance (>=N trades)
     # happened, so a subsequent big rebalance is blocked until Y seconds pass.
     last_big_rebalance_at: datetime | None = None
+    # {ticker: (side, iso_ts)} - most-recent trade per ticker. Populated
+    # only when cfg.cooldown_seconds > 0 (opt-in for A/B against
+    # cite-to-trade). Consumed by the compute_trade_plan cooldown veto.
+    recent_trades: dict[str, tuple[str, str]] = field(default_factory=dict)
     # Fingerprint of the news-batch context that drove the last saved rec.
     # If the next tick's batch fingerprint matches, we reuse the prior rec
     # instead of firing the LLM again - same input, same output, save the
@@ -290,6 +297,7 @@ class LoopState:
                 self.last_regen_at.isoformat() if self.last_regen_at else None
             ),
             "last_stances": dict(self.last_stances),
+            "recent_trades": dict(self.recent_trades),
             "last_finbert_score": self.last_finbert_score,
             "last_big_rebalance_at": (
                 self.last_big_rebalance_at.isoformat()
@@ -329,6 +337,10 @@ class LoopState:
             baseline_prices=dict(d.get("baseline_prices") or {}),
             last_regen_at=last_regen_at,
             last_stances=dict(d.get("last_stances") or {}),
+            recent_trades={
+                k: (v[0], v[1]) if isinstance(v, list | tuple) else v
+                for k, v in (d.get("recent_trades") or {}).items()
+            },
             last_finbert_score=d.get("last_finbert_score"),
             last_big_rebalance_at=(
                 datetime.fromisoformat(d["last_big_rebalance_at"])
@@ -587,7 +599,13 @@ def _apply_cite_to_trade(plans, rec, prev_rec, session, rec_id):
       - Exempt: force loss-cut trades (safety plumbing, not a decision).
       - Allowed with direction-consistency logging when the trade side
         contradicts the citation (bull-cited SELL or bear-cited BUY).
+
+    Env-var disable: AGENTIC_CITE_TO_TRADE=0 short-circuits the gate to
+    a no-op. Used by the wall-clock-cooldown A/B arm so both gates can
+    run side-by-side without mutual interference.
     """
+    if os.environ.get("AGENTIC_CITE_TO_TRADE", "1") == "0":
+        return plans
     reasoning = getattr(rec.allocation, "reasoning", None) if rec is not None else None
     positions = list(rec.allocation.positions) if rec is not None else []
     if reasoning is None:
@@ -1749,6 +1767,19 @@ def run_tick(
     # the user asked to trade with. If cfg.amount >= acct.equity we're
     # unconstrained (allocate against full account); otherwise cap here.
     allocation_base = min(cfg.amount, acct.equity) if cfg.amount > 0 else acct.equity
+    # Deserialize state.recent_trades only when cooldown is active
+    # (opt-in via cfg.cooldown_seconds > 0 for the cite-to-trade A/B).
+    recent_typed: dict[str, tuple[str, datetime]] = {}
+    if cfg.cooldown_seconds > 0:
+        for tk, entry in state.recent_trades.items():
+            try:
+                side_v, ts_v = entry
+                ts_dt = datetime.fromisoformat(ts_v) if isinstance(ts_v, str) else ts_v
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=UTC)
+                recent_typed[tk] = (side_v, ts_dt)
+            except Exception:  # noqa: BLE001
+                continue
     plans = compute_trade_plan(
         rec, positions_dollars, allocation_base,
         prices=prices,
@@ -1756,6 +1787,8 @@ def run_tick(
         min_add_dollars=cfg.min_add_dollars,
         min_trim_dollars=cfg.min_trim_dollars,
         now=now,
+        recent_trades=recent_typed,
+        cooldown_seconds=cfg.cooldown_seconds,
         ticker_recent_moves=ticker_recent_moves,
         avg_entry_prices=avg_entry_prices,
         force_loss_cut_pct=cfg.force_loss_cut_pct,
@@ -1927,6 +1960,10 @@ def run_tick(
     }
     for o in submitted:
         record_order(o, source="loop", rec_id=state.last_rec_id)
+        # Track for wall-clock cooldown ONLY when the arm has opted in.
+        # Arms running cite-to-trade alone leave state.recent_trades empty.
+        if cfg.cooldown_seconds > 0:
+            state.recent_trades[o.ticker.upper()] = (o.side, now.isoformat())
         if session:
             session.log("order_submitted", {
                 "ticker": o.ticker, "side": o.side, "qty": o.qty,
