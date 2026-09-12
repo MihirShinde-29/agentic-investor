@@ -9,16 +9,16 @@
 #    on Anthropic; OpenAI cache_read is 50%). Tests whether sampling
 #    variance across a single model buys signal, or if the same model
 #    keeps making the same call regardless of temperature.
-# C: cross-tier ensemble — one call each to gpt-4o-mini and
-#    gpt-4.1-mini, median pick. Same family (both OpenAI) but
-#    different generations: 4.1-mini is a newer distilled tier with
-#    ~2.5x mini input pricing and a much higher TPM ceiling than
-#    gpt-4o. Tests whether the "different training run agrees" signal
-#    beats pure sampling variance without paying gpt-4o's ~6x cost
-#    or hitting its 30K TPM cap on prompt-heavy ticks (2026-09-11
-#    opening bell rejected every gpt-4o call at 41K tokens > 30K TPM).
-#    Original plan was cross-family via claude-haiku but we don't
-#    have an ANTHROPIC_API_KEY set.
+# C: cross-family ensemble — one call each to gpt-4o-mini and
+#    anthropic/claude-haiku-4-5, median pick. This is the original
+#    M14 design: two independently-trained models on the same news
+#    should agree more meaningfully than two OpenAI variants (which
+#    share pretraining data and RLHF distribution). Cost profile is
+#    ~2.5-3x baseline (Haiku 4.5 is priced close to gpt-4o-mini).
+#    Prior week ran cross-tier (4o-mini + 4.1-mini) as a fallback
+#    while awaiting the Anthropic key; that version showed
+#    same-family agreement patterns and did not clearly outperform
+#    self-consistency at similar cost. Replaced 2026-09-14.
 #
 # Same news bus + market prices + broker discipline for all 3. B vs A =
 # marginal value of self-consistency; C vs A = marginal value of cross-
@@ -38,4 +38,4 @@ arms:
     alpaca_account: tertiary
     config_diff: {}
     env:
-      AGENTIC_ENSEMBLE_MODELS: "gpt-4o-mini,gpt-4.1-mini"
+      AGENTIC_ENSEMBLE_MODELS: "gpt-4o-mini,anthropic/claude-haiku-4-5"
