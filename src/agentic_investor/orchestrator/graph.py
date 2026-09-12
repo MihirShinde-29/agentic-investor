@@ -85,6 +85,16 @@ The trace does not drive sizing; the loop logs it for calibration.
 Forcing yourself to write bear_case before weights is what catches
 reflex trades.
 
+**Ticker citation**: in bull_case, bear_case, verdict, and
+disqualifiers, ALWAYS refer to tickers by their symbol (e.g. `MSFT`,
+`AAPL`, `MRK`) never by company name (`Microsoft`, `Apple`, `Merck`).
+The downstream cite-to-trade gate does an exact word-boundary match
+against symbols - if you write `Microsoft` instead of `MSFT`, the MSFT
+trade will be blocked as unjustified. Position rationales are also
+scanned for citation, so filling a `positions[MSFT].rationale` counts
+even without prose mention, but the safest habit is symbol-only in
+all four reasoning fields.
+
 # Hard rules (output MUST satisfy)
 - All weights, including cash_pct, must sum to 100.
 - No single position weight may exceed the profile's max_single_pct cap.

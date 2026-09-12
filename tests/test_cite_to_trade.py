@@ -101,6 +101,34 @@ def test_cited_in_disqualifiers():
     assert _ticker_cited("CRM", r) is True
 
 
+def test_cited_via_position_rationale_when_text_uses_company_name():
+    # Model prosed "Microsoft" (which our regex won't match against MSFT)
+    # but properly filled positions[MSFT].rationale. Position path catches
+    # the citation.
+    r = _Reasoning(bull_case="Microsoft is strong on cloud revenue")
+    class P:
+        ticker = "MSFT"
+        rationale = "Add to MSFT on cloud beat"
+    assert _ticker_cited("MSFT", r, positions=[P]) is True
+
+
+def test_position_without_rationale_does_not_cite():
+    # Boilerplate carry-over position with no rationale isn't citation.
+    r = _Reasoning(bull_case="NVDA breakout")
+    class P:
+        ticker = "MSFT"
+        rationale = ""
+    assert _ticker_cited("MSFT", r, positions=[P]) is False
+
+
+def test_position_path_ignored_when_ticker_not_in_positions():
+    r = _Reasoning(bull_case="AAPL steady")
+    class P:
+        ticker = "AAPL"
+        rationale = "Hold on strong iPhone demand"
+    assert _ticker_cited("VZ", r, positions=[P]) is False
+
+
 # --- _direction_of_citation ---
 
 
@@ -138,6 +166,23 @@ def test_uncited_ticker_gets_blocked():
     violations = session.events_of("cite_violation")
     assert len(violations) == 1
     assert violations[0]["ticker"] == "VZ"
+
+
+def test_cite_violation_includes_cot_snippet():
+    # Blocked events include a truncated CoT snippet so we can spot-check
+    # false positives from session.jsonl grep without loading the full rec.
+    rec = _rec(bull="MRK strong on volume",
+               verdict="Reduce cash slightly, increase MRK weight")
+    plans = [_plan("VZ", "sell")]
+    session = _RecorderSession()
+    _apply_cite_to_trade(plans, rec, prev_rec=None,
+                        session=session, rec_id=99)
+    violations = session.events_of("cite_violation")
+    assert len(violations) == 1
+    cot = violations[0].get("cot")
+    assert cot is not None
+    assert "MRK strong" in cot["bull_case"]
+    assert "Reduce cash" in cot["verdict"]
 
 
 def test_drift_rebalance_exempt_when_target_unchanged():

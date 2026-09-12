@@ -508,28 +508,48 @@ def _render_news_effect_log(state) -> str:
     return "\n".join(lines)
 
 
-def _ticker_cited(ticker: str, reasoning) -> bool:
-    """True if ticker appears (word-boundary) in the rec's CoT text.
+def _ticker_cited(ticker: str, reasoning, positions=None) -> bool:
+    """True if ticker appears (word-boundary) in the rec's CoT text OR
+    structurally in the positions list with a non-empty rationale.
 
     Cite-to-trade gate: any planned trade whose ticker is not named in
-    bull_case, bear_case, verdict, or disqualifiers gets blocked at
-    execution time. Replaces the wall-clock per-ticker cooldown with a
-    structural test - "did the model actually justify this trade?"
+    bull_case, bear_case, verdict, disqualifiers, OR in a positions[]
+    entry with a non-trivial rationale gets blocked at execution time.
+
+    The positions[]+rationale path catches the "MICROSOFT vs MSFT"
+    edge case - the model might prose about "Microsoft" (which our
+    regex won't match against MSFT) while properly filling out a
+    positions[MSFT] entry with a rationale. Structured field is a
+    stronger citation signal than prose.
     """
-    if reasoning is None:
+    if reasoning is None and not positions:
         return False
     tkr = (ticker or "").upper().strip()
     if not tkr:
         return False
-    parts = [
-        reasoning.bull_case or "",
-        reasoning.bear_case or "",
-        reasoning.verdict or "",
-    ]
-    if reasoning.disqualifiers:
-        parts.extend(str(x) for x in reasoning.disqualifiers)
-    text = " ".join(parts).upper()
-    return bool(re.search(rf"\b{re.escape(tkr)}\b", text))
+    # Text-based citation (bull/bear/verdict/disqualifiers).
+    if reasoning is not None:
+        parts = [
+            reasoning.bull_case or "",
+            reasoning.bear_case or "",
+            reasoning.verdict or "",
+        ]
+        if reasoning.disqualifiers:
+            parts.extend(str(x) for x in reasoning.disqualifiers)
+        text = " ".join(parts).upper()
+        if re.search(rf"\b{re.escape(tkr)}\b", text):
+            return True
+    # Structural citation: ticker in positions[] with non-empty rationale.
+    # Empty/None rationale = boilerplate carry-over, not real thought.
+    if positions:
+        for p in positions:
+            p_tkr = getattr(p, "ticker", "") or ""
+            if p_tkr.upper() == tkr:
+                rationale = getattr(p, "rationale", "") or ""
+                if rationale.strip():
+                    return True
+                break
+    return False
 
 
 def _direction_of_citation(ticker: str, reasoning) -> str | None:
@@ -569,8 +589,12 @@ def _apply_cite_to_trade(plans, rec, prev_rec, session, rec_id):
         contradicts the citation (bull-cited SELL or bear-cited BUY).
     """
     reasoning = getattr(rec.allocation, "reasoning", None) if rec is not None else None
+    positions = list(rec.allocation.positions) if rec is not None else []
     if reasoning is None:
-        # No CoT scratchpad on this rec - can't gate. Fall through.
+        # No CoT scratchpad - can't gate. Fall through. Positions alone
+        # can serve as an ADDITIONAL citation source below, but they're
+        # not a REPLACEMENT for reasoning - if the model didn't write any
+        # CoT at all, we're in some legacy path and shouldn't hard-block.
         return plans
     prev_targets: dict[str, float] = {}
     if prev_rec is not None and prev_rec.allocation is not None:
@@ -580,8 +604,21 @@ def _apply_cite_to_trade(plans, rec, prev_rec, session, rec_id):
         }
     curr_targets = {
         p.ticker.upper(): round(float(p.weight_pct), 2)
-        for p in rec.allocation.positions
+        for p in positions
     }
+    # Pre-render CoT snippet once - attached to every cite_violation so
+    # false-positive triage is grep-friendly (no need to cross-ref rec_id
+    # back to the source rec).
+    def _snippet(s: str, n: int = 140) -> str:
+        s = (s or "").strip().replace("\n", " ")
+        return s if len(s) <= n else s[: n - 1] + "..."
+    cot_snippet = {}
+    if reasoning is not None:
+        cot_snippet = {
+            "verdict": _snippet(reasoning.verdict),
+            "bull_case": _snippet(reasoning.bull_case),
+            "bear_case": _snippet(reasoning.bear_case),
+        }
     kept = []
     for p in plans:
         tkr = p.ticker.upper()
@@ -599,7 +636,7 @@ def _apply_cite_to_trade(plans, rec, prev_rec, session, rec_id):
         ):
             kept.append(p)
             continue
-        if _ticker_cited(tkr, reasoning):
+        if _ticker_cited(tkr, reasoning, positions=positions):
             cited_as = _direction_of_citation(tkr, reasoning)
             if session and (
                 (cited_as == "bull" and p.side == "sell")
@@ -613,7 +650,9 @@ def _apply_cite_to_trade(plans, rec, prev_rec, session, rec_id):
                 })
             kept.append(p)
             continue
-        # Ticker absent from CoT and not a drift-rebalance - block.
+        # Ticker absent from CoT and not a drift-rebalance - block. Include
+        # a CoT snippet so we can spot-check false positives without
+        # loading the full rec.
         if session:
             session.log("cite_violation", {
                 "rec_id": rec_id,
@@ -621,6 +660,7 @@ def _apply_cite_to_trade(plans, rec, prev_rec, session, rec_id):
                 "side": p.side,
                 "qty": float(p.qty),
                 "reason": "ticker_not_in_cot",
+                "cot": cot_snippet,
             })
     return kept
 
