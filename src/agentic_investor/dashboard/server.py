@@ -294,7 +294,9 @@ def create_app(
                         # Snapshots are captured chronologically; the oldest
                         # (last in the list, since list_snapshots orders
                         # newest-first) is the arm's session-open baseline.
-                        open_equity = float(snaps[-1]["equity"])
+                        # Equity lives inside the parsed account_json blob,
+                        # not at the row's top level.
+                        open_equity = float(snaps[-1]["account"]["equity"])
                         summary["opening_equity"] = round(open_equity, 2)
                         if "equity" in summary and open_equity > 0:
                             delta = summary["equity"] - open_equity
