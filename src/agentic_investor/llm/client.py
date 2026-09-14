@@ -7,6 +7,7 @@ tracker (calls, tokens, estimated cost) so every CLI command can print an LLM
 usage summary.
 """
 
+import copy
 import logging
 import os
 import threading
@@ -300,6 +301,12 @@ def structured_complete[T: BaseModel](
     response can't freeze the whole loop while tenacity waits for it.
     """
     s = get_settings()
+    # LiteLLM's OpenAI adapter strips Anthropic-only cache_control markers
+    # from the messages list in place. Deep-copy so the caller's messages
+    # survive intact for a subsequent call to a different provider (e.g.
+    # the ensemble path where the same list is sent to gpt-4o-mini then
+    # anthropic/claude-haiku-4-5 in the same tick).
+    messages = copy.deepcopy(messages)
     try:
         return _client.chat.completions.create(
             model=model or s.llm_model,
