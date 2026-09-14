@@ -1133,6 +1133,24 @@ def _generate_recommendation(
     return rec, final_tickers
 
 
+def _coerce_dt_utc(value) -> datetime | None:
+    """Alpaca's Clock.next_open is typed as datetime but the SDK occasionally
+    hands back an ISO-8601 string at EOD (observed 2026-09-14 post-close
+    on all three arms simultaneously). Normalize to a tz-aware UTC datetime
+    or None so callers don't crash on .tzinfo / arithmetic.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value
+
+
 def _pre_market_active(clock, cfg: LoopConfig, now: datetime) -> bool:
     """True if we're inside the pre-market lead window.
 
@@ -1142,11 +1160,9 @@ def _pre_market_active(clock, cfg: LoopConfig, now: datetime) -> bool:
     """
     if cfg.pre_market_lead_min <= 0 or clock.is_open:
         return False
-    next_open = getattr(clock, "next_open", None)
+    next_open = _coerce_dt_utc(getattr(clock, "next_open", None))
     if next_open is None:
         return False
-    if next_open.tzinfo is None:
-        next_open = next_open.replace(tzinfo=UTC)
     seconds_to_open = (next_open - now).total_seconds()
     return 0 < seconds_to_open <= cfg.pre_market_lead_min * 60
 
@@ -2134,10 +2150,8 @@ def run_event_loop(
                     # If a lead window is configured, wake up N min early
                     # so we enter pre-market processing on the next iter.
                     lead = cfg.pre_market_lead_min
-                    target = clock.next_open
+                    target = _coerce_dt_utc(clock.next_open)
                     if lead > 0 and target is not None:
-                        if target.tzinfo is None:
-                            target = target.replace(tzinfo=_UTC)
                         target = target - _td(minutes=lead)
                     _sleep_until(target, now=_now_utc)
                     continue

@@ -656,3 +656,47 @@ def test_loop_runs_one_tick_then_exits_with_once(monkeypatch):
 
     state = run_loop(cfg, broker, sleep_fn=lambda s: None)
     assert state.ticks_run == 1
+
+
+def test_pre_market_active_handles_string_next_open():
+    """Alpaca's Clock.next_open occasionally comes back as an ISO string
+    (observed 2026-09-14 EOD, crashed all three arms with rc=1).
+    _pre_market_active must coerce string -> tz-aware datetime instead
+    of crashing on .tzinfo.
+    """
+    from types import SimpleNamespace
+    from agentic_investor.orchestrator.loop import _pre_market_active
+
+    cfg = LoopConfig(pre_market_lead_min=30, tickers=["AAPL"])
+    now = datetime(2026, 9, 15, 13, 15, tzinfo=UTC)  # 15 min before 13:30 UTC = 09:30 ET
+    clock_str = SimpleNamespace(is_open=False, next_open="2026-09-15T13:30:00+00:00")
+    assert _pre_market_active(clock_str, cfg, now) is True
+
+    clock_z = SimpleNamespace(is_open=False, next_open="2026-09-15T13:30:00Z")
+    assert _pre_market_active(clock_z, cfg, now) is True
+
+    # Naive string (no tz) should be treated as UTC.
+    clock_naive = SimpleNamespace(is_open=False, next_open="2026-09-15T13:30:00")
+    assert _pre_market_active(clock_naive, cfg, now) is True
+
+    # Existing datetime path still works.
+    clock_dt = SimpleNamespace(
+        is_open=False,
+        next_open=datetime(2026, 9, 15, 13, 30, tzinfo=UTC),
+    )
+    assert _pre_market_active(clock_dt, cfg, now) is True
+
+    # Malformed string -> return False, don't raise.
+    clock_bad = SimpleNamespace(is_open=False, next_open="not a date")
+    assert _pre_market_active(clock_bad, cfg, now) is False
+
+
+def test_pre_market_active_outside_window():
+    """Sanity: too far before open returns False."""
+    from types import SimpleNamespace
+    from agentic_investor.orchestrator.loop import _pre_market_active
+
+    cfg = LoopConfig(pre_market_lead_min=30)
+    now = datetime(2026, 9, 15, 10, 0, tzinfo=UTC)  # 3.5h before 13:30 UTC open
+    clock = SimpleNamespace(is_open=False, next_open="2026-09-15T13:30:00+00:00")
+    assert _pre_market_active(clock, cfg, now) is False
