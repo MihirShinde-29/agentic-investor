@@ -45,10 +45,6 @@ link-mode = "copy"
 # Keep line length generous; agents/prompts get wide.
 line-length = 100
 target-version = "py312"
-# Diagnostic scripts intentionally monkey-patch httpx.Client.send BEFORE
-# importing modules that build clients at import time (litellm/alpaca).
-# The import order is load-bearing, not a style violation.
-extend-exclude = ["scripts/diag_*.py"]
 
 [tool.ruff.lint]
 # E/F = pyflakes+pycodestyle, I = isort (import sorting), UP = pyupgrade,
