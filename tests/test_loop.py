@@ -7,6 +7,7 @@ import pytest
 from agentic_investor.orchestrator.loop import (
     LoopConfig,
     LoopState,
+    _build_proposed_intents,
     _drift_exceeds_band,
     _effective_band,
     _filter_should_skip,
@@ -286,6 +287,55 @@ def test_opinion_barely_moved_treats_added_position_as_moved():
     )
     barely, _ = _opinion_barely_moved(new, prev, threshold_pct=3.0)
     assert barely is False
+
+
+def test_build_proposed_intents_captures_direction_new_and_dropped():
+    prev = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL", "MSFT"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=50, dollars=5000, rationale="x"),
+                Position(ticker="MSFT", weight_pct=30, dollars=3000, rationale="x"),
+            ],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    # AAPL trimmed, MSFT dropped entirely, NVDA opened fresh.
+    new = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL", "NVDA"], amount=10_000),
+        allocation=Allocation(
+            positions=[
+                Position(ticker="AAPL", weight_pct=40, dollars=4000,
+                         rationale="x", confidence=0.8),
+                Position(ticker="NVDA", weight_pct=30, dollars=3000,
+                         rationale="x", confidence=0.6),
+            ],
+            cash_pct=30, cash_dollars=3000, portfolio_rationale="x",
+        ),
+    )
+    intents = _build_proposed_intents(new, prev)
+    by_t = {i["ticker"]: i for i in intents}
+    assert by_t["AAPL"]["side"] == "sell"
+    assert by_t["AAPL"]["delta_pp"] == -10.0
+    assert by_t["MSFT"]["side"] == "sell"
+    assert by_t["MSFT"]["new_weight_pct"] == 0.0
+    assert by_t["NVDA"]["side"] == "buy"
+    assert by_t["NVDA"]["confidence"] == 0.6
+
+
+def test_build_proposed_intents_handles_no_prev_rec():
+    new = Recommendation(
+        request=OrchestratorRequest(tickers=["AAPL"], amount=10_000),
+        allocation=Allocation(
+            positions=[Position(ticker="AAPL", weight_pct=80,
+                                dollars=8000, rationale="x")],
+            cash_pct=20, cash_dollars=2000, portfolio_rationale="x",
+        ),
+    )
+    intents = _build_proposed_intents(new, None)
+    assert len(intents) == 1
+    assert intents[0]["side"] == "buy"
+    assert intents[0]["prev_weight_pct"] == 0.0
 
 
 def test_opinion_barely_moved_false_when_no_previous_rec():

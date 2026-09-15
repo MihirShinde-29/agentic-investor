@@ -818,6 +818,43 @@ def _correlation_shifts(
     return out
 
 
+def _build_proposed_intents(
+    new_rec: Recommendation,
+    prev_rec: Recommendation | None,
+) -> list[dict]:
+    """Structured per-ticker view of what the LLM wanted to do in the aborted
+    rec. Feeds phase-2 aborted-intent scoring: was the buy/sell right, given
+    price at t+15/30/60m? Without this the skip payload is blind to direction.
+
+    HOLD is emitted only for tickers present in both recs whose weight didn't
+    change; tickers absent from new (i.e. LLM wanted to fully exit) show as
+    sell with new_weight=0.
+    """
+    prev_by_t = (
+        {p.ticker.upper(): p for p in prev_rec.allocation.positions}
+        if prev_rec else {}
+    )
+    new_by_t = {p.ticker.upper(): p for p in new_rec.allocation.positions}
+    intents: list[dict] = []
+    for t in sorted(set(prev_by_t) | set(new_by_t)):
+        prev_p = prev_by_t.get(t)
+        new_p = new_by_t.get(t)
+        prev_w = float(prev_p.weight_pct) if prev_p else 0.0
+        new_w = float(new_p.weight_pct) if new_p else 0.0
+        delta = new_w - prev_w
+        side = "buy" if delta > 0 else "sell" if delta < 0 else "hold"
+        conf = float(new_p.confidence) if (new_p and new_p.confidence is not None) else None
+        intents.append({
+            "ticker": t,
+            "side": side,
+            "prev_weight_pct": round(prev_w, 2),
+            "new_weight_pct": round(new_w, 2),
+            "delta_pp": round(delta, 2),
+            "confidence": conf,
+        })
+    return intents
+
+
 def _opinion_barely_moved(
     new_rec: Recommendation,
     prev_rec: Recommendation | None,
@@ -1535,6 +1572,7 @@ def run_tick(
                     logger.warning("save_loop_state failed on skip: %s", e)
                 # Attribution: record the would-be allocation for later
                 # counterfactual analysis (false-positive rate measurement).
+                proposed_intents = _build_proposed_intents(rec, prev_rec)
                 try:
                     from agentic_investor.tools.paper_store import record_filter_skip
                     skip_acct = broker.get_account()
@@ -1573,6 +1611,7 @@ def run_tick(
                         "max_avg_drift_pp": cfg.max_avg_drift_pct,
                         "max_single_delta_pp": cfg.max_single_delta_pct,
                         "deltas": {t: round(d, 2) for t, d in deltas.items()},
+                        "proposed_intents": proposed_intents,
                     })
                     session.log("knob_fired", {
                         "name": "opinion_drift", "reason": skip_reason,
