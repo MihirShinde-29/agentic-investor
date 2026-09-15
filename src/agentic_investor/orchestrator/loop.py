@@ -219,6 +219,11 @@ class LoopState:
 
     # Consumed by run_tick to force a fresh rec that sees the batch context.
     pending_news_context: str | None = None
+    # Frozen {news_id: {ticker,headline,source,published_at,url}} for the batch
+    # rendered in pending_news_context. Attached to Recommendation.news_batch_
+    # snapshot after the LLM returns so cited IDs can be resolved after the
+    # streaming queue has recycled the raw events.
+    pending_news_snapshot: dict[str, dict] = field(default_factory=dict)
     # Sticky picker output - prevents portfolio churn from re-scoring the
     # universe on every regen. Reset across days.
     frozen_picker_tickers: list[str] | None = None
@@ -1485,6 +1490,11 @@ def run_tick(
                 on_deck_watchlist=on_deck_meta,
                 stale_evidence_hint=stale_hint,
             )
+            # Freeze the news batch the LLM just cited from. Position.
+            # triggering_news_ids references keys in this dict; downstream
+            # analytics resolve id -> headline against payload_json.
+            if state.pending_news_snapshot:
+                rec.news_batch_snapshot = dict(state.pending_news_snapshot)
             state.last_batch_fingerprint = batch_fp
             # Honor the LLM's on-deck purge nominations. Never drops held
             # tickers (safety) and never drops the tickers we're about to
@@ -2006,6 +2016,10 @@ def run_tick(
     rationale_by_ticker = {
         p.ticker.upper(): p.rationale for p in rec.allocation.positions
     }
+    news_ids_by_ticker = {
+        p.ticker.upper(): list(getattr(p, "triggering_news_ids", None) or [])
+        for p in rec.allocation.positions
+    }
     # Snapshot per-ticker unrealized P/L% so we can flag underwater adds
     # (LLM doubling down on a name that's already in the red). Not a
     # block - just data. If the pattern turns out to lose money over
@@ -2014,7 +2028,10 @@ def run_tick(
         p.ticker.upper(): float(p.unrealized_pl_pct) for p in positions
     }
     for o in submitted:
-        record_order(o, source="loop", rec_id=state.last_rec_id)
+        record_order(
+            o, source="loop", rec_id=state.last_rec_id,
+            triggering_news_ids=news_ids_by_ticker.get(o.ticker.upper()),
+        )
         # Track for wall-clock cooldown ONLY when the arm has opted in.
         # Arms running cite-to-trade alone leave state.recent_trades empty.
         if cfg.cooldown_seconds > 0:
@@ -2024,6 +2041,7 @@ def run_tick(
                 "ticker": o.ticker, "side": o.side, "qty": o.qty,
                 "broker_order_id": o.id, "status": o.status,
                 "client_order_id": o.client_order_id,
+                "triggering_news_ids": news_ids_by_ticker.get(o.ticker.upper()) or [],
             })
             # No-news-buy audit: flag BUY trades where the ticker had no news
             # in the current batch AND no attributed effect-log entry. Not a
@@ -2109,6 +2127,7 @@ def run_event_loop(
         ingest,
         render_batch_context,
         should_fire,
+        snapshot_batch,
     )
     from agentic_investor.tools.news_stream import NewsStreamer
     from agentic_investor.tools.paper_store import load_loop_state
@@ -2657,6 +2676,7 @@ def run_event_loop(
                             logger.debug("finBERT prefilter error: %s", e)
                     ctx = render_batch_context(batch)
                     state.pending_news_context = ctx or None
+                    state.pending_news_snapshot = snapshot_batch(batch) if ctx else {}
                     if session:
                         cooked_with_reaction = sum(
                             1 for c in batch.cooked if c.reaction_pct is not None

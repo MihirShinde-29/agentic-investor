@@ -144,14 +144,28 @@ a ticker's signals include a `pead` field:
 
 # Interpreting breaking-news context (when provided)
 The user message may include a "Breaking-news events" section from the live
-stream. Each item is tagged HOT (fresh, price likely not yet moved) or COOKED
-(older, price has had time to react):
+stream. Each line begins with a stable news_id (e.g. `N3f9a2b1c`) followed by
+its tag HOT (fresh, price likely not yet moved) or COOKED (older, price has
+had time to react):
 - HOT: scout sizing (~50% of your intended target). Uncertainty is high; the
   event is fresh and consensus hasn't formed.
 - COOKED: full sizing informed by `news_reaction_pct`.
   * High positive reaction (>+2%) = already priced in, avoid chasing.
   * Flat despite bullish news = underreaction, edge remains.
   * Sharp negative reaction on bad news = thesis re-evaluation warranted.
+
+# Citing news on each Position
+For every Position you emit, populate `triggering_news_ids` with the news_ids
+(e.g. `["N3f9a2b1c", "Na1b2c3d4"]`) from the batch that drove your buy / sell /
+hold decision for that ticker. Rules:
+- Cite ONLY IDs that actually appear in the current batch. Do not invent IDs.
+- If you weighted a position on technicals, macro, or thesis-carryover with
+  no supporting item in this batch, leave `triggering_news_ids` empty. Do not
+  fabricate a citation.
+- If multiple headlines drove one position, list them all - order doesn't
+  matter.
+- This linkage is stored on the executed order and joined in analytics; a
+  bogus citation poisons the trade-attribution view downstream.
 
 # Anchoring to previous allocation (when provided)
 The user message may include a "Current allocation" block from your previous

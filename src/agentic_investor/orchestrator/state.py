@@ -42,6 +42,11 @@ class Position(BaseModel):
     # LLM conviction for this weight; drives confidence-adaptive rebalance
     # bands. Default 0.5 keeps legacy recs (loaded from store) sane.
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    # News IDs (e.g. "N3f9a2b1c") from the batch context that drove this
+    # position. Empty list = no news-driven thesis (interval regen, drift,
+    # technical-only). The paper_orders row copies this at submit time so
+    # trades can be joined back to specific headlines in the compare view.
+    triggering_news_ids: list[str] = Field(default_factory=list)
 
 
 class AllocationReasoning(BaseModel):
@@ -408,6 +413,11 @@ class Recommendation(BaseModel):
     repair_events: list[dict] = Field(default_factory=list)
     # Only populated when self-consistency or cross-model ensembling ran.
     ensemble_meta: dict | None = None
+    # Frozen news batch as {news_id: {ticker, headline, source, published_at,
+    # url}}. The LLM cited these IDs on Position.triggering_news_ids, and
+    # downstream analyzers resolve them here after the streaming queue has
+    # long-since recycled the raw NewsEvent objects.
+    news_batch_snapshot: dict[str, dict] = Field(default_factory=dict)
 
 
 class GraphState(TypedDict, total=False):

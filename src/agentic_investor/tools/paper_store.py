@@ -51,10 +51,18 @@ def _connect(url: str) -> sqlite3.Connection:
             stop_loss REAL,
             take_profit REAL,
             source TEXT,
-            rec_id INTEGER
+            rec_id INTEGER,
+            triggering_news_ids TEXT
         )
         """
     )
+    # Older DBs missing triggering_news_ids: add on connect. sqlite ignores
+    # 'ADD COLUMN ... IF NOT EXISTS' (unsupported); catch the OperationalError
+    # from the duplicate-column race instead.
+    try:
+        conn.execute("ALTER TABLE paper_orders ADD COLUMN triggering_news_ids TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS paper_snapshots (
@@ -124,17 +132,24 @@ def record_order(
     *,
     source: str = "manual",
     rec_id: int | None = None,
+    triggering_news_ids: list[str] | None = None,
     url: str | None = None,
 ) -> None:
-    """Upsert an order row. Idempotent by client_order_id."""
+    """Upsert an order row. Idempotent by client_order_id.
+
+    triggering_news_ids is copied from the Position that produced this order;
+    stored as JSON so the compare view can join executed trades back to the
+    specific headlines cited by the LLM at regen time.
+    """
+    news_ids_json = json.dumps(triggering_news_ids) if triggering_news_ids else None
     with _connect(_resolve_url(url)) as conn:
         conn.execute(
             """
             INSERT INTO paper_orders (
                 client_order_id, broker_order_id, ticker, side, qty,
                 order_type, status, submitted_at, filled_at, filled_avg_price,
-                stop_loss, take_profit, source, rec_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                stop_loss, take_profit, source, rec_id, triggering_news_ids
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(client_order_id) DO UPDATE SET
                 broker_order_id=excluded.broker_order_id,
                 status=excluded.status,
@@ -156,6 +171,7 @@ def record_order(
                 order.take_profit,
                 source,
                 rec_id,
+                news_ids_json,
             ),
         )
         conn.commit()

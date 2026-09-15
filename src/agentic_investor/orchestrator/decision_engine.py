@@ -177,9 +177,9 @@ def build_batch(
 def render_batch_context(batch: DecisionBatch) -> str:
     """Render a DecisionBatch into a text block for the allocator prompt.
 
-    Format is deliberately compact so it drops into the existing prompt without
-    ballooning tokens. Each line names the tag, ticker, headline snippet, age,
-    and news_reaction_pct where available.
+    Each line leads with the stable `news_id` (e.g. `N3f9a2b1c`) so the LLM
+    can cite it back on each Position via `triggering_news_ids`. Keeps the
+    format compact - id is 9 chars, well under a headline of noise.
     """
     lines: list[str] = []
     for group_name, group in (("HOT", batch.hot), ("COOKED", batch.cooked), ("STALE", batch.stale)):
@@ -193,9 +193,32 @@ def render_batch_context(batch: DecisionBatch) -> str:
                 else ""
             )
             lines.append(
-                f"- [{group_name}] {e.ticker}  age={age_min}m{reaction}: {headline}"
+                f"- [{group_name}] {e.news_id} {e.ticker}  "
+                f"age={age_min}m{reaction}: {headline}"
             )
     return "\n".join(lines) if lines else ""
+
+
+def snapshot_batch(batch: DecisionBatch) -> dict[str, dict]:
+    """Freeze the batch as {news_id: event_dict} so a later consumer can
+    resolve a Position's cited IDs to the original headlines/urls even after
+    the streaming queue has recycled the events.
+
+    Stored on Recommendation.news_batch_snapshot so `paper_orders.rec_id ->
+    Recommendation.news_batch_snapshot[id]` is a clean join.
+    """
+    out: dict[str, dict] = {}
+    for group in (batch.hot, batch.cooked, batch.stale):
+        for item in group:
+            e = item.event
+            out[e.news_id] = {
+                "ticker": e.ticker,
+                "headline": (e.headline or "")[:200],
+                "source": (e.source or "")[:40],
+                "published_at": e.published_at,
+                "url": e.url,
+            }
+    return out
 
 
 def _looks_like_equity_ticker(ticker: str) -> bool:

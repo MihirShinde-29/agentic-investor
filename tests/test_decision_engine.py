@@ -9,6 +9,7 @@ from agentic_investor.orchestrator.decision_engine import (
     ingest,
     render_batch_context,
     should_fire,
+    snapshot_batch,
 )
 from agentic_investor.tools.news_stream import NewsEvent
 
@@ -104,12 +105,15 @@ def test_render_batch_context_groups_events_by_age_tag():
     state.last_batch_window_started = now - timedelta(seconds=60)
     batch = build_batch(state, now)
     text = render_batch_context(batch)
-    # Each ticker + age tag should appear; ordering is HOT then COOKED then STALE.
-    assert "[HOT] AAPL" in text
+    # Each ticker + age tag + news_id should appear; order = HOT / COOKED / STALE.
+    assert "[HOT]" in text and " AAPL " in text
     assert "Apple beats earnings" in text
-    assert "[COOKED] NVDA" in text
-    assert "[STALE] MSFT" in text
-    # HOT should come before COOKED which should come before STALE.
+    assert "[COOKED]" in text and " NVDA " in text
+    assert "[STALE]" in text and " MSFT " in text
+    # News IDs are prefixed with N and appear between the tag and the ticker.
+    import re
+    for tk in ("AAPL", "NVDA", "MSFT"):
+        assert re.search(rf"N[0-9a-f]{{8}} {tk}", text), f"news_id missing for {tk}"
     assert text.index("[HOT]") < text.index("[COOKED]") < text.index("[STALE]")
 
 
@@ -117,6 +121,40 @@ def test_render_batch_context_empty_when_no_events():
     now = datetime.now(UTC)
     batch = build_batch(DecisionState(), now)
     assert render_batch_context(batch) == ""
+
+
+def test_news_id_stable_across_batches():
+    """Same (url|headline|ticker) hashes to the same news_id so re-batching
+    the same event doesn't change the ID mid-flight."""
+    e1 = _news("AAPL", 1, headline="Apple beats earnings")
+    e2 = _news("AAPL", 5, headline="Apple beats earnings")
+    # Second event constructed later; both share url="" so the seed
+    # collapses to same hash. Explicit assertion since callers rely on this.
+    e1.url = "https://example.com/apple"
+    e2.url = "https://example.com/apple"
+    assert e1.news_id == e2.news_id
+    assert e1.news_id.startswith("N")
+    assert len(e1.news_id) == 9  # "N" + 8 hex chars
+
+
+def test_snapshot_batch_indexes_events_by_id():
+    now = datetime.now(UTC)
+    state = DecisionState(unprocessed=[
+        _news("AAPL", 1, headline="A1"),
+        _news("NVDA", 16, headline="N1"),
+    ])
+    state.last_batch_window_started = now - timedelta(seconds=60)
+    batch = build_batch(state, now)
+    snap = snapshot_batch(batch)
+    assert len(snap) == 2
+    # Every rendered ID must resolve in the snapshot dict.
+    text = render_batch_context(batch)
+    import re
+    for m in re.finditer(r"N[0-9a-f]{8}", text):
+        assert m.group(0) in snap
+    # Snapshot rows carry headline/ticker back for downstream analytics.
+    sample = next(iter(snap.values()))
+    assert set(sample.keys()) == {"ticker", "headline", "source", "published_at", "url"}
 
 
 def test_ingest_opens_batch_window_on_first_event():

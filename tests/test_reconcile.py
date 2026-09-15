@@ -29,6 +29,40 @@ def _submit_side_effect(url: str, coid: str):
     record_order(o, source="test", url=url)
 
 
+def test_record_order_persists_triggering_news_ids(tmp_path):
+    """Position-level news citations survive round-trip through paper_orders
+    so the compare view can join filled trades back to headlines."""
+    import json as _json
+    url = f"sqlite:///{tmp_path / 'news_ids.db'}"
+    o = PaperOrder(
+        id="", client_order_id="ai-news-1",
+        ticker="AAPL", side="buy", qty=10,
+        order_type="market", status="pending_new",
+        submitted_at="2026-09-16T10:00:00Z",
+    )
+    record_order(
+        o, source="loop", url=url,
+        triggering_news_ids=["N3f9a2b1c", "Na1b2c3d4"],
+    )
+    rows = list_orders(url=url)
+    assert len(rows) == 1
+    stored = _json.loads(rows[0]["triggering_news_ids"])
+    assert stored == ["N3f9a2b1c", "Na1b2c3d4"]
+
+
+def test_record_order_null_news_ids_stays_null(tmp_path):
+    url = f"sqlite:///{tmp_path / 'no_news.db'}"
+    o = PaperOrder(
+        id="", client_order_id="ai-nonews-1",
+        ticker="MSFT", side="sell", qty=5,
+        order_type="market", status="pending_new",
+        submitted_at="2026-09-16T10:05:00Z",
+    )
+    record_order(o, source="loop", url=url)
+    rows = list_orders(url=url)
+    assert rows[0]["triggering_news_ids"] is None
+
+
 def test_reconcile_updates_pending_to_filled(tmp_path):
     url = f"sqlite:///{tmp_path / 'test.db'}"
     _submit_side_effect(url, coid="ai-abc123")

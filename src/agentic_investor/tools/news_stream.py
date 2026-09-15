@@ -108,6 +108,19 @@ class NewsEvent:
     received_at: str  # ISO 8601 UTC (when the streamer got it)
     url: str = ""
     source: str = ""
+    # Stable short ID derived from (url|headline|ticker). Populated lazily by
+    # `news_id` when unset so re-batching the same event yields the same ID.
+    # Callers assign eagerly via `.news_id` and cite in the allocator prompt.
+    _news_id: str = ""
+
+    @property
+    def news_id(self) -> str:
+        if self._news_id:
+            return self._news_id
+        import hashlib
+        seed = f"{self.url}|{self.headline}|{self.ticker}".encode("utf-8", "replace")
+        self._news_id = "N" + hashlib.sha1(seed).hexdigest()[:8]
+        return self._news_id
 
 
 class NewsStreamer:
