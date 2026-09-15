@@ -42,4 +42,9 @@ arms:
     alpaca_account: tertiary
     config_diff: {}
     env:
+      # FROZEN through 2026-09-19 (Fri close). Day-2 analysis showed C
+      # is the only arm making money on drift-thrashed names via the
+      # ensemble's filter-inversion mechanic. The Anthropic cost is
+      # ~$5/day but the finding is worth the $15-20 through Friday.
+      # Cheap-model swap deferred to arm D (Mon 2026-09-22 launch).
       AGENTIC_ENSEMBLE_MODELS: "gpt-4o-mini,anthropic/claude-haiku-4-5"
