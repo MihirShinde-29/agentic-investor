@@ -208,7 +208,7 @@ export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-sm [&_th]:px-3 [&_td]:px-3 [&_th:first-child]:pl-0 [&_td:first-child]:pl-0 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
               <thead className="text-xs uppercase text-muted-foreground">
                 <tr className="border-b border-border/60">
                   <th className="py-2 text-left">arm</th>
@@ -220,6 +220,8 @@ export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
                   <th className="py-2 text-right">pos</th>
                   <th className="py-2 text-right">orders</th>
                   <th className="py-2 text-right">turnover $</th>
+                  <th className="py-2 text-right">regen $ (5-avg)</th>
+                  <th className="py-2 text-right">cache %</th>
                   <th className="py-2 text-left">held</th>
                 </tr>
               </thead>
@@ -280,6 +282,23 @@ export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
                     </td>
                     <td className="py-2 text-right tabular-nums">
                       {fmtUsd(row.turnover)}
+                    </td>
+                    <td
+                      className="py-2 text-right tabular-nums text-muted-foreground"
+                      title={
+                        row.ticks !== undefined
+                          ? `total $${(row.regen_cost_total ?? 0).toFixed(4)} over ${row.ticks} ticks`
+                          : "no tick_cost data yet"
+                      }
+                    >
+                      {row.regen_cost_last5_avg === undefined
+                        ? "-"
+                        : `$${row.regen_cost_last5_avg.toFixed(4)}`}
+                    </td>
+                    <td className="py-2 text-right tabular-nums text-muted-foreground">
+                      {row.cache_hit_pct === undefined
+                        ? "-"
+                        : `${row.cache_hit_pct.toFixed(1)}%`}
                     </td>
                     <td className="py-2 text-xs">
                       <div className="flex flex-wrap gap-1">

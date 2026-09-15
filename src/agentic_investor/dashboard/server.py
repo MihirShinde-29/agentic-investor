@@ -18,6 +18,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import threading
 import time
@@ -34,6 +35,49 @@ from agentic_investor.dashboard.arm_context import ExperimentContext
 from agentic_investor.dashboard.events import get_bus
 
 logger = logging.getLogger(__name__)
+
+
+_TICK_COST_RE = re.compile(
+    r"\[tick_cost\].*prompt_tokens=(\d+).*cached_tokens=(\d+)"
+    r".*cost_usd=\$([\d.]+)"
+)
+
+
+def _parse_tick_cost_stats(exp_name: str, arm_id: str) -> dict | None:
+    """Read the arm's session log and aggregate its tick_cost rows.
+
+    Runs on every compare-summary request; on 5 days of ticks the log is
+    still small enough to whole-file scan under the SWR poll interval.
+    If perf becomes an issue we can memo by mtime.
+    """
+    path = Path("out/experiments") / exp_name / f"{arm_id}.log"
+    if not path.exists():
+        return None
+    costs: list[float] = []
+    tot_prompt = 0
+    tot_cached = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = _TICK_COST_RE.search(line)
+                if m:
+                    tot_prompt += int(m.group(1))
+                    tot_cached += int(m.group(2))
+                    costs.append(float(m.group(3)))
+    except OSError:
+        return None
+    if not costs:
+        return {}
+    last5 = costs[-5:]
+    return {
+        "ticks": len(costs),
+        "regen_cost_total": round(sum(costs), 4),
+        "regen_cost_avg": round(sum(costs) / len(costs), 4),
+        "regen_cost_last5_avg": round(sum(last5) / len(last5), 4),
+        "cache_hit_pct": round(
+            (tot_cached / tot_prompt) * 100, 1
+        ) if tot_prompt > 0 else 0.0,
+    }
 
 # On Windows, Python's mimetypes.guess_type reads from the registry and
 # sometimes returns 'text/plain' for .js files. Browsers refuse to execute
@@ -306,6 +350,12 @@ def create_app(
                             )
                 except Exception:  # noqa: BLE001
                     pass
+                # Regen cost + cache hit: parsed from the arm's session log.
+                # Written by paper-loop tick_cost events, aggregated live so
+                # A/B compare shows the ensemble-vs-single cost gap directly.
+                stats = _parse_tick_cost_stats(exp.name, arm.arm_id)
+                if stats:
+                    summary.update(stats)
             finally:
                 reset_arm_context(tokens)
             rows.append(summary)

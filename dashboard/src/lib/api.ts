@@ -178,6 +178,11 @@ export type ArmSummaryRow = {
   last_snapshot_at?: string;
   broker_error?: string;
   orders_error?: string;
+  ticks?: number;
+  regen_cost_total?: number;
+  regen_cost_avg?: number;
+  regen_cost_last5_avg?: number;
+  cache_hit_pct?: number;
 };
 
 export type CompareSummaryResp = {
