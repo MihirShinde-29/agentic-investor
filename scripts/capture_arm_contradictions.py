@@ -15,7 +15,7 @@ import os
 import pathlib
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from dotenv import load_dotenv
 
@@ -53,7 +53,7 @@ def _parse_orders(arm: str) -> list[dict]:
 def _to_utc(ts_local: str) -> datetime:
     return (
         datetime.strptime(ts_local, "%Y-%m-%d %H:%M:%S") - ET_OFFSET
-    ).replace(tzinfo=timezone.utc)
+    ).replace(tzinfo=UTC)
 
 
 def find_contradictions(all_orders: list[dict]) -> list[dict]:
@@ -144,7 +144,7 @@ def main() -> None:
 
     tickers = {e["ticker"] for e in events}
     earliest = min(_to_utc(e["first"]["ts_local"]) for e in events)
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     bars = _price_lookup(tickers, earliest, now_utc)
 
     def _price(tk: str, at: datetime, offset_min: int = 0) -> float | None:
@@ -180,7 +180,7 @@ def main() -> None:
     for (k,), n in kinds.items():
         print(f"  {k}: {n}")
 
-    print(f"\nlast 10 events:")
+    print("\nlast 10 events:")
     print(f"  {'time':<20} {'ticker':<6} {'kind':<20} "
           f"{'A vs B (arm,side,qty)':<40} gap {'move_now':>8}")
     for e in events[-10:]:

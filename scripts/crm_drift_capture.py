@@ -20,7 +20,7 @@ import os
 import pathlib
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from dotenv import load_dotenv
 
@@ -71,10 +71,10 @@ for e in all_events:
 # Fetch CRM price at each event ts. Alpaca 1-min bars are the highest
 # resolution we get in the paper-data plan; interpolate to bar close.
 try:
+    from alpaca.data.enums import DataFeed
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
-    from alpaca.data.enums import DataFeed
 except ImportError:
     print("alpaca-py not installed; can't fetch prices, wrote timestamps only")
     with OUT.open("w", encoding="utf-8") as f:
@@ -86,11 +86,11 @@ except ImportError:
 ET_OFFSET = timedelta(hours=-4)  # EDT (14 Sep is DST-on)
 for e in all_events:
     dt_local = datetime.strptime(e["ts_local"], "%Y-%m-%d %H:%M:%S")
-    e["ts_utc"] = (dt_local - ET_OFFSET).replace(tzinfo=timezone.utc).isoformat()
+    e["ts_utc"] = (dt_local - ET_OFFSET).replace(tzinfo=UTC).isoformat()
 
 # Batch fetch: earliest to now+5min so we have "later prices" for the write-up too
 earliest = min(datetime.fromisoformat(e["ts_utc"]) for e in all_events)
-now_utc = datetime.now(timezone.utc)
+now_utc = datetime.now(UTC)
 data_cli = StockHistoricalDataClient(
     os.environ["ALPACA_API_KEY"], os.environ["ALPACA_API_SECRET"],
 )

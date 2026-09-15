@@ -665,6 +665,7 @@ def test_pre_market_active_handles_string_next_open():
     of crashing on .tzinfo.
     """
     from types import SimpleNamespace
+
     from agentic_investor.orchestrator.loop import _pre_market_active
 
     cfg = LoopConfig(pre_market_lead_min=30, tickers=["AAPL"])
@@ -694,6 +695,7 @@ def test_pre_market_active_handles_string_next_open():
 def test_pre_market_active_outside_window():
     """Sanity: too far before open returns False."""
     from types import SimpleNamespace
+
     from agentic_investor.orchestrator.loop import _pre_market_active
 
     cfg = LoopConfig(pre_market_lead_min=30)
@@ -706,8 +708,9 @@ def test_sleep_until_accepts_datetime_and_string():
     """After the tzinfo fix, _sleep_until callers pass a datetime (from
     _coerce_dt_utc), not a raw ISO string. Regression check: both paths work.
     """
-    from agentic_investor.orchestrator.loop import _sleep_until
     from unittest.mock import patch
+
+    from agentic_investor.orchestrator.loop import _sleep_until
 
     now = datetime(2026, 9, 15, 20, 0, tzinfo=UTC)
 

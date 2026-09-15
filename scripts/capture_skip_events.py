@@ -22,8 +22,7 @@ import json
 import os
 import pathlib
 import re
-import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from dotenv import load_dotenv
 
@@ -150,8 +149,8 @@ def main() -> None:
             earliest = min(
                 datetime.strptime(e["ts_local"], "%Y-%m-%d %H:%M:%S") - ET_OFFSET
                 for e in all_events if e.get("ticker") in tickers_needed
-            ).replace(tzinfo=timezone.utc)
-            now_utc = datetime.now(timezone.utc)
+            ).replace(tzinfo=UTC)
+            now_utc = datetime.now(UTC)
 
             data_cli = StockHistoricalDataClient(
                 os.environ["ALPACA_API_KEY"], os.environ["ALPACA_API_SECRET"],
@@ -189,7 +188,7 @@ def main() -> None:
         tk = e.get("ticker")
         if tk and tk in bars_by_ticker:
             dt_local = datetime.strptime(e["ts_local"], "%Y-%m-%d %H:%M:%S")
-            dt_utc = (dt_local - ET_OFFSET).replace(tzinfo=timezone.utc)
+            dt_utc = (dt_local - ET_OFFSET).replace(tzinfo=UTC)
             e["ts_utc"] = dt_utc.isoformat()
             e["price_at_skip"] = _price_at(tk, dt_utc, 0)
             e["price_15m"] = _price_at(tk, dt_utc, 15)

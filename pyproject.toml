@@ -45,11 +45,21 @@ link-mode = "copy"
 # Keep line length generous; agents/prompts get wide.
 line-length = 100
 target-version = "py312"
+# Diagnostic scripts intentionally monkey-patch httpx.Client.send BEFORE
+# importing modules that build clients at import time (litellm/alpaca).
+# The import order is load-bearing, not a style violation.
+extend-exclude = ["scripts/diag_*.py"]
 
 [tool.ruff.lint]
 # E/F = pyflakes+pycodestyle, I = isort (import sorting), UP = pyupgrade,
 # B = bugbear (likely-bug patterns). A pragmatic, widely-used default set.
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# One-off analysis / reporting scripts have wide print-tables; wrapping every
+# f-string just to satisfy the 100-col limit hurts readability. Application
+# code under src/ still gets the full rule set.
+"scripts/*.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
