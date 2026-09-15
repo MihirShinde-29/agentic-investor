@@ -2029,12 +2029,16 @@ def run_tick(
     )
 
 
-def _sleep_until(when_iso: str, *, now: datetime | None = None) -> None:
-    """Sleep until the given ISO timestamp (UTC)."""
+def _sleep_until(when: str | datetime | None, *, now: datetime | None = None) -> None:
+    """Sleep until the given target (ISO string or datetime, UTC).
+
+    Callers now pass a datetime after `_coerce_dt_utc` is applied upstream;
+    keep the string path so a legacy caller with a raw ISO string still works.
+    """
     now = now or datetime.now(UTC)
-    target = datetime.fromisoformat(when_iso.replace("Z", "+00:00"))
-    if target.tzinfo is None:
-        target = target.replace(tzinfo=UTC)
+    target = _coerce_dt_utc(when)
+    if target is None:
+        return
     delta = (target - now).total_seconds()
     # Cap at 15 min per call so SIGINT lands quickly, floor at 1s so we don't
     # tight-spin when the broker clock lags the wall clock by <1s at the bell

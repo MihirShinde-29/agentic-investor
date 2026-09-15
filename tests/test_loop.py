@@ -700,3 +700,34 @@ def test_pre_market_active_outside_window():
     now = datetime(2026, 9, 15, 10, 0, tzinfo=UTC)  # 3.5h before 13:30 UTC open
     clock = SimpleNamespace(is_open=False, next_open="2026-09-15T13:30:00+00:00")
     assert _pre_market_active(clock, cfg, now) is False
+
+
+def test_sleep_until_accepts_datetime_and_string():
+    """After the tzinfo fix, _sleep_until callers pass a datetime (from
+    _coerce_dt_utc), not a raw ISO string. Regression check: both paths work.
+    """
+    from agentic_investor.orchestrator.loop import _sleep_until
+    from unittest.mock import patch
+
+    now = datetime(2026, 9, 15, 20, 0, tzinfo=UTC)
+
+    with patch("agentic_investor.orchestrator.loop.time.sleep") as mock_sleep:
+        # datetime target — the actual path callers use post-tzinfo-fix
+        _sleep_until(datetime(2026, 9, 15, 20, 0, 5, tzinfo=UTC), now=now)
+        assert mock_sleep.called
+
+        mock_sleep.reset_mock()
+        # ISO string with Z suffix
+        _sleep_until("2026-09-15T20:00:05Z", now=now)
+        assert mock_sleep.called
+
+        mock_sleep.reset_mock()
+        # ISO string with explicit offset
+        _sleep_until("2026-09-15T20:00:05+00:00", now=now)
+        assert mock_sleep.called
+
+        mock_sleep.reset_mock()
+        # None target should be a no-op (Alpaca sometimes has no next_open on
+        # early Friday afternoon before weekend cron kicks in)
+        _sleep_until(None, now=now)
+        assert not mock_sleep.called
