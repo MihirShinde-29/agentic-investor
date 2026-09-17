@@ -39,26 +39,21 @@ logger = logging.getLogger(__name__)
 
 # --- memory recycling ------------------------------------------------------
 #
-# The LiteLLM + instructor + httpx stack we call every regen has a slow leak:
-# arm B (single-model gpt-4o-mini) reached 42 GB private commit over ~2h on
-# 2026-09-17; arm C (cross-family ensemble adding anthropic/claude-haiku-4-5)
-# hit 40 GB in ~10 min. RSS stays flat at ~1 GB while private/committed VM
-# balloons - the signature of an allocator that reserves address space but
-# never touches it enough to page in. gc.collect() between ensemble samples
-# did not help, so the retained references aren't garbage-collectable Python
-# objects; they live inside third-party C-extension / native code we can't
-# easily patch. Confirmed suspects on the shortlist: LiteLLM's event-loop-
-# keyed httpx client cache (LLMClientCache), Anthropic/OpenAI SDK httpx
-# clients each holding SSL contexts + connection pools, or tokenizer arenas.
+# Defense in depth against arena leaks in third-party native code. The
+# original 2026-09-17 incident was a corrupted chromadb HNSW index: on
+# query, the Rust binding read a bad header, tried to construct a reader
+# sized to the corrupt value, and reserved ~44 GB of address space before
+# throwing. That reservation was never released; the caught exception
+# just hid the damage. This process needed to die, but did not.
 #
-# Real fix needs a proper repro + bisect against the dependency tree; that's
-# a day of work. Meanwhile, this circuit breaker keeps the paper-loop alive
-# through a trading session by recycling the process when its private commit
-# exceeds a threshold. State (positions, last_rec_id, loop counters) is
-# already persisted to SQLite, so respawn resumes cleanly.
+# Watchdog reads its own PrivateUsage (Windows) / VmData (Linux) every
+# 5 s from a daemon thread and hard-exits via os._exit(42) once the
+# threshold trips. The paper-experiment supervisor's crash_only policy
+# respawns per --max-restarts; loop_state + positions are SQLite-persisted
+# so respawn resumes trading cleanly (~30 s of boot latency).
 #
-# Enabled via env var so tests + the interactive CLI don't recycle out from
-# under a developer. paper-experiment supervisor sets it for arm processes.
+# Enabled via env var so tests + the interactive CLI don't recycle out
+# from under a developer. paper-experiment supervisor sets 6144 MB.
 
 _MEM_RECYCLE_ENV = "AGENTIC_MEM_RECYCLE_MB"
 _MEM_RECYCLE_EXIT_CODE = 42
@@ -68,8 +63,8 @@ def _current_private_bytes() -> int:
     """Return this process's committed private VM in bytes; 0 on failure.
 
     Windows: PrivateUsage from GetProcessMemoryInfo (PROCESS_MEMORY_COUNTERS_EX).
-    That's the field Task Manager labels "Commit size" - what the LiteLLM
-    leak actually inflates, distinct from RSS/WorkingSet.
+    That's the field Task Manager labels "Commit size" - what a native-code
+    reservation leak inflates, distinct from RSS/WorkingSet.
 
     Linux: VmData from /proc/self/status (anonymous private data pages,
     the analogous field). macOS: unsupported, returns 0.
@@ -125,28 +120,6 @@ def _current_private_bytes() -> int:
         except OSError:
             pass
     return 0
-
-
-def _maybe_recycle_for_memory(state, session) -> None:
-    """Post-tick fallback check. Real enforcement runs on a background
-    thread (see start_memory_watchdog) because a single graph.invoke()
-    can leak >30 GB before returning - one anthropic streamed response
-    can allocate 40 GB of private commit in ~30 s of wall time on the
-    2026-09-17 leak. A per-tick check runs too rarely; the watchdog
-    thread polls every 5 s and can fire from inside an LLM call.
-    This function is left in place so the tick loop still gets a
-    check, in case the watchdog thread fails to start.
-    """
-    threshold_mb = _mem_recycle_threshold_mb()
-    if threshold_mb <= 0:
-        return
-    private_bytes = _current_private_bytes()
-    if private_bytes <= 0:
-        return  # platform unsupported or query failed
-    private_mb = private_bytes // (1024 * 1024)
-    if private_mb < threshold_mb:
-        return
-    _fire_memory_recycle(private_mb, threshold_mb, state, session, source="tick")
 
 
 def _mem_recycle_threshold_mb() -> int:
@@ -3007,8 +2980,6 @@ def run_loop(
                 logger.exception("tick failed: %s", e)
                 if session:
                     session.log("tick_error", {"error": str(e)})
-
-            _maybe_recycle_for_memory(state, session)
 
             if cfg.once:
                 return state
