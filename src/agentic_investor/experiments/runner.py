@@ -182,8 +182,10 @@ def _spawn_supervised(
     return spec
 
 
-# Priority 4: run one sync sweep before starting the daemon so chromadb
-# corruption is loud at launch instead of manifesting 30 min later.
+# Priority 4: run one sync sweep before starting the daemon so a
+# store-side corruption is loud at launch instead of manifesting 30
+# min later. Historical context: pre-#146 this guarded chromadb HNSW
+# corruption; post-migration it guards the sqlite-vec rec store.
 def _healthcheck_outcome_sweeper(timeout_sec: int = 60) -> bool:
     """Return True iff one sync memory-outcomes call completes cleanly."""
     print("[preflight] running outcome-sweeper healthcheck (sync)...")

@@ -1,9 +1,10 @@
-"""Standalone chromadb outcome-sweeper subprocess for paper-experiment.
+"""Standalone outcome-sweeper subprocess for paper-experiment.
 
-Moved out of the runner's process so a Rust-level crash inside chromadb
-kills only the sweeper subprocess instead of the supervisor + all its
-orphaned arms. Runner spawns this the same way it spawns news-bus /
-price-bus and monitors its exit alongside the others.
+Refreshes multi-horizon P/L on every rec in the sqlite-vec rec store
+(post-#146 - was chromadb pre-migration). Isolated as a subprocess so
+a store crash kills only the sweeper rather than the supervisor + all
+its orphaned arms. Runner spawns this the same way it spawns news-bus
+/ price-bus and monitors its exit alongside the others.
 """
 
 from __future__ import annotations

@@ -1464,7 +1464,7 @@ def main() -> None:
 
     # Paper trading (M7)
     sub.add_parser("healthcheck",
-                   help="verify Alpaca/LLM/yfinance/finBERT/Chroma reachable")
+                   help="verify Alpaca/LLM/yfinance/finBERT/rec-store reachable")
     sub.add_parser("paper-status",
                    help="show Alpaca paper account balance + open positions")
 
@@ -1718,15 +1718,16 @@ def main() -> None:
 
     pmo = sub.add_parser("memory-outcomes",
                          help="compute multi-horizon P/L outcomes for every "
-                              "historical rec in Chroma and merge into metadata")
+                              "historical rec in the sqlite-vec rec store "
+                              "and UPDATE outcome_pl_pct_* columns")
     pmo.add_argument("--db-url", default=None,
                      help="sqlite URL for snapshot+bar lookups (default: settings.database_url)")
 
     ppf = sub.add_parser("paper-preflight",
                          help="run pre-launch health checks for an "
-                              "experiment: alpaca accounts, chroma seed, "
-                              "outcome sweep, port, arm DBs. exit code "
-                              "non-zero if anything fails.")
+                              "experiment: alpaca accounts, rec-store "
+                              "seed, outcome sweep, port, arm DBs. "
+                              "exit code non-zero if anything fails.")
     ppf.add_argument("experiment", help="experiment name or path")
     ppf.add_argument("--dashboard-port", type=int, default=8000,
                      help="port the dashboard will bind to (default 8000)")
