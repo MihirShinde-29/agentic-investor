@@ -155,7 +155,16 @@ def create_app(*, eager_load: bool = True) -> FastAPI:
             )
         if not req.headlines:
             return FinbertResponse(results=[])
-        raw: list[Any] = pipe(req.headlines, truncation=True, max_length=128)
+        # padding='max_length' keeps tensor shape stable at (batch, 128)
+        # so PyTorch's caching allocator arena doesn't grow with each
+        # longer-than-seen input. See finbert_prefilter._pipeline_scores
+        # docstring for the measurement + task #148 for context.
+        raw: list[Any] = pipe(
+            req.headlines,
+            truncation=True,
+            padding="max_length",
+            max_length=128,
+        )
         # transformers.pipeline with top_k=None can return list-per-input
         # OR flat list depending on version; normalize.
         results: list[list[FinbertEntry]] = []

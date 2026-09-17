@@ -78,6 +78,14 @@ def _pipeline_scores(headlines: list[str]) -> list | None:
     is set; fall through to local pipeline otherwise. Returns the raw
     list-per-headline of {label, score} dicts (or list objects for the
     local path) that both call sites can iterate identically.
+
+    Uses padding='max_length' so tensor shapes are always (batch, 128)
+    regardless of input length. Without this, PyTorch's caching
+    allocator grows its arena to accommodate whatever the longest input
+    was (headlines vary from 10 to 500 chars in real traffic) and never
+    shrinks - measured 61 KB/call growth on 2026-09-17. With padding
+    the arena stabilizes after the first batch: verified flat in the
+    hunt_newspath_leak.py bisect.
     """
     from agentic_investor.tools import ml_client
 
@@ -88,7 +96,12 @@ def _pipeline_scores(headlines: list[str]) -> list | None:
     if pipe is None:
         return None
     try:
-        return pipe(headlines, truncation=True, max_length=128)  # type: ignore[misc]
+        return pipe(  # type: ignore[misc]
+            headlines,
+            truncation=True,
+            padding="max_length",
+            max_length=128,
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning("finBERT scoring failed: %s", e)
         return None

@@ -18,7 +18,7 @@ class _StubPipeline:
         # mapping: substring -> "positive" | "negative" | "neutral"
         self.mapping = mapping
 
-    def __call__(self, headlines, truncation=True, max_length=128):
+    def __call__(self, headlines, truncation=True, padding=None, max_length=128):
         out = []
         for h in headlines:
             label = "neutral"

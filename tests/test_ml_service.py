@@ -19,7 +19,7 @@ class _FakePipeline:
     one list per input, each with the three finbert classes.
     """
 
-    def __call__(self, headlines, *, truncation=True, max_length=128):
+    def __call__(self, headlines, *, truncation=True, padding=None, max_length=128):
         return [
             [
                 {"label": "positive", "score": 0.6},
