@@ -169,13 +169,36 @@ class AlpacaPaperBroker:
         )
 
     def get_clock(self) -> PaperClock:
+        # Deterministic replay hook (task #153): if replay is active
+        # and a recorded clock is next in the FIFO queue, serve that
+        # instead of hitting Alpaca. Empty queue -> fall through to
+        # live so a replay can run past the end of its recording.
+        from agentic_investor.orchestrator.recorder import (
+            next_from_source,
+            record_source,
+        )
+        replayed = next_from_source("clock")
+        if replayed is not None:
+            return PaperClock(
+                now=str(replayed.get("now", "")),
+                is_open=bool(replayed.get("is_open", False)),
+                next_open=str(replayed.get("next_open", "")),
+                next_close=str(replayed.get("next_close", "")),
+            )
         c = self._client.get_clock()
-        return PaperClock(
+        clock = PaperClock(
             now=str(c.timestamp),
             is_open=bool(c.is_open),
             next_open=str(c.next_open),
             next_close=str(c.next_close),
         )
+        record_source("clock", {
+            "now": clock.now,
+            "is_open": clock.is_open,
+            "next_open": clock.next_open,
+            "next_close": clock.next_close,
+        })
+        return clock
 
     def get_positions(self) -> list[PaperPosition]:
         raw = self._client.get_all_positions()

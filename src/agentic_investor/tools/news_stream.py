@@ -256,6 +256,26 @@ class NewsStreamer:
                 source=source,
             )
             self.event_queue.put(evt)
+            # Deterministic-replay capture (task #153): record every
+            # event that reaches the arm's decision pipeline. Replay-
+            # side news injection (feeding recorded events back into
+            # `event_queue` when AGENTIC_REPLAY_FROM is set) is a
+            # follow-up; recording it now unblocks that work.
+            try:
+                from agentic_investor.orchestrator.recorder import (
+                    record_source,
+                )
+                record_source("news", {
+                    "ticker": evt.ticker,
+                    "headline": evt.headline,
+                    "summary": evt.summary,
+                    "published_at": evt.published_at,
+                    "received_at": evt.received_at,
+                    "url": evt.url,
+                    "source": evt.source,
+                })
+            except Exception:  # noqa: BLE001 - telemetry never blocks
+                pass
 
     def _prune_seen(self, now_mono: float) -> None:
         """Drop dedup entries older than the TTL. Called opportunistically."""

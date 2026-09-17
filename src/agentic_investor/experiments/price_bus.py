@@ -378,6 +378,20 @@ class PriceBusClient:
         ticker: str,
         max_age_sec: float = _TICK_MAX_AGE_SEC,
     ) -> float | None:
+        # Deterministic replay hook (task #153): find the next
+        # recorded price row for THIS ticker, leaving rows for other
+        # tickers in place for their own future callers. next_from_source
+        # with a match filter does the ordered scan for us.
+        from agentic_investor.orchestrator.recorder import (
+            next_from_source,
+            record_source,
+        )
+        replayed = next_from_source(
+            "price", match={"ticker": ticker.upper()},
+        )
+        if replayed is not None:
+            price = replayed.get("price")
+            return float(price) if price is not None else None
         try:
             with sqlite3.connect(str(self._path)) as conn:
                 row = conn.execute(
@@ -387,18 +401,24 @@ class PriceBusClient:
                 ).fetchone()
         except sqlite3.OperationalError:
             return None
+        result: float | None
         if not row:
-            return None
-        price, ts_recv = row
-        try:
-            age = (
-                datetime.now(UTC) - datetime.fromisoformat(ts_recv)
-            ).total_seconds()
-        except Exception:  # noqa: BLE001
-            return None
-        if age > max_age_sec:
-            return None
-        return float(price)
+            result = None
+        else:
+            price, ts_recv = row
+            try:
+                age = (
+                    datetime.now(UTC) - datetime.fromisoformat(ts_recv)
+                ).total_seconds()
+            except Exception:  # noqa: BLE001
+                result = None
+            else:
+                result = float(price) if age <= max_age_sec else None
+        record_source("price", {
+            "ticker": ticker.upper(),
+            "price": result,
+        })
+        return result
 
     def list_my_tickers(self) -> set[str]:
         try:

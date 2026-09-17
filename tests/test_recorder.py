@@ -302,3 +302,130 @@ def test_replay_and_record_chain_stamps_served_from_replay(tmp_path, monkeypatch
     ]
     assert len(rows) == 1
     assert rows[0]["served_from_replay"] is True
+
+
+# --- source recording + FIFO replay (clock/price/news) -------------------
+
+def test_record_source_appends_row(tmp_path, monkeypatch):
+    from agentic_investor.orchestrator.recorder import record_source
+    monkeypatch.setenv("AGENTIC_RECORD_TO", str(tmp_path))
+    record_source("clock", {
+        "now": "2026-09-17T15:00:00+00:00",
+        "is_open": True,
+        "next_open": "2026-09-18T13:30:00+00:00",
+        "next_close": "2026-09-17T20:00:00+00:00",
+    })
+    rows = [json.loads(ln) for ln in
+            (tmp_path / "recording.jsonl").read_text(
+                encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "clock"
+    assert rows[0]["is_open"] is True
+    assert rows[0]["seq"] == 1
+
+
+def test_record_source_noop_when_env_unset(tmp_path):
+    """No AGENTIC_RECORD_TO -> no file written."""
+    from agentic_investor.orchestrator.recorder import record_source
+    record_source("clock", {"now": "2026-01-01T00:00:00Z"})
+    assert not (tmp_path / "recording.jsonl").exists()
+
+
+def test_next_from_source_fifo_pop(tmp_path, monkeypatch):
+    from agentic_investor.orchestrator.recorder import next_from_source
+    _seed_recording(tmp_path, [
+        {"kind": "clock", "seq": 1, "now": "T1", "is_open": True},
+        {"kind": "clock", "seq": 2, "now": "T2", "is_open": True},
+        {"kind": "clock", "seq": 3, "now": "T3", "is_open": False},
+    ])
+    monkeypatch.setenv("AGENTIC_REPLAY_FROM", str(tmp_path))
+    a = next_from_source("clock")
+    b = next_from_source("clock")
+    c = next_from_source("clock")
+    d = next_from_source("clock")
+    assert a["now"] == "T1"
+    assert b["now"] == "T2"
+    assert c["now"] == "T3"
+    assert d is None  # queue exhausted -> caller falls through to live
+
+
+def test_next_from_source_returns_none_when_env_unset():
+    """No AGENTIC_REPLAY_FROM -> always None so caller uses live source."""
+    from agentic_investor.orchestrator.recorder import next_from_source
+    assert next_from_source("clock") is None
+
+
+def test_next_from_source_per_kind_queues_dont_starve_each_other(
+    tmp_path, monkeypatch,
+):
+    from agentic_investor.orchestrator.recorder import next_from_source
+    _seed_recording(tmp_path, [
+        {"kind": "clock", "seq": 1, "now": "T1"},
+        {"kind": "price", "seq": 2, "ticker": "AAPL", "price": 200.0},
+        {"kind": "clock", "seq": 3, "now": "T2"},
+        {"kind": "price", "seq": 4, "ticker": "MSFT", "price": 400.0},
+    ])
+    monkeypatch.setenv("AGENTIC_REPLAY_FROM", str(tmp_path))
+    # Pop clocks in order; price queue untouched.
+    assert next_from_source("clock")["now"] == "T1"
+    assert next_from_source("clock")["now"] == "T2"
+    assert next_from_source("clock") is None
+    # Prices still available in their own order.
+    assert next_from_source("price")["ticker"] == "AAPL"
+    assert next_from_source("price")["ticker"] == "MSFT"
+
+
+def test_next_from_source_match_filter_preserves_other_rows(
+    tmp_path, monkeypatch,
+):
+    """Match-based lookup lets arm A pop AAPL-price without consuming
+    the MSFT-price rows arm B still needs. Non-matches stay in place.
+    """
+    from agentic_investor.orchestrator.recorder import next_from_source
+    _seed_recording(tmp_path, [
+        {"kind": "price", "seq": 1, "ticker": "AAPL", "price": 200.0},
+        {"kind": "price", "seq": 2, "ticker": "MSFT", "price": 400.0},
+        {"kind": "price", "seq": 3, "ticker": "AAPL", "price": 201.0},
+    ])
+    monkeypatch.setenv("AGENTIC_REPLAY_FROM", str(tmp_path))
+    # First AAPL request pops seq 1
+    a1 = next_from_source("price", match={"ticker": "AAPL"})
+    assert a1["price"] == 200.0
+    # MSFT request pops seq 2 (still available; not consumed by prior AAPL)
+    m1 = next_from_source("price", match={"ticker": "MSFT"})
+    assert m1["price"] == 400.0
+    # Second AAPL request pops seq 3
+    a2 = next_from_source("price", match={"ticker": "AAPL"})
+    assert a2["price"] == 201.0
+    # All exhausted
+    assert next_from_source("price", match={"ticker": "AAPL"}) is None
+    assert next_from_source("price", match={"ticker": "MSFT"}) is None
+
+
+def test_iter_recorded_news_yields_only_news_rows(tmp_path, monkeypatch):
+    """iter_recorded_news is separate from next_from_source's FIFO -
+    it doesn't consume the queue, so replay drivers can preview or
+    inject on their own schedule.
+    """
+    from agentic_investor.orchestrator.recorder import (
+        iter_recorded_news,
+        next_from_source,
+    )
+    _seed_recording(tmp_path, [
+        {"kind": "clock", "seq": 1, "now": "T1"},
+        {"kind": "news", "seq": 2, "ticker": "AAPL", "headline": "h1"},
+        {"kind": "price", "seq": 3, "ticker": "AAPL", "price": 200.0},
+        {"kind": "news", "seq": 4, "ticker": "MSFT", "headline": "h2"},
+    ])
+    monkeypatch.setenv("AGENTIC_REPLAY_FROM", str(tmp_path))
+    news_rows = list(iter_recorded_news())
+    assert [r["headline"] for r in news_rows] == ["h1", "h2"]
+    # And the FIFO queue for news still has both rows available
+    # (iter_recorded_news is read-only, doesn't consume).
+    assert next_from_source("news")["headline"] == "h1"
+    assert next_from_source("news")["headline"] == "h2"
+
+
+def test_iter_recorded_news_empty_when_env_unset():
+    from agentic_investor.orchestrator.recorder import iter_recorded_news
+    assert list(iter_recorded_news()) == []

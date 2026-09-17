@@ -1,35 +1,43 @@
-"""LLM call recorder + replayer for deterministic session rerun.
+"""Recorder + replayer for deterministic paper-session rerun.
 
-Scope note: this module captures the *LLM* input/output side of a paper
-session. Full deterministic replay (news + price + clock capture too)
-is documented as follow-up in the task. LLM-only is the highest-value
-slice because:
-  1. LLM calls are what cost money and can vary run-to-run
-  2. A/B testing prompt changes against a fixed session is the most
-     common "let me rerun this" use case
-  3. The other inputs (news events, price ticks, market clock) are
-     already logged in session.jsonl for post-hoc reconstruction
+Captures FOUR kinds of session inputs so a full replay is bit-exact
+against the recorded market conditions:
+
+  llm    - one row per structured_complete call (model + prompt hash +
+           response JSON). Retrieval by prompt hash (random-access).
+  clock  - one row per PaperBroker.get_clock() (is_open + next_open +
+           next_close). Retrieval by FIFO order.
+  price  - one row per PriceBusClient.get_latest(ticker) (ticker +
+           price). Retrieval by FIFO order per-ticker (see keying note).
+  news   - one row per NewsStreamer callback firing (ticker + headline
+           + summary + published_at). Retrieval by FIFO order.
+
+All four kinds share the same recording.jsonl file, distinguished by
+`kind`. The LLM slice landed in task #151 MVP; the other three landed
+in task #153 as the "full replay" follow-up.
 
 Design:
 - Recording is a JSONL file (`recording.jsonl`) next to session.jsonl.
-  Each line is one LLM call: model, prompt hash, response JSON.
 - Two orthogonal env-var switches (both can be set at once):
-    AGENTIC_REPLAY_FROM=<dir>   read + serve cached responses from
+    AGENTIC_REPLAY_FROM=<dir>   read from <dir>/recording.jsonl
+    AGENTIC_RECORD_TO=<dir>     append every capture to
                                 <dir>/recording.jsonl
-    AGENTIC_RECORD_TO=<dir>     append every completed call to
-                                <dir>/recording.jsonl
-- Miss policy (only relevant when RECORD_TO isn't set to catch new
+- LLM miss policy (only relevant when RECORD_TO isn't set to catch new
   calls; when RECORD_TO is set, misses fall through to the live LLM
   and get captured):
-    AGENTIC_REPLAY_MISS=strict  (default) raise ReplayMiss on any
-                                hash miss - guarantees deterministic
-                                replay, catches accidental drift
-    AGENTIC_REPLAY_MISS=live    fall through to the real LLM on miss.
-                                Combined with RECORD_TO, this is the
-                                "let this prompt change replay against
-                                the same market state" A/B mode.
+    AGENTIC_REPLAY_MISS=strict  (default) raise ReplayMiss on hash miss
+    AGENTIC_REPLAY_MISS=live    fall through to the real LLM on miss
 
-Prompt hash key: sha256 over the normalized JSON of
+Source-kind (clock/price/news) semantics:
+- FIFO-ordered replay: nth call returns nth recorded row of that kind.
+- Empty queue -> return None -> caller falls through to live source.
+  Rationale: hitting end-of-recording is a signal to switch back to
+  live, not a hard error. Strict mode isn't wired for source kinds
+  because the fallthrough is usually what you want.
+- Per-kind queues so a hot path (price) doesn't starve a cold one
+  (clock).
+
+Prompt hash key (LLM only): sha256 over the normalized JSON of
 (model, response_model.__name__, messages). Deep-normalization is
 important: LiteLLM's OpenAI adapter mutates messages in place
 (cache_control markers), so we hash BEFORE the call not after.
@@ -42,6 +50,8 @@ import json
 import logging
 import os
 import threading
+from collections import deque
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -250,3 +260,169 @@ def reset_for_tests() -> None:
         _replay_source = None
     with _record_lock:
         _record_seq = 0
+    _reset_source_queues()
+
+
+# --- source (clock/price/news) side ---------------------------------------
+#
+# LLM records are keyed by prompt hash (random-access lookup). Source
+# records are keyed by (kind, arrival-order) - the nth invocation of
+# get_clock() replays the nth recorded clock row. Separate FIFO queue
+# per kind so a hot source (price) doesn't starve a cold one (clock).
+
+_source_queues_lock = threading.Lock()
+_source_queues: dict[str, deque[dict]] | None = None
+_source_queues_from: Path | None = None
+
+
+def _load_source_queues() -> dict[str, deque[dict]]:
+    """Read every non-LLM row from the current AGENTIC_REPLAY_FROM
+    recording and bucket into per-kind FIFO queues. Loaded once per
+    replay source; re-reads are no-ops.
+    """
+    global _source_queues, _source_queues_from
+    src = os.environ.get(_ENV_REPLAY_FROM)
+    if not src:
+        return {}
+    with _source_queues_lock:
+        if _source_queues is not None and _source_queues_from == Path(src):
+            return _source_queues
+        queues: dict[str, deque[dict]] = {}
+        rec_path = _recording_path(src)
+        if rec_path.exists():
+            n_total = 0
+            with rec_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    kind = row.get("kind")
+                    if kind in (None, "llm"):
+                        # LLM has its own hash-keyed cache path.
+                        continue
+                    queues.setdefault(kind, deque()).append(row)
+                    n_total += 1
+            logger.info(
+                "loaded %d source events across %d kinds from %s",
+                n_total, len(queues), rec_path,
+            )
+        _source_queues = queues
+        _source_queues_from = Path(src)
+        return queues
+
+
+def _reset_source_queues() -> None:
+    global _source_queues, _source_queues_from
+    with _source_queues_lock:
+        _source_queues = None
+        _source_queues_from = None
+
+
+def next_from_source(
+    kind: str,
+    *,
+    match: dict | None = None,
+) -> dict | None:
+    """Return the next recorded row for this kind, or None if the
+    queue is exhausted or the recording had no rows of this kind.
+
+    `match` (optional): key/value pairs the row must equal. Enables
+    per-ticker price retrieval when arms poll in a different order
+    than the recording produced. Non-matching rows are LEFT IN PLACE
+    so a later request with a different match can still find them.
+
+    Caller falls through to the live source on None. This is a
+    'graceful trailoff' pattern: a replay can safely run past the
+    end of a recording by resuming live capture.
+    """
+    src = os.environ.get(_ENV_REPLAY_FROM)
+    if not src:
+        return None
+    queues = _load_source_queues()
+    q = queues.get(kind)
+    if not q:
+        return None
+    with _source_queues_lock:
+        if match is None:
+            try:
+                return q.popleft()
+            except IndexError:
+                return None
+        # Linear scan for the first row that matches every key/value in
+        # `match`. On hit, remove that row from the deque (preserves
+        # order for the remaining rows) and return it. O(n) per call
+        # in the worst case but acceptable at our scale (recordings
+        # rarely exceed ~10k rows).
+        for i, row in enumerate(q):
+            if all(row.get(k) == v for k, v in match.items()):
+                del q[i]
+                return row
+        return None
+
+
+def iter_recorded_news() -> Iterator[dict]:
+    """Yield every recorded 'news' row in seq order from the current
+    AGENTIC_REPLAY_FROM recording, WITHOUT consuming the FIFO queue
+    that `next_from_source('news')` walks.
+
+    Used by news-replay drivers that want to inject recorded events
+    into the arm's news queue at startup (see the follow-up to
+    task #153). Iterator-style so a caller can gate on published_at
+    for time-based playback rather than dumping the whole log at once.
+    """
+    src = os.environ.get(_ENV_REPLAY_FROM)
+    if not src:
+        return iter(())
+    rec_path = _recording_path(src)
+    if not rec_path.exists():
+        return iter(())
+
+    def _gen() -> Iterator[dict]:
+        with rec_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("kind") == "news":
+                    yield row
+
+    return _gen()
+
+
+def record_source(kind: str, data: dict) -> None:
+    """Append a source-event row to AGENTIC_RECORD_TO/recording.jsonl.
+
+    `data` must be JSON-serializable (or fall through to str via
+    json.dumps default). `kind` should be one of the well-known
+    strings ('clock', 'price', 'news') so replay's FIFO lookup finds
+    it, but the module doesn't enforce this - new kinds can be added
+    at their capture sites.
+    """
+    dest_dir = os.environ.get(_ENV_RECORD_TO)
+    if not dest_dir:
+        return
+    dest = _recording_path(dest_dir)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    global _record_seq
+    try:
+        row = {
+            "kind": kind,
+            "ts": datetime.now(UTC).isoformat(),
+            "seq": None,  # filled inside the lock
+            **data,
+        }
+        with _record_lock:
+            _record_seq += 1
+            row["seq"] = _record_seq
+            with dest.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, default=str) + "\n")
+    except Exception as e:  # noqa: BLE001 - telemetry never blocks the loop
+        logger.debug("record_source(%s) failed: %s", kind, e)
