@@ -1707,6 +1707,15 @@ def main() -> None:
                      help="markdown = pipe-delimited table (default); "
                           "table = align-in-columns plain text")
 
+    prp = sub.add_parser("paper-replay",
+                         help="inspect an LLM-recording session (task "
+                              "#151 MVP). Use env vars AGENTIC_REPLAY_FROM "
+                              "+ AGENTIC_RECORD_TO on `paper-loop` for "
+                              "the actual replay run.")
+    prp.add_argument("session_dir",
+                     help="path to a session directory containing "
+                          "recording.jsonl")
+
     pmo = sub.add_parser("memory-outcomes",
                          help="compute multi-horizon P/L outcomes for every "
                               "historical rec in Chroma and merge into metadata")
@@ -1891,6 +1900,66 @@ def main() -> None:
                     f"default={default}"
                 )
                 print(f"    {f.help}")
+        return 0
+    elif args.cmd == "paper-replay":
+        # MVP: diagnostic view over a recording. The actual replay is
+        # invoked via env vars (AGENTIC_REPLAY_FROM + AGENTIC_REPLAY_MISS,
+        # optionally AGENTIC_RECORD_TO) on any command that goes through
+        # structured_complete - typically `paper-loop`. See
+        # docs/INTERVIEW_NOTES.md B14 for the replay usage patterns.
+        import json
+        import sys
+        from pathlib import Path
+        session_dir = Path(args.session_dir)
+        recording = session_dir / "recording.jsonl"
+        if not recording.exists():
+            print(f"error: no recording.jsonl in {session_dir}",
+                  file=sys.stderr)
+            return 2
+        n = 0
+        models: dict[str, int] = {}
+        response_models: dict[str, int] = {}
+        served_from_replay = 0
+        first_ts = None
+        last_ts = None
+        with recording.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("kind") != "llm":
+                    continue
+                n += 1
+                m = row.get("model", "?")
+                models[m] = models.get(m, 0) + 1
+                rm = row.get("response_model", "?")
+                response_models[rm] = response_models.get(rm, 0) + 1
+                if row.get("served_from_replay"):
+                    served_from_replay += 1
+                ts = row.get("ts")
+                if ts:
+                    first_ts = ts if first_ts is None else min(first_ts, ts)
+                    last_ts = ts if last_ts is None else max(last_ts, ts)
+        print(f"recording: {recording}")
+        print(f"  total LLM calls: {n}")
+        if first_ts and last_ts:
+            print(f"  window: {first_ts}  ->  {last_ts}")
+        print(f"  served_from_replay (chained): {served_from_replay}")
+        print("  by model:")
+        for m in sorted(models, key=lambda k: -models[k]):
+            print(f"    {models[m]:>6}  {m}")
+        print("  by response_model:")
+        for rm in sorted(response_models, key=lambda k: -response_models[k]):
+            print(f"    {response_models[rm]:>6}  {rm}")
+        print()
+        print("replay usage:")
+        print(f"  AGENTIC_REPLAY_FROM={session_dir} \\")
+        print("  AGENTIC_REPLAY_MISS=strict \\")
+        print("  agentic-investor paper-loop --once ...")
         return 0
     elif args.cmd == "paper-dashboard":
         from agentic_investor.dashboard.server import serve_forever

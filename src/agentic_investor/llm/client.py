@@ -307,9 +307,39 @@ def structured_complete[T: BaseModel](
     # the ensemble path where the same list is sent to gpt-4o-mini then
     # anthropic/claude-haiku-4-5 in the same tick).
     messages = copy.deepcopy(messages)
+    effective_model = model or s.llm_model
+
+    # Deterministic-replay hook (task #151): if AGENTIC_REPLAY_FROM is
+    # set, try to serve a cached response for this exact prompt hash.
+    # `try_replay` raises ReplayMiss in strict mode (the default) so
+    # a drift caught here is loud rather than silent.
+    served_from_replay = False
+    from agentic_investor.orchestrator.recorder import (
+        is_recording,
+        record_call,
+        try_replay,
+    )
     try:
-        return _client.chat.completions.create(
-            model=model or s.llm_model,
+        replay_hit, replay_obj = try_replay(
+            effective_model, response_model.__name__, messages, response_model,
+        )
+    except Exception:  # pragma: no cover - defensive: never let replay
+                       # infrastructure block a live call
+        replay_hit, replay_obj = (False, None)
+    if replay_hit:
+        served_from_replay = True
+        # Still record it if AGENTIC_RECORD_TO is set - lets a chained
+        # replay-of-replay accumulate history across passes.
+        if is_recording():
+            record_call(
+                effective_model, response_model.__name__, messages,
+                replay_obj, served_from_replay=True,
+            )
+        return replay_obj
+
+    try:
+        result = _client.chat.completions.create(
+            model=effective_model,
             messages=messages,
             response_model=response_model,
             temperature=s.llm_temperature if temperature is None else temperature,
@@ -319,6 +349,13 @@ def structured_complete[T: BaseModel](
     except InstructorRetryException as exc:
         _log_instructor_failure(exc, response_model, messages)
         raise
+
+    if is_recording():
+        record_call(
+            effective_model, response_model.__name__, messages,
+            result, served_from_replay=served_from_replay,
+        )
+    return result
 
 
 def _log_instructor_failure(

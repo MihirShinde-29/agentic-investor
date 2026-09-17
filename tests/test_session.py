@@ -155,17 +155,17 @@ def test_iter_events_filters_by_event_type(tmp_path):
 
 
 def test_iter_events_filters_by_since_ts(tmp_path):
-    rec = SessionRecorder.start(base_dir=str(tmp_path))
-    rec.log("first", {})
-    # Bump timestamp cutoff to now-ish so both `session_start` and `first`
-    # get filtered out.
-    cutoff = datetime.now(UTC).isoformat()
-    # Sleep so the next log's ts is definitely after cutoff.
-    import time
-    time.sleep(0.01)
-    rec.log("second", {})
-    rec.log("third", {})
-    rows = list(iter_events(rec.out_dir, since_ts=cutoff))
+    """since_ts uses lexicographic ISO-8601 comparison. Rather than
+    race the wall clock, seed synthetic rows directly so the cutoff
+    boundary is unambiguous.
+    """
+    (tmp_path / "session.jsonl").write_text(
+        '{"ts": "2026-01-01T00:00:00+00:00", "event": "first"}\n'
+        '{"ts": "2026-06-15T12:00:00+00:00", "event": "second"}\n'
+        '{"ts": "2026-12-31T23:59:59+00:00", "event": "third"}\n',
+        encoding="utf-8",
+    )
+    rows = list(iter_events(tmp_path, since_ts="2026-06-01T00:00:00+00:00"))
     events = [r["event"] for r in rows]
     assert "first" not in events
     assert events == ["second", "third"]
