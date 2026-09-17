@@ -1,9 +1,12 @@
-"""Chroma index of Recommendations for retrieval-augmented allocation (M17).
+"""sqlite-vec index of Recommendations for retrieval-augmented allocation (M17).
 
-One collection `recommendations`, shared across arms. Each doc carries a
-`source` tag (`"historical"` for the seed corpus, `f"arm_{id}"` for live
-runs) so retrieval can filter with `where={"source": {"$in": [...]}}` to
-keep A/B independence.
+One shared store (`settings.rec_store_path`, default `./.rec_store.db`).
+Each doc carries a `source` tag (`"historical"` for the seed corpus,
+`f"arm_{id}"` for live arm runs) so retrieval can filter with
+`WHERE source IN (...)` and keep A/B independence.
+
+Replaces the chromadb version - see `store.py` module docstring and
+docs/INTERVIEW_NOTES.md B14 for why we swapped.
 """
 
 from __future__ import annotations
@@ -11,29 +14,31 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections.abc import Callable, Iterable
+import struct
+from collections.abc import Callable
 from pathlib import Path
 
+from agentic_investor.memory.store import EMBED_DIM, get_connection
 from agentic_investor.orchestrator.state import Recommendation
 
 logger = logging.getLogger(__name__)
-
-_COLLECTION_NAME = "recommendations"
-
-
-def _default_collection():
-    from agentic_investor.tools.news import _get_client
-
-    return _get_client().get_or_create_collection(
-        name=_COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
-    )
 
 
 def _default_embed(texts: list[str]) -> list[list[float]]:
     from agentic_investor.tools.news import _embed_text
 
     return _embed_text(texts)
+
+
+def _default_connection() -> sqlite3.Connection:
+    return get_connection()
+
+
+def _pack_vector(vec: list[float]) -> bytes:
+    """Encode one float32 vector as the byte string vec0 wants."""
+    if len(vec) != EMBED_DIM:
+        raise ValueError(f"embedding dim {len(vec)} != expected {EMBED_DIM}")
+    return struct.pack(f"{EMBED_DIM}f", *vec)
 
 
 def embed_text_for_rec(rec: Recommendation) -> str:
@@ -63,7 +68,7 @@ def metadata_for_rec(
     created_at: str,
     source: str,
 ) -> dict:
-    """Scalar-only metadata for Chroma (lists get comma-joined)."""
+    """Row payload for the `recs` table (native SQL types)."""
     positions = rec.allocation.positions
     tickers = sorted({p.ticker.upper() for p in positions})
     avg_conf = (
@@ -82,8 +87,55 @@ def metadata_for_rec(
     }
 
 
-def _doc_id(source: str, rec_id: int) -> str:
-    return f"rec:{source}:{rec_id}"
+def _upsert_row(
+    conn: sqlite3.Connection,
+    meta: dict,
+    text: str,
+    embedding: list[float],
+    *,
+    db_url: str | None = None,
+) -> None:
+    """Write both tables in one transaction; on conflict, replace.
+
+    vec0's INSERT OR REPLACE requires deleting the old vec row first when
+    the rowid already exists (its virtual-table implementation doesn't
+    honor sqlite's normal REPLACE semantics for the vector column).
+    """
+    rec_id = int(meta["rec_id"])
+    packed = _pack_vector(embedding)
+    with conn:  # BEGIN/COMMIT
+        conn.execute(
+            """
+            INSERT INTO recs (
+                rec_id, source, created_at, tickers, text,
+                n_positions, avg_confidence, cash_pct, risk, db_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(rec_id) DO UPDATE SET
+                source = excluded.source,
+                created_at = excluded.created_at,
+                tickers = excluded.tickers,
+                text = excluded.text,
+                n_positions = excluded.n_positions,
+                avg_confidence = excluded.avg_confidence,
+                cash_pct = excluded.cash_pct,
+                risk = excluded.risk,
+                db_url = excluded.db_url
+            """,
+            (
+                rec_id, meta["source"], meta["created_at"],
+                meta.get("tickers", ""), text,
+                meta.get("n_positions", 0),
+                meta.get("avg_confidence", 0.0),
+                meta.get("cash_pct", 0.0),
+                meta.get("risk", "moderate"),
+                db_url,
+            ),
+        )
+        conn.execute("DELETE FROM vec_recs WHERE rowid = ?", (rec_id,))
+        conn.execute(
+            "INSERT INTO vec_recs (rowid, embedding) VALUES (?, ?)",
+            (rec_id, packed),
+        )
 
 
 def upsert_rec(
@@ -92,20 +144,17 @@ def upsert_rec(
     created_at: str,
     source: str,
     *,
-    collection=None,
+    conn: sqlite3.Connection | None = None,
     embedder: Callable[[list[str]], list[list[float]]] = _default_embed,
 ) -> bool:
     """Index a single rec. Returns True if written, False if skipped (empty text)."""
     text = embed_text_for_rec(rec)
     if not text:
         return False
-    coll = collection if collection is not None else _default_collection()
-    coll.upsert(
-        ids=[_doc_id(source, rec_id)],
-        embeddings=embedder([text]),
-        documents=[text],
-        metadatas=[metadata_for_rec(rec, rec_id, created_at, source)],
-    )
+    connection = conn if conn is not None else _default_connection()
+    embedding = embedder([text])[0]
+    meta = metadata_for_rec(rec, rec_id, created_at, source)
+    _upsert_row(connection, meta, text, embedding)
     return True
 
 
@@ -155,16 +204,16 @@ def _meta_from_payload(payload: dict, rec_id: int, created_at: str, source: str)
 def index_historical(
     db_url: str | None = None,
     *,
-    collection=None,
+    conn: sqlite3.Connection | None = None,
     embedder: Callable[[list[str]], list[list[float]]] = _default_embed,
     batch_size: int = 32,
 ) -> int:
     """Bulk-index every rec from the given DB (default: settings.database_url).
 
     Reads raw JSON blobs so schema drift in old recs doesn't block the index.
-    Idempotent via `_doc_id`; re-running overwrites in place.
+    Idempotent: re-running overwrites in place because rec_id is the primary key.
     """
-    coll = collection if collection is not None else _default_collection()
+    connection = conn if conn is not None else _default_connection()
     rows = _load_rec_blobs(db_url)
     logger.info(
         "indexing %d recommendations from %s",
@@ -172,7 +221,16 @@ def index_historical(
     )
     n_indexed = 0
     n_skipped = 0
-    batch: list[tuple[str, str, dict]] = []
+    batch: list[tuple[str, dict]] = []
+
+    def _flush(items: list[tuple[str, dict]]) -> int:
+        if not items:
+            return 0
+        embeddings = embedder([t for t, _ in items])
+        for (text, meta), emb in zip(items, embeddings, strict=True):
+            _upsert_row(connection, meta, text, emb)
+        return len(items)
+
     for rec_id, created_at, payload_json in rows:
         try:
             payload = json.loads(payload_json)
@@ -185,17 +243,14 @@ def index_historical(
         if not text:
             n_skipped += 1
             continue
-        batch.append((_doc_id("historical", rec_id), text, meta))
+        batch.append((text, meta))
         if len(batch) >= batch_size:
-            _flush(coll, batch, embedder)
-            n_indexed += len(batch)
+            n_indexed += _flush(batch)
             batch = []
-    if batch:
-        _flush(coll, batch, embedder)
-        n_indexed += len(batch)
+    n_indexed += _flush(batch)
     logger.info(
-        "indexed %d recs (skipped %d) into Chroma collection %r",
-        n_indexed, n_skipped, _COLLECTION_NAME,
+        "indexed %d recs (skipped %d) into rec store",
+        n_indexed, n_skipped,
     )
     return n_indexed
 
@@ -207,8 +262,8 @@ def _load_rec_blobs(db_url: str | None) -> list[tuple[int, str, str]]:
     if not url.startswith("sqlite:///"):
         raise ValueError(f"only sqlite:/// URLs supported (got {url!r})")
     path = Path(url.removeprefix("sqlite:///"))
-    with sqlite3.connect(str(path)) as conn:
-        return conn.execute(
+    with sqlite3.connect(str(path)) as source:
+        return source.execute(
             "SELECT id, created_at, payload_json FROM recommendations ORDER BY id",
         ).fetchall()
 
@@ -218,14 +273,14 @@ def index_arm_rec(
     rec_id: int,
     *,
     arm_id: str | None = None,
-    collection=None,
+    conn: sqlite3.Connection | None = None,
     embedder: Callable[[list[str]], list[list[float]]] | None = None,
 ) -> bool:
     """Index a fresh live rec under source=f"arm_{id}".
 
     Reads AGENTIC_ARM_ID env when arm_id is not passed (solo paper-loop
     runs get arm_id="solo" so their memory is isolated from any A/B
-    experiment). Also stashes the current DATABASE_URL in metadata so a
+    experiment). Also stashes the current DATABASE_URL in the row so a
     later memory-outcomes sweep knows which SQLite to read snapshots
     from - arm subprocesses each have their own DB path.
 
@@ -246,27 +301,13 @@ def index_arm_rec(
         text = embed_text_for_rec(rec)
         if not text:
             return False
-        coll = collection if collection is not None else _default_collection()
-        emb = embedder if embedder is not None else _default_embed
+        connection = conn if conn is not None else _default_connection()
+        emb_fn = embedder if embedder is not None else _default_embed
+        embedding = emb_fn([text])[0]
         meta = metadata_for_rec(rec, rec_id, created_at, source)
-        meta["db_url"] = get_settings().database_url
-        coll.upsert(
-            ids=[_doc_id(source, rec_id)],
-            embeddings=emb([text]),
-            documents=[text],
-            metadatas=[meta],
-        )
+        _upsert_row(connection, meta, text, embedding,
+                    db_url=get_settings().database_url)
         return True
     except Exception as e:  # noqa: BLE001 - ingestion failure never blocks trading
         logger.debug("memory ingest failed for rec %d: %s", rec_id, e)
         return False
-
-
-def _flush(coll, batch: Iterable[tuple[str, str, dict]], embedder) -> None:
-    items = list(batch)
-    coll.upsert(
-        ids=[i for i, _, _ in items],
-        embeddings=embedder([t for _, t, _ in items]),
-        documents=[t for _, t, _ in items],
-        metadatas=[m for _, _, m in items],
-    )

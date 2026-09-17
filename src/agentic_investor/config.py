@@ -39,6 +39,10 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./agentic_investor.db"
     chroma_dir: str = "./.chroma"
+    # M17 recommendations vector store (sqlite-vec). Distinct file from
+    # database_url because arm subprocesses each have their own DATABASE_URL
+    # but the rec index is shared across arms for A/B-safe cross-retrieval.
+    rec_store_path: str = "./.rec_store.db"
     data_dir: str = "./data"
 
     # Alpaca paper trading. Sign up at alpaca.markets for free paper keys.

@@ -1,4 +1,4 @@
-"""Multi-horizon outcome attribution for indexed recommendations."""
+"""Multi-horizon outcome attribution for indexed recommendations (sqlite-vec)."""
 
 from __future__ import annotations
 
@@ -6,12 +6,11 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-import chromadb
-
 from agentic_investor.memory.outcomes import (
     attach_outcomes_to_index,
     compute_outcomes_for_rec,
 )
+from agentic_investor.memory.store import open_memory_conn
 
 
 def _seed_db(path):
@@ -83,6 +82,28 @@ def _payload(positions: list[tuple[str, float]]) -> dict:
     }
 
 
+def _any_available(outcomes: dict) -> bool:
+    """Historical helper: after we dropped the outcome_available flag,
+    availability is just 'any horizon is not None'.
+    """
+    return any(v is not None for v in outcomes.values())
+
+
+def _seed_rec_row(conn, rec_id: int, created_at: str, source: str = "historical",
+                  db_url: str | None = None):
+    """Insert a bare row into the rec store's recs table (skip vec_recs;
+    the outcomes sweep doesn't need embeddings)."""
+    conn.execute(
+        """
+        INSERT INTO recs (
+            rec_id, source, created_at, tickers, text, n_positions,
+            avg_confidence, cash_pct, risk, db_url
+        ) VALUES (?, ?, ?, 'AAPL', 'test doc', 1, 0.7, 0.0, 'moderate', ?)
+        """,
+        (rec_id, source, created_at, db_url),
+    )
+
+
 def test_intraday_equity_delta_from_snapshots(tmp_path):
     db = tmp_path / "seed.db"
     conn = _seed_db(db)
@@ -97,7 +118,7 @@ def test_intraday_equity_delta_from_snapshots(tmp_path):
     )
     assert result["outcome_pl_pct_15m"] == 1.0
     assert result["outcome_pl_pct_60m"] == 0.5
-    assert result["outcome_available"] is True
+    assert _any_available(result) is True
 
 
 def test_missing_snapshot_returns_none(tmp_path):
@@ -164,62 +185,48 @@ def test_insufficient_weight_data_returns_none(tmp_path):
     assert result["outcome_pl_pct_1d"] is None
 
 
-def test_attach_outcomes_updates_chroma_metadata(tmp_path):
+def test_attach_outcomes_updates_recs_row(tmp_path):
     db = tmp_path / "seed.db"
-    conn = _seed_db(db)
+    src_conn = _seed_db(db)
     rec_time = datetime(2026, 9, 1, 10, 0, 0, tzinfo=UTC)
 
-    # Persist a rec
+    # Persist a rec in the source DB
     payload = _payload([("AAPL", 100.0)])
-    conn.execute(
+    src_conn.execute(
         "INSERT INTO recommendations (created_at, payload_json) VALUES (?, ?)",
         (rec_time.isoformat(), json.dumps(payload)),
     )
-    conn.commit()
-    _insert_snapshot(conn, rec_time, equity=100_000.0)
-    _insert_snapshot(conn, rec_time + timedelta(minutes=60), equity=100_500.0)
-    _insert_bar(conn, "AAPL", "2026-09-01", 100.0)
-    _insert_bar(conn, "AAPL", "2026-09-02", 101.0)
+    src_conn.commit()
+    _insert_snapshot(src_conn, rec_time, equity=100_000.0)
+    _insert_snapshot(src_conn, rec_time + timedelta(minutes=60), equity=100_500.0)
+    _insert_bar(src_conn, "AAPL", "2026-09-01", 100.0)
+    _insert_bar(src_conn, "AAPL", "2026-09-02", 101.0)
 
-    # Seed Chroma with the rec (mimics M17.A having run)
-    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
-    coll = client.get_or_create_collection(
-        name="recommendations", metadata={"hnsw:space": "cosine"},
-    )
-    coll.upsert(
-        ids=["rec:historical:1"],
-        embeddings=[[0.1, 0.2, 0.3, 0.4]],
-        documents=["test doc"],
-        metadatas=[{
-            "rec_id": 1,
-            "source": "historical",
-            "created_at": rec_time.isoformat(),
-            "tickers": "AAPL",
-            "n_positions": 1,
-            "avg_confidence": 0.7,
-            "cash_pct": 0.0,
-            "risk": "moderate",
-        }],
-    )
+    # Seed the rec store with the row (mimics M17.A having run)
+    store = open_memory_conn()
+    _seed_rec_row(store, rec_id=1, created_at=rec_time.isoformat())
 
     n_updated, n_with = attach_outcomes_to_index(
-        db_url=f"sqlite:///{db}", collection=coll,
+        db_url=f"sqlite:///{db}", conn=store,
     )
     assert n_updated == 1
     assert n_with == 1
 
-    # Confirm outcomes made it into the metadata
-    res = coll.get(ids=["rec:historical:1"])
-    meta = res["metadatas"][0]
-    assert meta["outcome_pl_pct_60m"] == 0.5
-    assert meta["outcome_pl_pct_1d"] == 1.0
-    assert meta["outcome_available"] is True
-    # 15m had no snapshot → sentinel
-    assert meta["outcome_pl_pct_15m"] == -9999.0
+    row = store.execute(
+        "SELECT outcome_pl_pct_15m, outcome_pl_pct_60m, outcome_pl_pct_1d, "
+        "outcome_pl_pct_1w FROM recs WHERE rec_id = 1"
+    ).fetchone()
+    pl_15m, pl_60m, pl_1d, pl_1w = row
+    assert pl_60m == 0.5
+    assert pl_1d == 1.0
+    # 15m had no snapshot → NULL (no more -9999.0 sentinel)
+    assert pl_15m is None
+    # 1w has no future bars either → NULL
+    assert pl_1w is None
 
 
 def test_attach_outcomes_sweeps_arm_sources_and_uses_per_rec_db(tmp_path):
-    """Arm recs stash their own db_url in metadata; the sweep must read
+    """Arm recs stash their own db_url in the row; the sweep must read
     snapshots from THAT db, not the caller default."""
     arm_db = tmp_path / "arm_A.db"
     conn_a = _seed_db(arm_db)
@@ -233,45 +240,32 @@ def test_attach_outcomes_sweeps_arm_sources_and_uses_per_rec_db(tmp_path):
     _insert_snapshot(conn_a, rec_time, equity=100_000.0)
     _insert_snapshot(conn_a, rec_time + timedelta(minutes=60), equity=101_000.0)
 
-    # Caller default DB is empty; the arm doc's db_url metadata is what
-    # should route the outcome lookup.
+    # Caller default DB is empty; the arm row's db_url is what should
+    # route the outcome lookup.
     default_db = tmp_path / "default.db"
     _seed_db(default_db)
 
-    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
-    coll = client.get_or_create_collection(
-        name="recommendations", metadata={"hnsw:space": "cosine"},
-    )
-    coll.upsert(
-        ids=["rec:arm_A:1"],
-        embeddings=[[0.1, 0.2, 0.3, 0.4]],
-        documents=["arm A rec"],
-        metadatas=[{
-            "rec_id": 1, "source": "arm_A",
-            "created_at": rec_time.isoformat(),
-            "tickers": "AAPL", "n_positions": 1,
-            "avg_confidence": 0.7, "cash_pct": 0.0, "risk": "moderate",
-            "db_url": f"sqlite:///{arm_db}",
-        }],
-    )
+    store = open_memory_conn()
+    _seed_rec_row(store, rec_id=1, created_at=rec_time.isoformat(),
+                  source="arm_A", db_url=f"sqlite:///{arm_db}")
+
     n_updated, n_with = attach_outcomes_to_index(
-        db_url=f"sqlite:///{default_db}", collection=coll,
+        db_url=f"sqlite:///{default_db}", conn=store,
     )
     assert n_updated == 1
     assert n_with == 1
-    meta = coll.get(ids=["rec:arm_A:1"])["metadatas"][0]
-    assert meta["outcome_pl_pct_60m"] == 1.0
+    row = store.execute(
+        "SELECT outcome_pl_pct_60m FROM recs WHERE rec_id = 1"
+    ).fetchone()
+    assert row[0] == 1.0
 
 
-def test_attach_outcomes_empty_collection_is_noop(tmp_path):
+def test_attach_outcomes_empty_store_is_noop(tmp_path):
     db = tmp_path / "seed.db"
     _seed_db(db)
-    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
-    coll = client.get_or_create_collection(
-        name="recommendations", metadata={"hnsw:space": "cosine"},
-    )
+    store = open_memory_conn()
     n_updated, n_with = attach_outcomes_to_index(
-        db_url=f"sqlite:///{db}", collection=coll,
+        db_url=f"sqlite:///{db}", conn=store,
     )
     assert (n_updated, n_with) == (0, 0)
 
@@ -281,5 +275,5 @@ def test_malformed_created_at_returns_unavailable(tmp_path):
     _seed_db(db)
     payload = _payload([("AAPL", 100.0)])
     result = compute_outcomes_for_rec(payload, "not-a-timestamp", f"sqlite:///{db}")
-    assert result["outcome_available"] is False
+    assert _any_available(result) is False
     assert result["outcome_pl_pct_15m"] is None

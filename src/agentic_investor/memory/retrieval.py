@@ -1,26 +1,39 @@
-"""A/B-safe retrieval over the recommendations Chroma index.
+"""A/B-safe retrieval over the recommendations sqlite-vec index.
 
 Arm X only ever sees docs with source ∈ {"historical", "arm_X"}. Cross-arm
 leaks would poison the A/B experiment - arm B's live decisions must not
 influence what arm A retrieves as "similar past reasoning". The filter is
 mandatory; there is no code path that queries without it.
+
+Same signatures as the earlier chromadb-backed retrieval so callers in
+`orchestrator/graph.py._similar_precedents_block` don't move.
 """
 
 from __future__ import annotations
 
+import sqlite3
+import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from agentic_investor.memory.rec_index import _default_collection, _default_embed
-
-_SENTINEL = -9999.0  # matches memory.outcomes.attach_outcomes_to_index
+from agentic_investor.memory.rec_index import _default_connection, _default_embed
+from agentic_investor.memory.store import EMBED_DIM
 
 
 def _unsentinel(v) -> float | None:
-    if v is None or v == _SENTINEL:
+    """NULL passthrough; sqlite gives us Python None directly, no
+    -9999.0 sentinel dance like chroma needed. Kept as a helper so
+    the RetrievedRec fields stay Optional[float] and callers don't
+    need to change.
+    """
+    if v is None:
         return None
-    return float(v)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f
 
 
 @dataclass(frozen=True)
@@ -79,6 +92,12 @@ class RetrievedRec:
         return 0.0
 
 
+def _pack_vector(vec: list[float]) -> bytes:
+    if len(vec) != EMBED_DIM:
+        raise ValueError(f"embedding dim {len(vec)} != expected {EMBED_DIM}")
+    return struct.pack(f"{EMBED_DIM}f", *vec)
+
+
 def retrieve_similar(
     query_text: str,
     arm_id: str,
@@ -86,7 +105,7 @@ def retrieve_similar(
     k: int = 4,
     include_historical: bool = True,
     max_age_days: int | None = None,
-    collection=None,
+    conn: sqlite3.Connection | None = None,
     embedder: Callable[[list[str]], list[list[float]]] | None = None,
 ) -> list[RetrievedRec]:
     """Top-K past recs semantically similar to query_text, scoped to this arm.
@@ -97,54 +116,70 @@ def retrieve_similar(
     """
     if not query_text or not query_text.strip():
         return []
-    coll = collection if collection is not None else _default_collection()
+    connection = conn if conn is not None else _default_connection()
     emb = embedder if embedder is not None else _default_embed
 
     sources: list[str] = []
     if include_historical:
         sources.append("historical")
     sources.append(f"arm_{arm_id}")
+    placeholders = ",".join("?" for _ in sources)
 
-    # Chroma's $gt only accepts numeric metadata; created_at is ISO string
-    # so we over-fetch and age-filter client-side.
+    # Over-fetch when age-filtering client-side; sqlite's WHERE + vec MATCH
+    # composes cleanly but we still want extra headroom so a well-scoring
+    # but stale hit doesn't push a fresh one out of the top-K.
     fetch_k = k * 4 if max_age_days is not None else k
     cutoff_iso = (
         (datetime.now(UTC) - timedelta(days=max_age_days)).isoformat()
         if max_age_days is not None else None
     )
-    res = coll.query(
-        query_embeddings=emb([query_text]),
-        n_results=fetch_k,
-        where={"source": {"$in": sources}},
-        include=["metadatas", "documents", "distances"],
-    )
-    metas = (res.get("metadatas") or [[]])[0]
-    docs = (res.get("documents") or [[]])[0]
-    dists = (res.get("distances") or [[]])[0]
+
+    query_embedding = _pack_vector(emb([query_text])[0])
+
+    sql = f"""
+        SELECT
+            r.rec_id, r.source, r.created_at, r.tickers, r.text,
+            r.n_positions, r.avg_confidence, r.risk,
+            r.outcome_pl_pct_15m, r.outcome_pl_pct_60m,
+            r.outcome_pl_pct_1d, r.outcome_pl_pct_1w,
+            v.distance
+        FROM vec_recs v
+        JOIN recs r ON r.rec_id = v.rowid
+        WHERE v.embedding MATCH ?
+          AND v.k = ?
+          AND r.source IN ({placeholders})
+        ORDER BY v.distance
+    """
+    rows = connection.execute(sql, (query_embedding, fetch_k, *sources)).fetchall()
 
     out: list[RetrievedRec] = []
-    for meta, text, dist in zip(metas, docs, dists, strict=False):
-        created_at = str(meta.get("created_at") or "")
+    for row in rows:
+        (rec_id, source, created_at, tickers_str, text,
+         n_positions, avg_confidence, risk,
+         pl_15m, pl_60m, pl_1d, pl_1w, dist) = row
         if cutoff_iso is not None and created_at and created_at < cutoff_iso:
             continue
-        # Cosine distance in Chroma is (1 - cos_sim); invert for similarity.
-        similarity = round(1.0 - float(dist), 4)
-        tickers_str = str(meta.get("tickers") or "")
-        tickers = [t for t in tickers_str.split(",") if t]
+        # sqlite-vec returns L2 or cosine distance depending on the vec0
+        # table declaration. We default to L2 in `store.py`; convert to a
+        # bounded similarity for callers that treated the chroma value
+        # (1 - cos_sim) the same way. This is monotonic and preserves
+        # ordering; the absolute number is comparable within a query.
+        similarity = round(1.0 / (1.0 + float(dist)), 4)
+        tickers = [t for t in (tickers_str or "").split(",") if t]
         out.append(RetrievedRec(
-            rec_id=int(meta.get("rec_id") or 0),
-            source=str(meta.get("source") or ""),
-            created_at=str(meta.get("created_at") or ""),
+            rec_id=int(rec_id),
+            source=str(source or ""),
+            created_at=str(created_at or ""),
             tickers=tickers,
             similarity=similarity,
             text=text or "",
-            n_positions=int(meta.get("n_positions") or 0),
-            avg_confidence=float(meta.get("avg_confidence") or 0.0),
-            risk=str(meta.get("risk") or "moderate"),
-            outcome_pl_pct_15m=_unsentinel(meta.get("outcome_pl_pct_15m")),
-            outcome_pl_pct_60m=_unsentinel(meta.get("outcome_pl_pct_60m")),
-            outcome_pl_pct_1d=_unsentinel(meta.get("outcome_pl_pct_1d")),
-            outcome_pl_pct_1w=_unsentinel(meta.get("outcome_pl_pct_1w")),
+            n_positions=int(n_positions or 0),
+            avg_confidence=float(avg_confidence or 0.0),
+            risk=str(risk or "moderate"),
+            outcome_pl_pct_15m=_unsentinel(pl_15m),
+            outcome_pl_pct_60m=_unsentinel(pl_60m),
+            outcome_pl_pct_1d=_unsentinel(pl_1d),
+            outcome_pl_pct_1w=_unsentinel(pl_1w),
         ))
     # Nudge successful precedents ahead of failed ones on near-ties in
     # similarity. Uses 1d outcome as the anchor (highest coverage +

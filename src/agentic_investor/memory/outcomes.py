@@ -4,6 +4,10 @@ For each rec: portfolio-weighted P/L at 15m, 60m, 1D, 1W after created_at.
 Short horizons use paper_snapshots equity delta (actual realized).
 Long horizons use daily_bars per-ticker close weighted by allocation
 (synthetic - reflects the rec's thesis regardless of filter execution).
+
+Post-2026-09-17 sqlite-vec migration: outcome storage is a plain UPDATE
+on the `recs` table (NULL for unripe horizons, real number when
+computable). No more chroma-metadata dance with -9999.0 sentinels.
 """
 
 from __future__ import annotations
@@ -152,7 +156,7 @@ def _compute_daily_outcomes(
 def compute_outcomes_for_rec(
     rec_payload: dict, created_at: str, db_url: str,
 ) -> dict:
-    """Return the outcome-metadata dict to merge into the Chroma doc."""
+    """Return {horizon_key: pct or None} for the four horizons."""
     rec_time = _parse_ts(created_at)
     if rec_time is None:
         return {
@@ -160,50 +164,49 @@ def compute_outcomes_for_rec(
             "outcome_pl_pct_60m": None,
             "outcome_pl_pct_1d": None,
             "outcome_pl_pct_1w": None,
-            "outcome_available": False,
         }
     path = _db_path(db_url)
     with sqlite3.connect(str(path)) as conn:
         intraday = _compute_intraday_outcomes(conn, rec_time, [15, 60])
         daily = _compute_daily_outcomes(conn, rec_payload, rec_time, [1, 7])
-    result = {
+    return {
         "outcome_pl_pct_15m": intraday.get(15),
         "outcome_pl_pct_60m": intraday.get(60),
         "outcome_pl_pct_1d": daily.get(1),
         "outcome_pl_pct_1w": daily.get(7),
     }
-    result["outcome_available"] = any(v is not None for v in result.values())
-    return result
 
 
 def attach_outcomes_to_index(
-    db_url: str | None = None, *, collection=None,
+    db_url: str | None = None,
+    *,
+    conn: sqlite3.Connection | None = None,
 ) -> tuple[int, int]:
-    """Refresh outcome metadata for every rec in Chroma (historical + arm).
+    """Refresh outcome metadata for every rec in the rec store.
 
     Per-rec source of truth:
-      - if meta.db_url is set (arm recs stash their DATABASE_URL at
+      - if `recs.db_url` is set (arm recs stash their DATABASE_URL at
         ingest time), use that arm's own SQLite
       - else use the caller-provided db_url (default: settings.database_url)
         which is what historical recs from agentic_investor.db need
 
-    Idempotent: unripe horizons stay as -9999.0 sentinel and get filled
-    in on the next sweep once (created_at + horizon) has passed and the
-    arm's snapshot/bar data covers the window.
+    Idempotent: unripe horizons stay NULL and get filled in on the next
+    sweep once (created_at + horizon) has passed and the arm's snapshot/
+    bar data covers the window.
 
     Returns (n_updated, n_with_any_outcome).
     """
     from agentic_investor.config import get_settings
-    from agentic_investor.memory.rec_index import _default_collection
+    from agentic_investor.memory.rec_index import _default_connection
 
     fallback_url = db_url or get_settings().database_url
-    coll = collection if collection is not None else _default_collection()
+    connection = conn if conn is not None else _default_connection()
 
-    result = coll.get()
-    ids = result.get("ids") or []
-    existing_metas = result.get("metadatas") or []
-    if not ids:
-        logger.info("no docs in Chroma; run memory-index --historical first")
+    rows = connection.execute(
+        "SELECT rec_id, created_at, db_url FROM recs"
+    ).fetchall()
+    if not rows:
+        logger.info("no docs in rec store; run memory-index --historical first")
         return (0, 0)
 
     # Cache rec-blob lookups per db_url so a sweep across many arm recs
@@ -214,24 +217,23 @@ def attach_outcomes_to_index(
         if url in blobs_by_db:
             return blobs_by_db[url]
         try:
-            with sqlite3.connect(str(_db_path(url))) as conn:
-                rows = {
+            with sqlite3.connect(str(_db_path(url))) as src:
+                out = {
                     rid: (ts, pj)
-                    for rid, ts, pj in conn.execute(
+                    for rid, ts, pj in src.execute(
                         "SELECT id, created_at, payload_json FROM recommendations"
                     )
                 }
         except sqlite3.OperationalError as e:
             logger.warning("cannot read recs from %s: %s", url, e)
-            rows = {}
-        blobs_by_db[url] = rows
-        return rows
+            out = {}
+        blobs_by_db[url] = out
+        return out
 
     n_updated = 0
     n_with_outcome = 0
-    for doc_id, meta in zip(ids, existing_metas, strict=False):
-        rec_id = int(meta.get("rec_id") or 0)
-        rec_db_url = str(meta.get("db_url") or fallback_url)
+    for rec_id, _created_at, stashed_db_url in rows:
+        rec_db_url = str(stashed_db_url or fallback_url)
         rec_rows = _blobs(rec_db_url)
         if rec_id not in rec_rows:
             continue
@@ -241,14 +243,25 @@ def attach_outcomes_to_index(
         except json.JSONDecodeError:
             continue
         outcomes = compute_outcomes_for_rec(payload, created_at, rec_db_url)
-        merged = {**meta, **outcomes}
-        # Chroma requires scalar (str/int/float/bool); None -> sentinel.
-        for k in list(merged.keys()):
-            if merged[k] is None:
-                merged[k] = -9999.0 if k.startswith("outcome_pl_pct_") else False
-        coll.update(ids=[doc_id], metadatas=[merged])
+        connection.execute(
+            """
+            UPDATE recs SET
+                outcome_pl_pct_15m = ?,
+                outcome_pl_pct_60m = ?,
+                outcome_pl_pct_1d = ?,
+                outcome_pl_pct_1w = ?
+            WHERE rec_id = ?
+            """,
+            (
+                outcomes["outcome_pl_pct_15m"],
+                outcomes["outcome_pl_pct_60m"],
+                outcomes["outcome_pl_pct_1d"],
+                outcomes["outcome_pl_pct_1w"],
+                rec_id,
+            ),
+        )
         n_updated += 1
-        if outcomes.get("outcome_available"):
+        if any(v is not None for v in outcomes.values()):
             n_with_outcome += 1
     logger.info(
         "attached outcomes to %d docs (%d have at least one horizon)",

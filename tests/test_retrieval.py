@@ -1,131 +1,136 @@
-"""A/B-safe retrieval over the recommendations Chroma index (M17.C)."""
+"""A/B-safe retrieval over the sqlite-vec recommendations index (M17.C).
+
+Post-2026-09-17 migration: fixtures now build an in-memory sqlite-vec DB
+instead of a Chroma tempdir. Assertions on ordering/isolation are
+identical; the sentinel-outcome test flipped to NULL-passthrough because
+the sqlite schema stores NULL directly (no -9999.0 sentinel dance).
+"""
 
 from __future__ import annotations
 
-import chromadb
 import pytest
 
+from agentic_investor.memory.rec_index import _pack_vector
 from agentic_investor.memory.retrieval import RetrievedRec, retrieve_similar
+from agentic_investor.memory.store import EMBED_DIM, open_memory_conn
 
 
 def _fake_embedder(texts):
-    return [
-        [
-            (hash(t) & 0xff) / 255.0,
-            ((hash(t) >> 8) & 0xff) / 255.0,
-            ((hash(t) >> 16) & 0xff) / 255.0,
-            ((hash(t) >> 24) & 0xff) / 255.0,
-        ]
-        for t in texts
-    ]
+    """Deterministic 384-dim vector per text (mostly zeros; first 4 slots
+    carry the hashed signature so identical texts collide to the same
+    embedding and distinct texts diverge).
+    """
+    out: list[list[float]] = []
+    for t in texts:
+        h = hash(t)
+        vec = [0.0] * EMBED_DIM
+        vec[0] = (h & 0xff) / 255.0
+        vec[1] = ((h >> 8) & 0xff) / 255.0
+        vec[2] = ((h >> 16) & 0xff) / 255.0
+        vec[3] = ((h >> 24) & 0xff) / 255.0
+        out.append(vec)
+    return out
 
 
-def _tmp_collection(tmp_path):
-    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
-    return client.get_or_create_collection(
-        name="recommendations", metadata={"hnsw:space": "cosine"},
-    )
+def _tmp_conn():
+    return open_memory_conn()
 
 
-def _seed_doc(
-    coll, doc_id: str, source: str, rec_id: int, text: str,
+def _seed_row(
+    conn, source: str, rec_id: int, text: str,
     tickers: str = "AAPL", created_at: str = "2026-09-01T10:00:00+00:00",
+    outcome_15m: float | None = None,
+    outcome_60m: float | None = None,
     outcome_1d: float | None = None,
+    outcome_1w: float | None = None,
 ):
-    meta = {
-        "rec_id": rec_id,
-        "source": source,
-        "created_at": created_at,
-        "tickers": tickers,
-        "n_positions": len(tickers.split(",")),
-        "avg_confidence": 0.7,
-        "cash_pct": 0.0,
-        "risk": "moderate",
-    }
-    if outcome_1d is not None:
-        meta["outcome_pl_pct_1d"] = outcome_1d
-    coll.upsert(
-        ids=[doc_id],
-        embeddings=_fake_embedder([text]),
-        documents=[text],
-        metadatas=[meta],
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO recs (
+            rec_id, source, created_at, tickers, text,
+            n_positions, avg_confidence, cash_pct, risk,
+            outcome_pl_pct_15m, outcome_pl_pct_60m,
+            outcome_pl_pct_1d, outcome_pl_pct_1w
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            rec_id, source, created_at, tickers, text,
+            len(tickers.split(",")), 0.7, 0.0, "moderate",
+            outcome_15m, outcome_60m, outcome_1d, outcome_1w,
+        ),
+    )
+    conn.execute("DELETE FROM vec_recs WHERE rowid = ?", (rec_id,))
+    conn.execute(
+        "INSERT INTO vec_recs (rowid, embedding) VALUES (?, ?)",
+        (rec_id, _pack_vector(_fake_embedder([text])[0])),
     )
 
 
-def test_returns_empty_for_empty_query(tmp_path):
-    coll = _tmp_collection(tmp_path)
-    _seed_doc(coll, "rec:historical:1", "historical", 1, "some text")
-    assert retrieve_similar("", "A", collection=coll, embedder=_fake_embedder) == []
-    assert retrieve_similar("   ", "A", collection=coll, embedder=_fake_embedder) == []
+def test_returns_empty_for_empty_query():
+    conn = _tmp_conn()
+    _seed_row(conn, "historical", 1, "some text")
+    assert retrieve_similar("", "A", conn=conn, embedder=_fake_embedder) == []
+    assert retrieve_similar("   ", "A", conn=conn, embedder=_fake_embedder) == []
 
 
-def test_arm_a_cannot_see_arm_b_recs(tmp_path):
+def test_arm_a_cannot_see_arm_b_recs():
     """The core A/B invariant - identical text, different source, must not leak."""
-    coll = _tmp_collection(tmp_path)
-    _seed_doc(coll, "rec:arm_B:1", "arm_B", 1, "identical query text here")
-    _seed_doc(coll, "rec:arm_C:1", "arm_C", 1, "identical query text here")
+    conn = _tmp_conn()
+    _seed_row(conn, "arm_B", 1, "identical query text here")
+    _seed_row(conn, "arm_C", 2, "identical query text here")
     results = retrieve_similar(
         "identical query text here", "A",
-        k=10, collection=coll, embedder=_fake_embedder,
+        k=10, conn=conn, embedder=_fake_embedder,
     )
     sources = {r.source for r in results}
     assert "arm_B" not in sources
     assert "arm_C" not in sources
 
 
-def test_arm_a_sees_own_and_historical(tmp_path):
-    coll = _tmp_collection(tmp_path)
-    _seed_doc(coll, "rec:historical:1", "historical", 1, "shared knowledge")
-    _seed_doc(coll, "rec:arm_A:1", "arm_A", 1, "shared knowledge")
-    _seed_doc(coll, "rec:arm_B:1", "arm_B", 1, "shared knowledge")
+def test_arm_a_sees_own_and_historical():
+    conn = _tmp_conn()
+    _seed_row(conn, "historical", 1, "shared knowledge")
+    _seed_row(conn, "arm_A", 2, "shared knowledge")
+    _seed_row(conn, "arm_B", 3, "shared knowledge")
     results = retrieve_similar(
         "shared knowledge", "A",
-        k=10, collection=coll, embedder=_fake_embedder,
+        k=10, conn=conn, embedder=_fake_embedder,
     )
     sources = {r.source for r in results}
     assert sources == {"historical", "arm_A"}
 
 
-def test_include_historical_false_returns_only_own_arm(tmp_path):
-    coll = _tmp_collection(tmp_path)
-    _seed_doc(coll, "rec:historical:1", "historical", 1, "text")
-    _seed_doc(coll, "rec:arm_A:1", "arm_A", 1, "text")
+def test_include_historical_false_returns_only_own_arm():
+    conn = _tmp_conn()
+    _seed_row(conn, "historical", 1, "text")
+    _seed_row(conn, "arm_A", 2, "text")
     results = retrieve_similar(
         "text", "A", k=10, include_historical=False,
-        collection=coll, embedder=_fake_embedder,
+        conn=conn, embedder=_fake_embedder,
     )
     assert {r.source for r in results} == {"arm_A"}
 
 
-def test_topk_respected(tmp_path):
-    coll = _tmp_collection(tmp_path)
+def test_topk_respected():
+    conn = _tmp_conn()
     for i in range(10):
-        _seed_doc(coll, f"rec:historical:{i}", "historical", i, f"doc {i}")
+        _seed_row(conn, "historical", i, f"doc {i}")
     results = retrieve_similar(
-        "doc 5", "A", k=3, collection=coll, embedder=_fake_embedder,
+        "doc 5", "A", k=3, conn=conn, embedder=_fake_embedder,
     )
     assert len(results) == 3
 
 
-def test_sentinel_outcomes_render_as_none(tmp_path):
-    coll = _tmp_collection(tmp_path)
-    coll.upsert(
-        ids=["rec:historical:1"],
-        embeddings=_fake_embedder(["text"]),
-        documents=["text"],
-        metadatas=[{
-            "rec_id": 1, "source": "historical",
-            "created_at": "2026-09-01T10:00:00+00:00",
-            "tickers": "AAPL", "n_positions": 1,
-            "avg_confidence": 0.7, "cash_pct": 0.0, "risk": "moderate",
-            "outcome_pl_pct_15m": -9999.0,
-            "outcome_pl_pct_60m": 0.5,
-            "outcome_pl_pct_1d": -9999.0,
-            "outcome_pl_pct_1w": -9999.0,
-        }],
+def test_null_outcomes_render_as_none():
+    """Unripe horizons are stored as NULL; retrieved as Python None."""
+    conn = _tmp_conn()
+    _seed_row(
+        conn, "historical", 1, "text",
+        outcome_15m=None, outcome_60m=0.5,
+        outcome_1d=None, outcome_1w=None,
     )
     results = retrieve_similar(
-        "text", "A", k=1, collection=coll, embedder=_fake_embedder,
+        "text", "A", k=1, conn=conn, embedder=_fake_embedder,
     )
     r = results[0]
     assert r.outcome_pl_pct_15m is None
@@ -134,30 +139,32 @@ def test_sentinel_outcomes_render_as_none(tmp_path):
     assert r.outcome_pl_pct_1w is None
 
 
-def test_successful_ranked_above_failed_on_tie(tmp_path):
+def test_successful_ranked_above_failed_on_tie():
     """When similarity is identical, higher 1d outcome ranks first."""
-    coll = _tmp_collection(tmp_path)
-    _seed_doc(coll, "rec:historical:1", "historical", 1, "duplicate", outcome_1d=-2.5)
-    _seed_doc(coll, "rec:historical:2", "historical", 2, "duplicate", outcome_1d=+3.1)
+    conn = _tmp_conn()
+    _seed_row(conn, "historical", 1, "duplicate", outcome_1d=-2.5)
+    _seed_row(conn, "historical", 2, "duplicate", outcome_1d=+3.1)
     results = retrieve_similar(
-        "duplicate", "A", k=2, collection=coll, embedder=_fake_embedder,
+        "duplicate", "A", k=2, conn=conn, embedder=_fake_embedder,
     )
     # Same doc text -> identical distance -> tiebreak by outcome_1d DESC
     assert results[0].outcome_pl_pct_1d == 3.1
     assert results[1].outcome_pl_pct_1d == -2.5
 
 
-def test_similarity_is_one_minus_cosine_distance(tmp_path):
-    coll = _tmp_collection(tmp_path)
-    _seed_doc(coll, "rec:historical:1", "historical", 1, "hello world")
+def test_similarity_is_monotonic_in_distance():
+    """Exact match -> distance ~0 -> similarity near 1."""
+    conn = _tmp_conn()
+    _seed_row(conn, "historical", 1, "hello world")
     results = retrieve_similar(
-        "hello world", "A", k=1, collection=coll, embedder=_fake_embedder,
+        "hello world", "A", k=1, conn=conn, embedder=_fake_embedder,
     )
-    # Identical text (same embedding) -> distance ~0 -> similarity ~1
-    assert results[0].similarity > 0.99
+    # Identical embedding => L2 distance 0 => similarity == 1.0 in our
+    # 1 / (1 + d) mapping.
+    assert results[0].similarity == pytest.approx(1.0)
 
 
-def test_to_prompt_line_includes_trajectory_and_text(tmp_path):
+def test_to_prompt_line_includes_trajectory_and_text():
     r = RetrievedRec(
         rec_id=1, source="historical",
         created_at="2026-09-01T10:00:00+00:00",
@@ -178,7 +185,7 @@ def test_to_prompt_line_includes_trajectory_and_text(tmp_path):
     assert "balanced tech allocation" in line
 
 
-def test_to_prompt_line_no_outcome_data(tmp_path):
+def test_to_prompt_line_no_outcome_data():
     r = RetrievedRec(
         rec_id=1, source="arm_A",
         created_at="2026-09-05T10:00:00+00:00",
@@ -192,7 +199,7 @@ def test_to_prompt_line_no_outcome_data(tmp_path):
     assert "no outcome yet" in line
 
 
-def test_to_prompt_line_partial_trajectory_marked(tmp_path):
+def test_to_prompt_line_partial_trajectory_marked():
     r = RetrievedRec(
         rec_id=1, source="arm_A",
         created_at="2026-09-05T10:00:00+00:00",
@@ -207,76 +214,55 @@ def test_to_prompt_line_partial_trajectory_marked(tmp_path):
     assert "15m +0.50%" in line
 
 
-def test_tiebreak_cascades_to_longest_available_horizon(tmp_path):
+def test_tiebreak_cascades_to_longest_available_horizon():
     """When 1d is None but 60m is present, 60m anchors the tiebreak
     (not treated as 0.0). Recent important recs don't lose to older
     slightly-positive ones just because 1d hasn't matured yet."""
-    coll = _tmp_collection(tmp_path)
-    # Both identical text; A has 1d=-0.5, B has only 60m=+0.8
-    coll.upsert(
-        ids=["rec:historical:1"],
-        embeddings=_fake_embedder(["same"]),
-        documents=["same"],
-        metadatas=[{
-            "rec_id": 1, "source": "historical",
-            "created_at": "2026-09-01T10:00:00+00:00",
-            "tickers": "AAPL", "n_positions": 1,
-            "avg_confidence": 0.7, "cash_pct": 0.0, "risk": "moderate",
-            "outcome_pl_pct_1d": -0.5,
-        }],
-    )
-    coll.upsert(
-        ids=["rec:historical:2"],
-        embeddings=_fake_embedder(["same"]),
-        documents=["same"],
-        metadatas=[{
-            "rec_id": 2, "source": "historical",
-            "created_at": "2026-09-05T10:00:00+00:00",
-            "tickers": "MSFT", "n_positions": 1,
-            "avg_confidence": 0.7, "cash_pct": 0.0, "risk": "moderate",
-            "outcome_pl_pct_60m": 0.8,
-        }],
-    )
+    conn = _tmp_conn()
+    _seed_row(conn, "historical", 1, "same",
+              created_at="2026-09-01T10:00:00+00:00", outcome_1d=-0.5)
+    _seed_row(conn, "historical", 2, "same",
+              created_at="2026-09-05T10:00:00+00:00", outcome_60m=0.8)
     results = retrieve_similar(
-        "same", "A", k=2, collection=coll, embedder=_fake_embedder,
+        "same", "A", k=2, conn=conn, embedder=_fake_embedder,
     )
     # rec 2 (60m +0.8 = tiebreak +0.8) beats rec 1 (1d -0.5 = tiebreak -0.5)
     assert results[0].rec_id == 2
     assert results[1].rec_id == 1
 
 
-def test_max_age_days_filters_stale_recs(tmp_path):
+def test_max_age_days_filters_stale_recs():
     from datetime import UTC, datetime, timedelta
 
-    coll = _tmp_collection(tmp_path)
+    conn = _tmp_conn()
     old = (datetime.now(UTC) - timedelta(days=90)).isoformat()
     recent = (datetime.now(UTC) - timedelta(days=2)).isoformat()
-    _seed_doc(coll, "rec:historical:1", "historical", 1, "text", created_at=old)
-    _seed_doc(coll, "rec:historical:2", "historical", 2, "text", created_at=recent)
+    _seed_row(conn, "historical", 1, "text", created_at=old)
+    _seed_row(conn, "historical", 2, "text", created_at=recent)
     results = retrieve_similar(
         "text", "A", k=10, max_age_days=30,
-        collection=coll, embedder=_fake_embedder,
+        conn=conn, embedder=_fake_embedder,
     )
     ids = {r.rec_id for r in results}
     assert 2 in ids
     assert 1 not in ids
 
 
-def test_empty_collection_returns_empty(tmp_path):
-    coll = _tmp_collection(tmp_path)
-    results = retrieve_similar("x", "A", collection=coll, embedder=_fake_embedder)
+def test_empty_collection_returns_empty():
+    conn = _tmp_conn()
+    results = retrieve_similar("x", "A", conn=conn, embedder=_fake_embedder)
     assert results == []
 
 
 @pytest.mark.parametrize("arm_id", ["A", "B", "C"])
-def test_isolation_holds_for_every_arm(tmp_path, arm_id):
+def test_isolation_holds_for_every_arm(arm_id):
     """Parameterized: no matter which arm queries, it only sees own + historical."""
-    coll = _tmp_collection(tmp_path)
-    for other in ["A", "B", "C"]:
-        _seed_doc(coll, f"rec:arm_{other}:1", f"arm_{other}", 1, "x")
-    _seed_doc(coll, "rec:historical:1", "historical", 1, "x")
+    conn = _tmp_conn()
+    for i, other in enumerate(["A", "B", "C"], start=1):
+        _seed_row(conn, f"arm_{other}", i, "x")
+    _seed_row(conn, "historical", 4, "x")
     results = retrieve_similar(
-        "x", arm_id, k=10, collection=coll, embedder=_fake_embedder,
+        "x", arm_id, k=10, conn=conn, embedder=_fake_embedder,
     )
     for r in results:
         assert r.source in ("historical", f"arm_{arm_id}")

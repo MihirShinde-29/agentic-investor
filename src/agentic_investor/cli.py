@@ -880,7 +880,7 @@ def _memory_outcomes(*, db_url: str | None) -> None:
 
     n_updated, n_with = attach_outcomes_to_index(db_url=db_url)
     print(
-        f"\nupdated {n_updated} chroma docs "
+        f"\nupdated {n_updated} rec-store rows"
         f"({n_with} have >=1 horizon; rest kept as sentinels)"
     )
 
@@ -897,7 +897,7 @@ def _memory_index(*, historical: bool, db_url: str | None) -> None:
     from agentic_investor.memory.rec_index import index_historical
 
     n = index_historical(db_url=db_url)
-    print(f"\nindexed {n} recommendations into Chroma collection 'recommendations'")
+    print(f"\nindexed {n} recommendations into the sqlite-vec rec store")
 
 
 def _paper_reset(account: str, *, confirm: bool = True) -> None:
