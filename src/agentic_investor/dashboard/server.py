@@ -1414,6 +1414,67 @@ def create_app(
         finally:
             get_bus().unsubscribe(q)
 
+    @app.websocket("/ws/session/{arm_id}/events")
+    async def session_events_ws(ws: WebSocket, arm_id: str) -> None:
+        """Live-tail an arm's session.jsonl on disk (task #156).
+
+        Complements /ws/live (which serves the in-process EventBus, only
+        useful when publisher + dashboard share a process). This one
+        works across subprocess boundaries: dashboard is its own
+        subprocess in paper-experiment mode and doesn't share the arm's
+        bus, so disk-tail is the only cross-process live feed.
+
+        Sends an initial hydration of the last ~200 events, then polls
+        the file every 500 ms and pushes new lines as they land. No
+        server-side buffer of clients (each WS keeps its own file
+        cursor), so N connected dashboards is O(N) file reads.
+        """
+        if not _check_basic_creds(ws.headers.get("authorization", "")):
+            await ws.close(code=1008)
+            return
+        await ws.accept()
+        try:
+            d = _resolve_arm_session_dir(arm_id)
+            if d is None:
+                await ws.send_json({
+                    "event": "_error",
+                    "message": f"no session dir found for arm {arm_id!r}",
+                })
+                return
+            jl = d / "session.jsonl"
+            if not jl.exists():
+                await ws.send_json({
+                    "event": "_error",
+                    "message": f"session.jsonl missing under {d}",
+                })
+                return
+            # Initial hydration: last 200 rows.
+            initial = _tail_arm_session_events(arm_id, limit=200)
+            for row in initial:
+                await ws.send_json(row)
+            # Now tail. Seek to end so subsequent reads only see new lines.
+            f = jl.open("r", encoding="utf-8", errors="replace")
+            try:
+                f.seek(0, os.SEEK_END)
+                while True:
+                    line = f.readline()
+                    if not line:
+                        await asyncio.sleep(0.5)
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        # Partial write at file tail; wait for the writer
+                        # to finish the line and try again next tick.
+                        f.seek(-len(line), os.SEEK_CUR)
+                        await asyncio.sleep(0.5)
+                        continue
+                    await ws.send_json(row)
+            finally:
+                f.close()
+        except WebSocketDisconnect:
+            pass
+
     # Static frontend (Vite build output). Only mounts if built.
     if _DIST.exists():
         app.mount("/", StaticFiles(directory=_DIST, html=True), name="dashboard")
