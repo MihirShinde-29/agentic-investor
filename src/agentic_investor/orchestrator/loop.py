@@ -207,6 +207,10 @@ def start_memory_watchdog(session=None) -> None:
 
     def _loop() -> None:
         import time
+        # Heartbeat every ~60 s at INFO so an operator watching the log
+        # can confirm the watchdog is actually running.
+        heartbeat_every = 12  # 12 * 5s = 60s
+        i = 0
         while True:
             try:
                 pb = _current_private_bytes()
@@ -217,6 +221,12 @@ def start_memory_watchdog(session=None) -> None:
                 if pmb >= threshold_mb:
                     _fire_memory_recycle(pmb, threshold_mb, None, session, source="watchdog")
                     return  # unreachable - os._exit above
+                if i % heartbeat_every == 0:
+                    logger.info(
+                        "memory_watchdog heartbeat: private=%d MB / threshold=%d MB",
+                        pmb, threshold_mb,
+                    )
+            i += 1
             time.sleep(5.0)
 
     t = threading.Thread(target=_loop, name="memory-watchdog", daemon=True)
@@ -2325,6 +2335,11 @@ def run_event_loop(
     )
     from agentic_investor.tools.news_stream import NewsStreamer
     from agentic_investor.tools.paper_store import load_loop_state
+
+    # Memory watchdog first, before any other setup, so it's watching
+    # even while FinBERT + models load. Idempotent; no-op if the env
+    # var isn't set. The paper-experiment supervisor sets it to 6144.
+    start_memory_watchdog(session=session)
 
     # Restart survival: if a prior state was persisted for this account,
     # rehydrate. If last_rec_date is TODAY we skip the first-tick regen
