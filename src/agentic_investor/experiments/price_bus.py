@@ -92,11 +92,38 @@ def run_price_bus_writer(bus_url: str) -> int:
     from alpaca.data.live.stock import StockDataStream
 
     from agentic_investor.config import get_settings
+    from agentic_investor.experiments._bus_purge import (
+        env_ttl_hours,
+        start_purge_thread,
+    )
 
     s = get_settings()
     db_path = bus_path_from_url(bus_url)
     init_price_bus_tables(db_path)
     logger.info("price bus writer starting -> %s", db_path)
+
+    # TTL purge: drop price_ticks older than
+    # AGENTIC_PRICE_BUS_TTL_HOURS (default 2h; only current-session ticks
+    # are needed by the reaction-price fetcher + drift calc). Sweep every
+    # 5 min. price_subscriptions has its own 5-min-window TTL in
+    # `_read_desired_tickers`, no purge needed there.
+    price_ttl_h = env_ttl_hours("AGENTIC_PRICE_BUS_TTL_HOURS", 2.0)
+
+    def _purge_ticks(conn):
+        from datetime import UTC, datetime, timedelta
+        cutoff = (
+            datetime.now(UTC) - timedelta(hours=price_ttl_h)
+        ).isoformat()
+        cur = conn.execute(
+            "DELETE FROM price_ticks WHERE ts_recv < ?", (cutoff,),
+        )
+        return cur.rowcount
+
+    start_purge_thread(
+        db_path, _purge_ticks,
+        interval_sec=300.0,
+        label="price_bus",
+    )
 
     stream = StockDataStream(
         api_key=s.alpaca_api_key,

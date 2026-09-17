@@ -1181,9 +1181,29 @@ def _paper_loop(
 
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if log_file:
+        from logging.handlers import RotatingFileHandler
         from pathlib import Path
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+        # Rotate at AGENTIC_LOG_ROTATE_MB (default 20 MB), keeping
+        # AGENTIC_LOG_ROTATE_KEEP backups (default 5). RotatingFileHandler
+        # closes + reopens the file on rotation which `tail -F` (used by
+        # our Monitor pattern) follows correctly. Total on-disk budget
+        # per arm: (rotate_mb * (keep + 1)) = 120 MB by default.
+        import os
+        try:
+            rotate_mb = int(os.environ.get("AGENTIC_LOG_ROTATE_MB", "20"))
+        except ValueError:
+            rotate_mb = 20
+        try:
+            rotate_keep = int(os.environ.get("AGENTIC_LOG_ROTATE_KEEP", "5"))
+        except ValueError:
+            rotate_keep = 5
+        handlers.append(RotatingFileHandler(
+            log_file,
+            maxBytes=max(1, rotate_mb) * 1024 * 1024,
+            backupCount=max(0, rotate_keep),
+            encoding="utf-8",
+        ))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

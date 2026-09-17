@@ -74,11 +74,101 @@ def run_bus_writer(bus_url: str) -> int:
     from alpaca.data.live.news import NewsDataStream
 
     from agentic_investor.config import get_settings
+    from agentic_investor.experiments._bus_purge import (
+        env_ttl_hours,
+        start_purge_thread,
+    )
 
     s = get_settings()
     db_path = bus_path_from_url(bus_url)
     init_bus_table(db_path)
     logger.info("news bus writer starting -> %s", db_path)
+
+    # TTL purge: drop bus_events older than AGENTIC_NEWS_BUS_TTL_HOURS
+    # (default 4h - 4x the STALE cutoff used by the decision engine's
+    # render_batch_context, comfortable margin). Sweeps every 5 min.
+    news_bus_ttl_h = env_ttl_hours("AGENTIC_NEWS_BUS_TTL_HOURS", 4.0)
+
+    def _purge_bus(conn):
+        # Use ts_received (writer-side clock, always sane) rather than
+        # ts_published (which is provider-set, occasionally weird).
+        from datetime import UTC, datetime, timedelta
+        cutoff = (
+            datetime.now(UTC) - timedelta(hours=news_bus_ttl_h)
+        ).isoformat()
+        cur = conn.execute(
+            "DELETE FROM bus_events WHERE ts_received < ?", (cutoff,),
+        )
+        return cur.rowcount
+
+    start_purge_thread(
+        db_path, _purge_bus,
+        interval_sec=300.0,  # 5 min
+        label="news_bus",
+    )
+
+    # Also purge the news_articles + vec_news store owned by tools/
+    # news.py (post-#146). Uses `AGENTIC_NEWS_STORE_TTL_DAYS`, default 30
+    # (news recency for RAG matters most in the near term; older articles
+    # are diluted by fresher signal anyway).
+    news_store_ttl_days = float(
+        env_ttl_hours("AGENTIC_NEWS_STORE_TTL_DAYS", 30.0),
+    )
+    news_store_path = Path(s.news_store_path)
+
+    def _purge_news_store(conn):
+        # Two-table cleanup: DELETE metadata rows first, then remove
+        # their vec_news counterparts by joined-on internal_id. Doing it
+        # in one transaction is fine since the writer thread owns the
+        # only other lock and it's tiny per-insert.
+        from datetime import UTC, datetime, timedelta
+        cutoff = (
+            datetime.now(UTC) - timedelta(days=news_store_ttl_days)
+        ).isoformat()
+        # Collect internal_ids we're about to delete so vec_news can drop
+        # them by rowid (sqlite-vec vec0 tables don't support subquery
+        # DELETE the same way regular tables do).
+        rows = conn.execute(
+            "SELECT internal_id FROM news_articles WHERE published_at < ?",
+            (cutoff,),
+        ).fetchall()
+        if not rows:
+            return 0
+        ids = [r[0] for r in rows]
+        # DELETE metadata first
+        placeholders = ",".join("?" * len(ids))
+        conn.execute(
+            f"DELETE FROM news_articles WHERE internal_id IN ({placeholders})",
+            ids,
+        )
+        # DELETE vec rows one-by-one; vec0 accepts single-rowid DELETEs.
+        for iid in ids:
+            conn.execute("DELETE FROM vec_news WHERE rowid = ?", (iid,))
+        return len(ids)
+
+    # The news store is a separate sqlite file with a vec0 virtual table,
+    # so each purge connection needs sqlite_vec.load() before it can
+    # touch vec_news. start_purge_thread opens its own connection per
+    # sweep so no cross-file locking.
+    import sqlite_vec
+
+    def _load_vec(conn):
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+
+    if news_store_path.exists():
+        start_purge_thread(
+            news_store_path, _purge_news_store,
+            interval_sec=3600.0,  # once an hour is plenty for a days-TTL
+            label="news_store",
+            conn_setup=_load_vec,
+        )
+    else:
+        logger.info(
+            "news store path not present yet (%s); skipping TTL thread",
+            news_store_path,
+        )
 
     stream = NewsDataStream(
         api_key=s.alpaca_api_key,
