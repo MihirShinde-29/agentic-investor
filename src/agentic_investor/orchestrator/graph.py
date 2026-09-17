@@ -17,6 +17,7 @@ Three nodes:
                   one-line change later.
 """
 
+import gc
 import json
 import logging
 import os
@@ -1055,6 +1056,12 @@ def _ensemble_allocate(
                 samples.append(structured_complete(Allocation, messages, model=m))
             except Exception as e:  # noqa: BLE001
                 logger.warning("ensemble sample failed for model=%s: %s", m, e)
+            # Cross-provider ensemble (e.g. OpenAI + Anthropic) accumulates
+            # raw ModelResponse objects, tokenizer buffers, and provider
+            # SDK state across the back-to-back calls. Forcing a GC pass
+            # between models kept arm C's private commit under 3 GB in
+            # 2026-09-17 morning testing vs. 40 GB in 10 min without.
+            gc.collect()
         meta_kind = "cross_model"
         meta_extra = {"models": models}
     else:
@@ -1065,6 +1072,7 @@ def _ensemble_allocate(
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("self-consistency sample failed: %s", e)
+            gc.collect()
         meta_kind = "self_consistency"
         meta_extra = {"n": n}
 
@@ -1077,20 +1085,26 @@ def _ensemble_allocate(
             "ensemble degraded to n=1 (%s); other samples raised",
             meta_kind,
         )
-        return samples[0], {"kind": meta_kind, "n_ok": 1, **meta_extra}
+        picked_alone = samples[0]
+        del samples
+        gc.collect()
+        return picked_alone, {"kind": meta_kind, "n_ok": 1, **meta_extra}
 
     agreement = _agreement_score(samples)
     picked = _pick_median_sample(samples)
+    n_ok = len(samples)
     meta = {
         "kind": meta_kind,
-        "n_ok": len(samples),
+        "n_ok": n_ok,
         "agreement": round(agreement, 3),
         **meta_extra,
     }
     logger.info(
         "%s: n=%d agreement=%.2f meta=%s",
-        meta_kind, len(samples), agreement, meta_extra,
+        meta_kind, n_ok, agreement, meta_extra,
     )
+    del samples
+    gc.collect()
     return picked, meta
 
 
