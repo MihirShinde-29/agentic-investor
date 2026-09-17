@@ -397,6 +397,60 @@ def iter_recorded_news() -> Iterator[dict]:
     return _gen()
 
 
+def recorded_now() -> datetime:
+    """Deterministic-replay-aware `datetime.now(UTC)`.
+
+    - Replay mode: pop the next recorded 'now' from the FIFO. Empty
+      queue falls through to real datetime.now (graceful trailoff so a
+      replay past the recording's end still works).
+    - Record mode: get the real time, capture it, return it.
+    - Both env vars off: identical to datetime.now(UTC), zero overhead
+      beyond the wrapper call.
+
+    Use for any wall-clock reads in the decision path (retrieval max-
+    age filters, correlation lookback windows, rebalancer day stamp)
+    so a bit-exact replay is possible. Ordinary datetime.now(UTC) in
+    telemetry / logging paths is fine to leave unchanged.
+    """
+    replayed = next_from_source("now")
+    if replayed is not None:
+        iso = replayed.get("iso")
+        if iso:
+            try:
+                return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+    now = datetime.now(UTC)
+    if os.environ.get(_ENV_RECORD_TO):
+        record_source("now", {"iso": now.isoformat()})
+    return now
+
+
+def recorded_uuid_hex(n_chars: int = 16) -> str:
+    """Deterministic-replay-aware short UUID hex.
+
+    Same shape as `uuid.uuid4().hex[:n_chars]`. Same rules as
+    `recorded_now`: replay pops from FIFO, record captures the fresh
+    value.
+
+    Used for the client_order_id fallback in paper_broker (production
+    code path derives a deterministic id from rec_id + ticker + side +
+    day + qty via _client_order_id, so this only bites manual /
+    one-off submissions; wrapping it makes replay reproducible for
+    those too).
+    """
+    replayed = next_from_source("uuid_hex")
+    if replayed is not None:
+        h = replayed.get("hex")
+        if isinstance(h, str):
+            return h[:n_chars]
+    import uuid
+    h = uuid.uuid4().hex[:n_chars]
+    if os.environ.get(_ENV_RECORD_TO):
+        record_source("uuid_hex", {"hex": h})
+    return h
+
+
 def record_source(kind: str, data: dict) -> None:
     """Append a source-event row to AGENTIC_RECORD_TO/recording.jsonl.
 

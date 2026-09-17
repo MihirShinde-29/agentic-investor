@@ -198,7 +198,10 @@ def execute_trade_plan(
     Full-exit SELLs (target_pct == 0) are routed via broker.close_position()
     so Alpaca liquidates exact holdings without leaving fractional-share dust.
     """
-    day = day or datetime.now(UTC).strftime("%Y-%m-%d")
+    # recorded_now so replay's day-stamp matches the recording (task #155).
+    if day is None:
+        from agentic_investor.orchestrator.recorder import recorded_now
+        day = recorded_now().strftime("%Y-%m-%d")
     submitted: list[PaperOrder] = []
     for p in plans:
         # Per-order try/except so one bad order (non-fractionable ticker,

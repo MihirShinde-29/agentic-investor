@@ -429,3 +429,73 @@ def test_iter_recorded_news_yields_only_news_rows(tmp_path, monkeypatch):
 def test_iter_recorded_news_empty_when_env_unset():
     from agentic_investor.orchestrator.recorder import iter_recorded_news
     assert list(iter_recorded_news()) == []
+
+
+# --- recorded_now + recorded_uuid_hex (task #155) ------------------------
+
+def test_recorded_now_returns_real_now_when_replay_off():
+    from datetime import UTC, datetime
+
+    from agentic_investor.orchestrator.recorder import recorded_now
+    a = recorded_now()
+    b = datetime.now(UTC)
+    # Same within a small window
+    assert abs((a - b).total_seconds()) < 1.0
+
+
+def test_recorded_now_captures_and_replays(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from agentic_investor.orchestrator.recorder import (
+        record_source,
+        recorded_now,
+    )
+    # Seed a recording with two 'now' events
+    monkeypatch.setenv("AGENTIC_REPLAY_FROM", str(tmp_path))
+    _seed_recording(tmp_path, [
+        {"kind": "now", "seq": 1, "iso": "2026-09-17T15:00:00+00:00"},
+        {"kind": "now", "seq": 2, "iso": "2026-09-17T15:00:05+00:00"},
+    ])
+    t1 = recorded_now()
+    t2 = recorded_now()
+    assert t1 == datetime.fromisoformat("2026-09-17T15:00:00+00:00")
+    assert t2 == datetime.fromisoformat("2026-09-17T15:00:05+00:00")
+    # Third call: queue exhausted, falls through to real time
+    t3 = recorded_now()
+    assert isinstance(t3, datetime)
+    _ = record_source  # unused; keeps the import obvious
+
+
+def test_recorded_now_records_when_env_set(tmp_path, monkeypatch):
+    from agentic_investor.orchestrator.recorder import recorded_now
+    monkeypatch.setenv("AGENTIC_RECORD_TO", str(tmp_path))
+    _ = recorded_now()
+    rows = [json.loads(ln)
+            for ln in (tmp_path / "recording.jsonl").read_text(
+                encoding="utf-8").splitlines()]
+    now_rows = [r for r in rows if r.get("kind") == "now"]
+    assert len(now_rows) == 1
+    assert "iso" in now_rows[0]
+
+
+def test_recorded_uuid_hex_returns_real_when_replay_off():
+    from agentic_investor.orchestrator.recorder import recorded_uuid_hex
+    a = recorded_uuid_hex(16)
+    b = recorded_uuid_hex(16)
+    assert isinstance(a, str)
+    assert len(a) == 16
+    assert a != b  # random UUIDs differ
+
+
+def test_recorded_uuid_hex_captures_and_replays(tmp_path, monkeypatch):
+    from agentic_investor.orchestrator.recorder import recorded_uuid_hex
+    _seed_recording(tmp_path, [
+        {"kind": "uuid_hex", "seq": 1, "hex": "deadbeefcafef00d"},
+        {"kind": "uuid_hex", "seq": 2, "hex": "0123456789abcdef"},
+    ])
+    monkeypatch.setenv("AGENTIC_REPLAY_FROM", str(tmp_path))
+    assert recorded_uuid_hex(16) == "deadbeefcafef00d"
+    assert recorded_uuid_hex(16) == "0123456789abcdef"
+    # Third call: queue exhausted -> fresh uuid
+    fallback = recorded_uuid_hex(16)
+    assert len(fallback) == 16

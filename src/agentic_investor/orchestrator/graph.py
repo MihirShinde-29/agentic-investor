@@ -669,13 +669,15 @@ def _recent_trades_block(
     if not tickers:
         return ""
     try:
-        from datetime import UTC, datetime, timedelta
+        from datetime import timedelta
 
+        from agentic_investor.orchestrator.recorder import recorded_now
         from agentic_investor.tools.paper_store import recent_trades_for_tickers
 
         # DB stores submitted_at with a space separator (str(datetime)) rather
         # than isoformat's 'T', so match that shape for the string comparison.
-        since = str(datetime.now(UTC) - timedelta(hours=lookback_hours))
+        # recorded_now routes via the replay recording when active (task #155).
+        since = str(recorded_now() - timedelta(hours=lookback_hours))
         by_ticker = recent_trades_for_tickers(
             list(tickers), since_iso=since, per_ticker_limit=per_ticker_limit,
         )
@@ -804,12 +806,14 @@ def _messages(state: GraphState) -> list[dict]:
                 for p in prev_alloc_for_corr.positions:
                     corr_universe.add(p.ticker.upper())
             try:
-                from datetime import UTC, datetime, timedelta
+                from datetime import timedelta
 
+                from agentic_investor.orchestrator.recorder import recorded_now
                 from agentic_investor.tools.paper_store import (
                     recent_sold_tickers,
                 )
-                since = str(datetime.now(UTC) - timedelta(hours=24))
+                # recorded_now for bit-exact replay (task #155).
+                since = str(recorded_now() - timedelta(hours=24))
                 for tk in recent_sold_tickers(since_iso=since):
                     corr_universe.add(tk)
             except Exception:  # noqa: BLE001 - hint best-effort

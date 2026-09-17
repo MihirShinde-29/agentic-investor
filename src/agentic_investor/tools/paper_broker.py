@@ -12,7 +12,6 @@ default and gated behind ALPACA_PAPER=false in the environment.
 from __future__ import annotations
 
 import logging
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -267,7 +266,15 @@ class AlpacaPaperBroker:
         # We own the client_order_id so retries stay idempotent. Alpaca rejects
         # duplicate ids so an accidentally re-submitted order errors instead of
         # double-filling.
-        coid = client_order_id or f"ai-{uuid.uuid4().hex[:16]}"
+        # Fallback path only: production callers derive a deterministic
+        # coid from rebalancer._client_order_id. Route the uuid4 through
+        # the recorder so a deterministic replay reproduces the same id
+        # for any manual / one-off submissions too (task #155).
+        if client_order_id:
+            coid = client_order_id
+        else:
+            from agentic_investor.orchestrator.recorder import recorded_uuid_hex
+            coid = f"ai-{recorded_uuid_hex(16)}"
 
         # Bracket orders need a reference price to compute absolute levels.
         # For a MARKET buy we approximate with the latest trade price; for a

@@ -15,7 +15,7 @@ import sqlite3
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from agentic_investor.memory.rec_index import _default_connection, _default_embed
 from agentic_investor.memory.store import EMBED_DIM
@@ -129,8 +129,11 @@ def retrieve_similar(
     # composes cleanly but we still want extra headroom so a well-scoring
     # but stale hit doesn't push a fresh one out of the top-K.
     fetch_k = k * 4 if max_age_days is not None else k
+    # Route via recorded_now so a bit-exact replay uses the same
+    # cutoff as the recording (task #155). No-op when replay is off.
+    from agentic_investor.orchestrator.recorder import recorded_now
     cutoff_iso = (
-        (datetime.now(UTC) - timedelta(days=max_age_days)).isoformat()
+        (recorded_now() - timedelta(days=max_age_days)).isoformat()
         if max_age_days is not None else None
     )
 
