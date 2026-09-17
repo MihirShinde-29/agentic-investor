@@ -7,6 +7,21 @@ snapshots - lands in two places:
 - Structured JSONL row in out/sessions/<start>/session.jsonl for post-market
   analysis (grep, jq, pandas)
 
+Each JSONL row has:
+  ts        ISO-8601 UTC timestamp
+  event     short name (e.g. "order_submitted", "decision_moment")
+  arm_id    optional; set when AGENTIC_ARM_ID env is populated
+  ...       payload fields flattened at top level
+
+Payloads pass through `_safe_json_payload` so Pydantic models get
+`.model_dump()`d (not `str()`d, which was the earlier behavior via
+json.dumps(default=str)), Path becomes its string form, datetime
+becomes ISO. Anything unhandled falls back to str() so telemetry
+never blocks the loop.
+
+Analysis: use `iter_events(session_dir, ...)` from Python, or the
+provided jq examples in docs/INTERVIEW_NOTES.md B14 from a shell.
+
 A markdown summary is generated on shutdown with counts, trade log, and P&L
 curve pointers. All timestamps are UTC ISO 8601.
 """
@@ -17,8 +32,10 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -67,8 +84,14 @@ class SessionRecorder:
 
     def log(self, event: str, payload: dict[str, Any] | None = None) -> None:
         """Append a single event to jsonl + emit a pretty console line +
-        publish to the dashboard event bus for live WebSocket clients."""
-        payload = payload or {}
+        publish to the dashboard event bus for live WebSocket clients.
+
+        Payload runs through `_safe_json_payload` so Pydantic models,
+        Path, datetime, Decimal, set, tuple all serialize cleanly.
+        Unhandled types fall back to `str()` (via json.dumps' default)
+        so the loop never dies on telemetry.
+        """
+        payload = _safe_json_payload(payload or {})
         row = {
             "ts": datetime.now(UTC).isoformat(),
             "event": event,
@@ -121,3 +144,88 @@ def _pretty(payload: dict[str, Any]) -> str:
             s = str(v)
             parts.append(f"{k}={s[:80]}" + ("..." if len(s) > 80 else ""))
     return " ".join(parts)
+
+
+def _safe_json_payload(value: Any) -> Any:
+    """Recursively coerce `value` into a form `json.dumps` can serialize
+    without falling back to `str()`.
+
+    - Pydantic BaseModel  -> model_dump() (via `.model_dump()` when
+      present, so nested submodels also unwrap cleanly)
+    - Path                -> str(path)
+    - datetime / date     -> ISO 8601 string
+    - Decimal             -> float
+    - set / tuple / frozenset -> list of sanitized items
+    - dict                -> new dict with sanitized values (keys must be
+                             str/int; anything else becomes str())
+    - list                -> list of sanitized items
+    - everything else     -> pass through; json.dumps(default=str) still
+                             catches truly-weird types without raising
+
+    Never raises: telemetry must not take down the loop.
+    """
+    try:
+        if hasattr(value, "model_dump") and callable(value.model_dump):
+            # Pydantic v2 model. `mode="json"` returns JSON-safe primitives
+            # (ISO datetime, etc.) so we don't re-coerce below.
+            return value.model_dump(mode="json")
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for k, v in value.items():
+                key = k if isinstance(k, (str, int)) else str(k)
+                out[key] = _safe_json_payload(v)
+            return out
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [_safe_json_payload(v) for v in value]
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        return value
+    except Exception:  # noqa: BLE001 - telemetry never blocks the loop
+        return str(value)
+
+
+def iter_events(
+    session_dir: Path | str,
+    *,
+    event_types: list[str] | None = None,
+    since_ts: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield each event row from `session_dir/session.jsonl`.
+
+    - `event_types`: if given, only rows whose `event` is in the set
+      are yielded. Fast pre-filter to avoid decoding every payload.
+    - `since_ts`: ISO 8601 lower bound; rows with `ts < since_ts` are
+      skipped. String comparison is fine because ISO 8601 sorts
+      lexicographically the way you'd want.
+
+    Malformed JSON lines are logged at DEBUG and skipped; a partial
+    write at the tail of a still-open jsonl (last line missing a
+    newline) will just get skipped, matching how `jq` handles it.
+    """
+    path = Path(session_dir)
+    if path.is_dir():
+        path = path / "session.jsonl"
+    if not path.exists():
+        return
+    type_set = set(event_types) if event_types else None
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as e:
+                logger.debug("skipping malformed jsonl line: %s", e)
+                continue
+            if since_ts is not None:
+                ts = row.get("ts")
+                if ts is not None and ts < since_ts:
+                    continue
+            if type_set is not None and row.get("event") not in type_set:
+                continue
+            yield row
