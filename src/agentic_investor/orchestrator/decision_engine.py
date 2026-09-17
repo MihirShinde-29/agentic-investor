@@ -177,12 +177,19 @@ def build_batch(
 def render_batch_context(batch: DecisionBatch) -> str:
     """Render a DecisionBatch into a text block for the allocator prompt.
 
-    Each line leads with the stable `news_id` (e.g. `N3f9a2b1c`) so the LLM
-    can cite it back on each Position via `triggering_news_ids`. Keeps the
-    format compact - id is 9 chars, well under a headline of noise.
+    HOT + COOKED only. STALE items (>60min old, docstring already calls
+    them "background only") are excluded because overnight news
+    backlogs pushed the STALE bucket to 3000+ items on 2026-09-17,
+    inflating the rendered context to ~450KB and blowing gpt-4o-mini's
+    128K token limit on 3 arms simultaneously. STALE items still live
+    in the DecisionBatch (and the snapshot); we just don't spend the
+    prompt tokens on them.
+
+    Each line leads with the stable `news_id` (e.g. `N3f9a2b1c`) so the
+    LLM can cite it back on each Position via `triggering_news_ids`.
     """
     lines: list[str] = []
-    for group_name, group in (("HOT", batch.hot), ("COOKED", batch.cooked), ("STALE", batch.stale)):
+    for group_name, group in (("HOT", batch.hot), ("COOKED", batch.cooked)):
         for item in group:
             e = item.event
             headline = (e.headline or "").strip()[:120]

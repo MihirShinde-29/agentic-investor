@@ -100,21 +100,26 @@ def test_render_batch_context_groups_events_by_age_tag():
     state = DecisionState(unprocessed=[
         _news("AAPL", 1, headline="Apple beats earnings"),
         _news("NVDA", 16, headline="Nvidia downgraded by Barclays"),
-        _news("MSFT", 90, headline="Old MSFT news"),
+        _news("MSFT", 90, headline="Old MSFT news"),  # STALE - not rendered
     ])
     state.last_batch_window_started = now - timedelta(seconds=60)
     batch = build_batch(state, now)
     text = render_batch_context(batch)
-    # Each ticker + age tag + news_id should appear; order = HOT / COOKED / STALE.
+    # HOT + COOKED render; STALE is dropped from the prompt to keep the
+    # rendered context under the model's token ceiling. See 2026-09-17
+    # incident (450KB news_batch_context on a 3486-STALE-item overnight
+    # backlog blew gpt-4o-mini's 128K limit on 3 arms simultaneously).
     assert "[HOT]" in text and " AAPL " in text
     assert "Apple beats earnings" in text
     assert "[COOKED]" in text and " NVDA " in text
-    assert "[STALE]" in text and " MSFT " in text
-    # News IDs are prefixed with N and appear between the tag and the ticker.
+    assert "[STALE]" not in text
+    assert "MSFT" not in text
+    # News IDs are prefixed with N and appear between the tag and the ticker
+    # for HOT/COOKED items.
     import re
-    for tk in ("AAPL", "NVDA", "MSFT"):
+    for tk in ("AAPL", "NVDA"):
         assert re.search(rf"N[0-9a-f]{{8}} {tk}", text), f"news_id missing for {tk}"
-    assert text.index("[HOT]") < text.index("[COOKED]") < text.index("[STALE]")
+    assert text.index("[HOT]") < text.index("[COOKED]")
 
 
 def test_render_batch_context_empty_when_no_events():
