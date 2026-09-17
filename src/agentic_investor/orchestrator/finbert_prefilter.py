@@ -73,15 +73,33 @@ def _label_to_signed(label: str) -> float:
     return 0.0
 
 
-def score_headlines(headlines: list[str]) -> SentimentScore | None:
-    """Score a list of headlines. Returns None if finBERT isn't available."""
+def _pipeline_scores(headlines: list[str]) -> list | None:
+    """Route through the shared ml-service when AGENTIC_ML_SERVICE_URL
+    is set; fall through to local pipeline otherwise. Returns the raw
+    list-per-headline of {label, score} dicts (or list objects for the
+    local path) that both call sites can iterate identically.
+    """
+    from agentic_investor.tools import ml_client
+
+    service_out = ml_client.finbert_scores(headlines)
+    if service_out is not None:
+        return service_out
     pipe = _get_pipeline()
-    if pipe is None or not headlines:
+    if pipe is None:
         return None
     try:
-        results = pipe(headlines, truncation=True, max_length=128)  # type: ignore[misc]
+        return pipe(headlines, truncation=True, max_length=128)  # type: ignore[misc]
     except Exception as e:  # noqa: BLE001
         logger.warning("finBERT scoring failed: %s", e)
+        return None
+
+
+def score_headlines(headlines: list[str]) -> SentimentScore | None:
+    """Score a list of headlines. Returns None if finBERT isn't available."""
+    if not headlines:
+        return None
+    results = _pipeline_scores(headlines)
+    if results is None:
         return None
 
     total = 0.0
@@ -122,18 +140,16 @@ def score_headlines(headlines: list[str]) -> SentimentScore | None:
 
 def score_single(headline: str) -> float | None:
     """Return signed sentiment for one headline in [-1, 1], or None if the
-    pipeline isn't available. Cheap enough (~50ms cpu) to run inline as
-    news arrives so hot signals can force-fire the LLM without waiting
-    for the batch window to close.
+    pipeline isn't available. Cheap enough (~50ms cpu, ~55ms via service
+    RPC) to run inline as news arrives so hot signals can force-fire the
+    LLM without waiting for the batch window to close.
     """
-    pipe = _get_pipeline()
-    if pipe is None or not headline:
+    if not headline:
         return None
-    try:
-        row = pipe([headline], truncation=True, max_length=128)[0]  # type: ignore[misc]
-    except Exception as e:  # noqa: BLE001
-        logger.warning("finBERT single-headline scoring failed: %s", e)
+    results = _pipeline_scores([headline])
+    if results is None:
         return None
+    row = results[0]
     entries = row if isinstance(row, list) else [row]
     weighted = 0.0
     for entry in entries:

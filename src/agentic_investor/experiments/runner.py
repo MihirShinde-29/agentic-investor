@@ -86,6 +86,7 @@ def _arm_env(
     arm_id: str,
     news_bus_url: str | None = None,
     price_bus_url: str | None = None,
+    ml_service_url: str | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     env = dict(os.environ)
@@ -96,11 +97,13 @@ def _arm_env(
         env["AGENTIC_NEWS_BUS"] = news_bus_url
     if price_bus_url:
         env["AGENTIC_PRICE_BUS"] = price_bus_url
+    if ml_service_url:
+        env["AGENTIC_ML_SERVICE_URL"] = ml_service_url
     # Memory circuit breaker: recycle an arm subprocess when its private
-    # commit exceeds this many MB. Guards against the LiteLLM/httpx leak
-    # that took arm B to 42 GB on 2026-09-17. Overridable per-arm via
-    # arms.<id>.env in the experiment YAML, or globally via the parent
-    # shell's AGENTIC_MEM_RECYCLE_MB when launching paper-experiment.
+    # commit exceeds this many MB. Guards against native-code arena leaks
+    # in third-party dependencies (2026-09-17: chromadb HNSW segment
+    # reservation). Overridable per-arm via arms.<id>.env in the
+    # experiment YAML, or globally via the parent shell's env.
     env.setdefault("AGENTIC_MEM_RECYCLE_MB", "6144")
     if extra_env:
         env.update(extra_env)
@@ -376,6 +379,31 @@ def run_experiment(
         # Let the writers CREATE TABLE before arms start polling.
         time.sleep(2)
 
+    # ML service: one shared subprocess owns finBERT + sentence-transformers.
+    # Arms consume via AGENTIC_ML_SERVICE_URL (set on each arm's env below)
+    # and fall back to loading models locally if the service is
+    # unreachable. Motivated by 2026-09-17: 3 arms x ~530 MB duplicated
+    # was enough to push a laptop over the memory-pressure threshold.
+    ml_service_port = 8765
+    ml_service_url = f"http://127.0.0.1:{ml_service_port}"
+    ml_service_cmd = [
+        sys.executable, "-m", "agentic_investor.cli",
+        "paper-ml-service", "--port", str(ml_service_port),
+    ]
+    print(f"  ml-service cmd: {' '.join(ml_service_cmd)}")
+    if not dry_run_launch:
+        _spawn_supervised(
+            "ml-service", ml_service_cmd, dict(os.environ), procs, threads,
+        )
+        # Wait for /health to report both models loaded before spawning
+        # arms so their first tick doesn't fall through to local loading.
+        # ~30 s is typical (finBERT ~15 s + embed ~10 s + margin).
+        from agentic_investor.tools.ml_client import wait_for_healthy
+        if wait_for_healthy(ml_service_url, timeout_sec=60.0):
+            print("  ml-service ready")
+        else:
+            print("  ml-service warm-up timed out; arms will fall back to local")
+
     # M17 outcome sweeper: subprocess (priority 1) with startup
     # healthcheck (priority 4) so chromadb corruption is loud NOW instead
     # of surfacing 30 min into the run.
@@ -415,6 +443,7 @@ def run_experiment(
             arm_id=arm.arm_id,
             news_bus_url=news_bus_url,
             price_bus_url=price_bus_url,
+            ml_service_url=(ml_service_url if not dry_run_launch else None),
             extra_env=arm.env,
         )
         cmd = [

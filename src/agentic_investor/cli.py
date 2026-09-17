@@ -1648,10 +1648,21 @@ def main() -> None:
     pos = sub.add_parser("paper-outcome-sweeper",
                          help="standalone M17 outcome-sweeper subprocess for "
                               "a paper-experiment; typically spawned by the "
-                              "runner so a chromadb crash isolates from the "
+                              "runner so a store crash isolates from the "
                               "supervisor process")
     pos.add_argument("--interval-min", type=int, default=30,
                      help="minutes between sweeps (default 30; 0 disables)")
+
+    pms = sub.add_parser("paper-ml-service",
+                         help="shared inference service (finBERT + "
+                              "sentence-transformers) for arm subprocesses. "
+                              "Arms consume it via AGENTIC_ML_SERVICE_URL "
+                              "and fall back to local loading if it's down.")
+    pms.add_argument("--host", default="127.0.0.1",
+                     help="bind address (default 127.0.0.1; use 0.0.0.0 to "
+                          "expose beyond localhost - not needed in-experiment)")
+    pms.add_argument("--port", type=int, default=8765,
+                     help="listen port (default 8765)")
 
     pdb = sub.add_parser("paper-dashboard",
                          help="serve the multi-arm experiment dashboard "
@@ -1834,6 +1845,9 @@ def main() -> None:
             run_outcome_sweeper,
         )
         return run_outcome_sweeper(args.interval_min)
+    elif args.cmd == "paper-ml-service":
+        from agentic_investor.services.ml_service import run_ml_service
+        return run_ml_service(host=args.host, port=args.port)
     elif args.cmd == "paper-dashboard":
         from agentic_investor.dashboard.server import serve_forever
         exp_ctx = None

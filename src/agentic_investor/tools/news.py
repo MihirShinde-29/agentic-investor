@@ -150,6 +150,14 @@ def _get_embed_model():
 
 
 def _embed_text(texts: list[str]) -> list[list[float]]:
+    # Route through the shared ml-service if AGENTIC_ML_SERVICE_URL is set;
+    # fall back to loading the local sentence-transformer model in-process.
+    # See services/ml_service.py + tools/ml_client.py for the service side.
+    from agentic_investor.tools import ml_client
+
+    service_out = ml_client.embed_texts(texts)
+    if service_out is not None:
+        return service_out
     model = _get_embed_model()
     vecs = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
     return vecs.tolist()
