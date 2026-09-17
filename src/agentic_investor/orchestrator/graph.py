@@ -19,6 +19,7 @@ Three nodes:
 
 import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 from langgraph.graph import END, START, StateGraph
@@ -43,6 +44,14 @@ from agentic_investor.orchestrator.strategy import (
 from agentic_investor.tools.market import MarketSnapshot, get_market_snapshot
 
 logger = logging.getLogger(__name__)
+
+
+class PromptTooLargeError(Exception):
+    """Raised when the assembled allocator prompt would exceed the token
+    budget for the configured model. Turns a downstream API 400 into a
+    clean loop-side skip, and lets us log per-section byte counts to
+    find the bloat source without burning tokens on a doomed retry.
+    """
 
 ALLOCATOR_SYSTEM = """\
 You are a disciplined portfolio allocator. Given per-ticker signals from a
@@ -882,6 +891,35 @@ def _messages(state: GraphState) -> list[dict]:
 
     slow_prefix = USER_PREAMBLE + "\n\n" + "\n\n".join(slow_sections)
     fast_tail = "\n\n".join(fast_sections) + "\n\nProduce a valid Allocation."
+
+    # Defensive prompt-size cap. gpt-4o-mini is 128K tokens; when we go
+    # over the API returns a 400 that instructor can't retry past, so we
+    # burn a full regen slot with nothing to show. Trip early with a
+    # named exception the loop already catches as tick_error, and log
+    # per-section byte counts so we can diagnose which block ballooned.
+    # 2026-09-17 Day 4: this fires ~1 in 3 regens on B+C, source TBD.
+    total_chars = len(slow_prefix) + len(fast_tail)
+    total_tokens_est = total_chars // 4
+    max_prompt_tokens = int(os.environ.get("AGENTIC_MAX_PROMPT_TOKENS", "100000"))
+    if total_tokens_est > max_prompt_tokens:
+        section_bytes = [
+            (f"slow[{i}]", len(s)) for i, s in enumerate(slow_sections)
+        ] + [
+            (f"fast[{i}]", len(s)) for i, s in enumerate(fast_sections)
+        ]
+        section_bytes.sort(key=lambda kv: -kv[1])
+        logger.warning(
+            "prompt_too_large: est_tokens=%d cap=%d slow_bytes=%d "
+            "fast_bytes=%d top_sections=%s",
+            total_tokens_est, max_prompt_tokens, len(slow_prefix),
+            len(fast_tail),
+            [f"{k}={v}" for k, v in section_bytes[:5]],
+        )
+        raise PromptTooLargeError(
+            f"assembled prompt {total_tokens_est} est-tokens exceeds "
+            f"cap {max_prompt_tokens}; skipping regen"
+        )
+
     # Hash lets us diff prefix drift across regens; the est_tokens field
     # flags when the block falls below Anthropic's 1024 min cache block
     # (in which case the cache_control marker is a no-op).
