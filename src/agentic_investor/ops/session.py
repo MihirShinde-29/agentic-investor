@@ -27,6 +27,11 @@ logger = logging.getLogger("session")
 # Tagging events with the arm_id lets the dashboard-subprocess (which
 # doesn't share the in-process event bus with the arm subprocess) locate
 # the right session.jsonl per arm and stream events to the frontend.
+#
+# NOT going through flags.ARM_ID here: that resolves to "solo" when
+# AGENTIC_ARM_ID is unset, but for session tagging we want "unset" to
+# stay untagged so dashboard listeners distinguish experiment-arm
+# events from legacy single-arm ones.
 _ARM_ID = os.environ.get("AGENTIC_ARM_ID")
 
 

@@ -405,12 +405,10 @@ def run_experiment(
             print("  ml-service warm-up timed out; arms will fall back to local")
 
     # M17 outcome sweeper: subprocess (priority 1) with startup
-    # healthcheck (priority 4) so chromadb corruption is loud NOW instead
+    # healthcheck (priority 4) so store corruption is loud NOW instead
     # of surfacing 30 min into the run.
-    if (
-        memory_sweep_interval_min > 0
-        and os.environ.get("AGENTIC_MEMORY_RAG", "1") == "1"
-    ):
+    from agentic_investor.flags import flags
+    if memory_sweep_interval_min > 0 and flags.MEMORY_RAG:
         sweep_cmd = [
             sys.executable, "-m", "agentic_investor.cli",
             "paper-outcome-sweeper",

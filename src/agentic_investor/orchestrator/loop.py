@@ -55,7 +55,6 @@ logger = logging.getLogger(__name__)
 # Enabled via env var so tests + the interactive CLI don't recycle out
 # from under a developer. paper-experiment supervisor sets 6144 MB.
 
-_MEM_RECYCLE_ENV = "AGENTIC_MEM_RECYCLE_MB"
 _MEM_RECYCLE_EXIT_CODE = 42
 
 
@@ -123,10 +122,8 @@ def _current_private_bytes() -> int:
 
 
 def _mem_recycle_threshold_mb() -> int:
-    try:
-        return int(os.environ.get(_MEM_RECYCLE_ENV, "0"))
-    except ValueError:
-        return 0
+    from agentic_investor.flags import flags
+    return int(flags.MEM_RECYCLE_MB)
 
 
 def _fire_memory_recycle(
@@ -786,7 +783,8 @@ def _apply_cite_to_trade(plans, rec, prev_rec, session, rec_id):
     a no-op. Used by the wall-clock-cooldown A/B arm so both gates can
     run side-by-side without mutual interference.
     """
-    if os.environ.get("AGENTIC_CITE_TO_TRADE", "1") == "0":
+    from agentic_investor.flags import flags
+    if not flags.CITE_TO_TRADE:
         return plans
     reasoning = getattr(rec.allocation, "reasoning", None) if rec is not None else None
     positions = list(rec.allocation.positions) if rec is not None else []

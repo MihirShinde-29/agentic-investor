@@ -16,7 +16,6 @@ from pathlib import Path
 
 from agentic_investor.experiments._bus_purge import (
     _purge_once,
-    env_ttl_hours,
     start_purge_thread,
 )
 
@@ -45,25 +44,8 @@ def _count(path: Path) -> int:
         return conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
 
 
-def test_env_ttl_hours_defaults_and_parses(monkeypatch):
-    monkeypatch.delenv("X_TTL", raising=False)
-    assert env_ttl_hours("X_TTL", 4) == 4.0
-    monkeypatch.setenv("X_TTL", "2.5")
-    assert env_ttl_hours("X_TTL", 4) == 2.5
-
-
-def test_env_ttl_hours_rejects_negative_and_nonnumeric(monkeypatch, caplog):
-    import logging
-    monkeypatch.setenv("X_TTL", "not-a-number")
-    with caplog.at_level(logging.WARNING):
-        assert env_ttl_hours("X_TTL", 4) == 4.0
-    assert any("is not a number" in r.getMessage() for r in caplog.records)
-
-    caplog.clear()
-    monkeypatch.setenv("X_TTL", "-3")
-    with caplog.at_level(logging.WARNING):
-        assert env_ttl_hours("X_TTL", 4) == 4.0
-    assert any("is negative" in r.getMessage() for r in caplog.records)
+# env-var TTL parsing tests moved to test_flags.py after the #150
+# migration folded env_ttl_hours into the central flags registry.
 
 
 def test_purge_once_deletes_old_rows(tmp_path):

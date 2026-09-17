@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import queue
 import re
 import threading
@@ -188,7 +187,8 @@ class NewsStreamer:
     def _build_stream(self):
         if self._stream_factory is not None:
             return self._stream_factory()
-        bus_url = os.environ.get("AGENTIC_NEWS_BUS")
+        from agentic_investor.flags import flags
+        bus_url = flags.NEWS_BUS
         if bus_url:
             from agentic_investor.experiments.news_bus import SharedBusStream
             logger.info("news stream using shared bus: %s", bus_url)

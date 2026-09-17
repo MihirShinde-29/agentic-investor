@@ -74,20 +74,18 @@ def run_bus_writer(bus_url: str) -> int:
     from alpaca.data.live.news import NewsDataStream
 
     from agentic_investor.config import get_settings
-    from agentic_investor.experiments._bus_purge import (
-        env_ttl_hours,
-        start_purge_thread,
-    )
+    from agentic_investor.experiments._bus_purge import start_purge_thread
+    from agentic_investor.flags import flags
 
     s = get_settings()
     db_path = bus_path_from_url(bus_url)
     init_bus_table(db_path)
     logger.info("news bus writer starting -> %s", db_path)
 
-    # TTL purge: drop bus_events older than AGENTIC_NEWS_BUS_TTL_HOURS
-    # (default 4h - 4x the STALE cutoff used by the decision engine's
+    # TTL purge: drop bus_events older than NEWS_BUS_TTL_HOURS (default
+    # 4h - 4x the STALE cutoff used by the decision engine's
     # render_batch_context, comfortable margin). Sweeps every 5 min.
-    news_bus_ttl_h = env_ttl_hours("AGENTIC_NEWS_BUS_TTL_HOURS", 4.0)
+    news_bus_ttl_h = flags.NEWS_BUS_TTL_HOURS
 
     def _purge_bus(conn):
         # Use ts_received (writer-side clock, always sane) rather than
@@ -108,12 +106,10 @@ def run_bus_writer(bus_url: str) -> int:
     )
 
     # Also purge the news_articles + vec_news store owned by tools/
-    # news.py (post-#146). Uses `AGENTIC_NEWS_STORE_TTL_DAYS`, default 30
-    # (news recency for RAG matters most in the near term; older articles
-    # are diluted by fresher signal anyway).
-    news_store_ttl_days = float(
-        env_ttl_hours("AGENTIC_NEWS_STORE_TTL_DAYS", 30.0),
-    )
+    # news.py (post-#146). Uses NEWS_STORE_TTL_DAYS, default 30 (news
+    # recency for RAG matters most in the near term; older articles are
+    # diluted by fresher signal anyway).
+    news_store_ttl_days = flags.NEWS_STORE_TTL_DAYS
     news_store_path = Path(s.news_store_path)
 
     def _purge_news_store(conn):

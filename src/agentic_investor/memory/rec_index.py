@@ -287,14 +287,14 @@ def index_arm_rec(
     Honors AGENTIC_MEMORY_RAG kill-switch. Never raises - failure
     returns False and the loop moves on.
     """
-    import os
     from datetime import UTC, datetime
 
     from agentic_investor.config import get_settings
+    from agentic_investor.flags import flags
 
-    if os.environ.get("AGENTIC_MEMORY_RAG", "1") != "1":
+    if not flags.MEMORY_RAG:
         return False
-    resolved_arm = arm_id or os.environ.get("AGENTIC_ARM_ID") or "solo"
+    resolved_arm = arm_id or flags.ARM_ID
     try:
         source = f"arm_{resolved_arm}"
         created_at = datetime.now(UTC).isoformat()

@@ -116,24 +116,6 @@ def start_purge_thread(
     return t
 
 
-def env_ttl_hours(env_name: str, default_hours: float) -> float:
-    """Read a TTL-in-hours env; return `default_hours` when unset or bad."""
-    import os
-    raw = os.environ.get(env_name)
-    if not raw:
-        return float(default_hours)
-    try:
-        v = float(raw)
-    except ValueError:
-        logger.warning(
-            "%s=%r is not a number; using default %s h",
-            env_name, raw, default_hours,
-        )
-        return float(default_hours)
-    if v < 0:
-        logger.warning(
-            "%s=%s is negative; using default %s h",
-            env_name, v, default_hours,
-        )
-        return float(default_hours)
-    return v
+# Note: `env_ttl_hours` was removed in the #150 flags-registry migration.
+# TTLs are now read via `agentic_investor.flags.flags.NEWS_BUS_TTL_HOURS`
+# (etc.) at the call site.

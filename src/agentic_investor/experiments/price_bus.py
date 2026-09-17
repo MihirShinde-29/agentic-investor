@@ -92,22 +92,20 @@ def run_price_bus_writer(bus_url: str) -> int:
     from alpaca.data.live.stock import StockDataStream
 
     from agentic_investor.config import get_settings
-    from agentic_investor.experiments._bus_purge import (
-        env_ttl_hours,
-        start_purge_thread,
-    )
+    from agentic_investor.experiments._bus_purge import start_purge_thread
+    from agentic_investor.flags import flags
 
     s = get_settings()
     db_path = bus_path_from_url(bus_url)
     init_price_bus_tables(db_path)
     logger.info("price bus writer starting -> %s", db_path)
 
-    # TTL purge: drop price_ticks older than
-    # AGENTIC_PRICE_BUS_TTL_HOURS (default 2h; only current-session ticks
-    # are needed by the reaction-price fetcher + drift calc). Sweep every
-    # 5 min. price_subscriptions has its own 5-min-window TTL in
-    # `_read_desired_tickers`, no purge needed there.
-    price_ttl_h = env_ttl_hours("AGENTIC_PRICE_BUS_TTL_HOURS", 2.0)
+    # TTL purge: drop price_ticks older than PRICE_BUS_TTL_HOURS (default
+    # 2h; only current-session ticks are needed by the reaction-price
+    # fetcher + drift calc). Sweep every 5 min. price_subscriptions has
+    # its own 5-min-window TTL in `_read_desired_tickers`, no purge
+    # needed there.
+    price_ttl_h = flags.PRICE_BUS_TTL_HOURS
 
     def _purge_ticks(conn):
         from datetime import UTC, datetime, timedelta
@@ -331,10 +329,13 @@ def get_bus_client() -> PriceBusClient | None:
     with _singleton_lock:
         if _client_singleton is not None:
             return _client_singleton
-        import os
-        bus_url = os.environ.get("AGENTIC_PRICE_BUS")
-        arm_id = os.environ.get("AGENTIC_ARM_ID")
-        if not bus_url or not arm_id:
+        from agentic_investor.flags import flags
+        bus_url = flags.PRICE_BUS
+        arm_id = flags.ARM_ID
+        # ARM_ID has a "solo" default so we key off the bus URL alone as
+        # the "bus mode is on" signal - arms with bus configured but no
+        # explicit ARM_ID are still routable ("solo" is a valid arm tag).
+        if not bus_url:
             return None
         _client_singleton = PriceBusClient(bus_url, arm_id)
         return _client_singleton

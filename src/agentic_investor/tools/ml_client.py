@@ -13,15 +13,18 @@ cost. Instead we use plain httpx + typed helpers here.
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Sequence
 from threading import Lock
 
 import httpx
 
+from agentic_investor.flags import flags
+
 logger = logging.getLogger(__name__)
 
 
+# Kept for backward compat with tests that patch it by string. Prefer
+# `flags.ML_SERVICE_URL` for reading.
 _URL_ENV = "AGENTIC_ML_SERVICE_URL"
 _REQUEST_TIMEOUT_SEC = 10.0
 
@@ -33,7 +36,10 @@ _fallback_notified = False
 
 def service_url() -> str | None:
     """Return the configured URL or None."""
-    url = os.environ.get(_URL_ENV, "").strip()
+    url = flags.ML_SERVICE_URL
+    if url is None:
+        return None
+    url = url.strip()
     return url or None
 
 

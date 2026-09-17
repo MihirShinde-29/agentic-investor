@@ -609,9 +609,9 @@ def _similar_precedents_block(state: GraphState, k: int = 4) -> str:
     volatile fast_tail (post-cache-marker) - it changes every regen and
     would tank cache-hit rates if it moved earlier.
     """
-    import os as _os
+    from agentic_investor.flags import flags
 
-    if _os.environ.get("AGENTIC_MEMORY_RAG", "1") != "1":
+    if not flags.MEMORY_RAG:
         return ""
     req = state.get("request")
     if req is None:
@@ -634,9 +634,9 @@ def _similar_precedents_block(state: GraphState, k: int = 4) -> str:
     try:
         from agentic_investor.memory.retrieval import retrieve_similar
 
-        arm_id = _os.environ.get("AGENTIC_ARM_ID") or "solo"
-        k_override = _os.environ.get("AGENTIC_MEMORY_RAG_K")
-        effective_k = int(k_override) if k_override else k
+        arm_id = flags.ARM_ID
+        # `k` param wins unless the env override is set explicitly.
+        effective_k = flags.MEMORY_RAG_K if "AGENTIC_MEMORY_RAG_K" in os.environ else k
         results = retrieve_similar(query_text, arm_id=arm_id, k=effective_k)
     except Exception as e:  # noqa: BLE001 - retrieval failure never blocks regen
         logger.debug("memory retrieval skipped: %s", e)
@@ -900,7 +900,8 @@ def _messages(state: GraphState) -> list[dict]:
     # 2026-09-17 Day 4: this fires ~1 in 3 regens on B+C, source TBD.
     total_chars = len(slow_prefix) + len(fast_tail)
     total_tokens_est = total_chars // 4
-    max_prompt_tokens = int(os.environ.get("AGENTIC_MAX_PROMPT_TOKENS", "100000"))
+    from agentic_investor.flags import flags
+    max_prompt_tokens = flags.MAX_PROMPT_TOKENS
     if total_tokens_est > max_prompt_tokens:
         section_bytes = [
             (f"slow[{i}]", len(s)) for i, s in enumerate(slow_sections)
@@ -1036,14 +1037,10 @@ def _ensemble_allocate(
                                         temp inherits default. Overrides
                                         SELF_CONSISTENCY_N when both set.
     """
-    import os as _os
+    from agentic_investor.flags import flags
 
-    models_csv = (_os.environ.get("AGENTIC_ENSEMBLE_MODELS") or "").strip()
-    models = [m.strip() for m in models_csv.split(",") if m.strip()] if models_csv else []
-    try:
-        n = int(_os.environ.get("AGENTIC_SELF_CONSISTENCY_N", "0") or "0")
-    except ValueError:
-        n = 0
+    models = list(flags.ENSEMBLE_MODELS)
+    n = flags.SELF_CONSISTENCY_N
 
     if not models and n < 2:
         return structured_complete(Allocation, messages), None

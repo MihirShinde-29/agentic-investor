@@ -1183,25 +1183,17 @@ def _paper_loop(
     if log_file:
         from logging.handlers import RotatingFileHandler
         from pathlib import Path
+
+        from agentic_investor.flags import flags
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-        # Rotate at AGENTIC_LOG_ROTATE_MB (default 20 MB), keeping
-        # AGENTIC_LOG_ROTATE_KEEP backups (default 5). RotatingFileHandler
-        # closes + reopens the file on rotation which `tail -F` (used by
-        # our Monitor pattern) follows correctly. Total on-disk budget
-        # per arm: (rotate_mb * (keep + 1)) = 120 MB by default.
-        import os
-        try:
-            rotate_mb = int(os.environ.get("AGENTIC_LOG_ROTATE_MB", "20"))
-        except ValueError:
-            rotate_mb = 20
-        try:
-            rotate_keep = int(os.environ.get("AGENTIC_LOG_ROTATE_KEEP", "5"))
-        except ValueError:
-            rotate_keep = 5
+        # Rotate at LOG_ROTATE_MB (default 20), keep LOG_ROTATE_KEEP
+        # backups (default 5). RotatingFileHandler closes + reopens on
+        # rotate which `tail -F` (our Monitor pattern) follows cleanly.
+        # Total on-disk budget per arm: (mb * (keep + 1)) = 120 MB.
         handlers.append(RotatingFileHandler(
             log_file,
-            maxBytes=max(1, rotate_mb) * 1024 * 1024,
-            backupCount=max(0, rotate_keep),
+            maxBytes=max(1, flags.LOG_ROTATE_MB) * 1024 * 1024,
+            backupCount=max(0, flags.LOG_ROTATE_KEEP),
             encoding="utf-8",
         ))
     logging.basicConfig(
@@ -1699,11 +1691,21 @@ def main() -> None:
 
     pmi = sub.add_parser("memory-index",
                          help="build/refresh the M17 recommendations index "
-                              "in Chroma (semantic RAG over past decisions)")
+                              "in the sqlite-vec rec store (semantic RAG "
+                              "over past decisions)")
     pmi.add_argument("--historical", action="store_true",
                      help="index every rec from --db-url as source='historical'")
     pmi.add_argument("--db-url", default=None,
                      help="sqlite URL to read from (default: settings.database_url)")
+
+    pfl = sub.add_parser("flags",
+                         help="dump the AGENTIC_* feature-flag registry "
+                              "(env name, kind, default, description) as a "
+                              "markdown table")
+    pfl.add_argument("--format", choices=("markdown", "table"),
+                     default="markdown",
+                     help="markdown = pipe-delimited table (default); "
+                          "table = align-in-columns plain text")
 
     pmo = sub.add_parser("memory-outcomes",
                          help="compute multi-horizon P/L outcomes for every "
@@ -1870,6 +1872,26 @@ def main() -> None:
     elif args.cmd == "paper-ml-service":
         from agentic_investor.services.ml_service import run_ml_service
         return run_ml_service(host=args.host, port=args.port)
+    elif args.cmd == "flags":
+        from agentic_investor.flags import all_flags, format_flags_table
+        if args.format == "markdown":
+            print(format_flags_table())
+        else:
+            rows = all_flags()
+            name_w = max(len(f.name) for f in rows)
+            kind_w = max(len(f.kind) for f in rows)
+            for f in rows:
+                default = (
+                    "(unset)" if f.default is None else
+                    ("(empty)" if f.kind == "csv" and not f.default else
+                     (",".join(f.default) if f.kind == "csv" else str(f.default)))
+                )
+                print(
+                    f"{f.name:<{name_w}}  {f.kind:<{kind_w}}  "
+                    f"default={default}"
+                )
+                print(f"    {f.help}")
+        return 0
     elif args.cmd == "paper-dashboard":
         from agentic_investor.dashboard.server import serve_forever
         exp_ctx = None
