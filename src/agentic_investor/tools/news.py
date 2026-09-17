@@ -1,19 +1,25 @@
-"""News tool: fetch company news, embed locally, store in Chroma, retrieve by similarity.
+"""News tool: fetch company news, embed locally, store in sqlite-vec, retrieve by similarity.
 
-No LLM calls here. Embeddings come from a local sentence-transformers model.
-The vector store is Chroma, persistent under settings.chroma_dir. The heavy
-embedding model is imported lazily so tests that mock the embedder never load it.
+No LLM calls here. Embeddings come from a local sentence-transformers model
+(or the shared paper-ml-service when AGENTIC_ML_SERVICE_URL is set). The
+vector store is a sqlite-vec file at settings.news_store_path - see
+`news_store.py` for the schema. The heavy embedding model is imported
+lazily so tests that mock the embedder never load it.
+
+Migrated from chromadb on 2026-09-17 (task #146). Motivation was the
+same fragility class that took down the M17 index earlier the same day.
 """
 
 import logging
+import struct
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
-import chromadb
 from pydantic import BaseModel
 
 from agentic_investor.config import get_settings
+from agentic_investor.tools.news_store import EMBED_DIM, get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -163,38 +169,66 @@ def _embed_text(texts: list[str]) -> list[list[float]]:
     return vecs.tolist()
 
 
-# Vector store (Chroma)
-
-@lru_cache(maxsize=1)
-def _get_client():
-    s = get_settings()
-    return chromadb.PersistentClient(path=s.chroma_dir)
+# Vector store (sqlite-vec)
 
 
-def get_collection(name: str = "company_news"):
-    # Cosine is the canonical distance for normalized sentence embeddings.
-    return _get_client().get_or_create_collection(
-        name=name, metadata={"hnsw:space": "cosine"}
-    )
+def _pack_vector(vec: list[float]) -> bytes:
+    """Encode one float32 vector as the byte string vec0 wants."""
+    if len(vec) != EMBED_DIM:
+        raise ValueError(f"embedding dim {len(vec)} != expected {EMBED_DIM}")
+    return struct.pack(f"{EMBED_DIM}f", *vec)
 
 
 def upsert_news_articles(
     articles: list[NewsArticle],
     *,
-    collection=None,
+    conn=None,
     embedder: Callable[[list[str]], list[list[float]]] = _embed_text,
 ) -> int:
-    """Store articles in the vector store. Idempotent by id."""
+    """Store articles in the vector store. Idempotent by article id.
+
+    Writes to `news_articles` (metadata) + `vec_news` (embedding) in a
+    single transaction. vec_news rowid tracks news_articles.internal_id.
+    """
     if not articles:
         return 0
-    coll = collection if collection is not None else get_collection()
+    connection = conn if conn is not None else get_connection()
     docs = [f"{a.headline}\n{a.summary}".strip() for a in articles]
-    coll.upsert(
-        ids=[a.id for a in articles],
-        embeddings=embedder(docs),
-        documents=docs,
-        metadatas=[a.model_dump() for a in articles],
-    )
+    embeddings = embedder(docs)
+    with connection:  # BEGIN / COMMIT
+        for art, doc, emb in zip(articles, docs, embeddings, strict=True):
+            _ = doc  # doc text is what we embed; not persisted separately
+            connection.execute(
+                """
+                INSERT INTO news_articles (
+                    id, ticker, headline, summary, source, url, published_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    ticker = excluded.ticker,
+                    headline = excluded.headline,
+                    summary = excluded.summary,
+                    source = excluded.source,
+                    url = excluded.url,
+                    published_at = excluded.published_at
+                """,
+                (
+                    art.id, art.ticker.upper(), art.headline,
+                    art.summary, art.source, art.url, art.published_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT internal_id FROM news_articles WHERE id = ?", (art.id,),
+            ).fetchone()
+            internal_id = int(row[0])
+            # vec0 has no REPLACE semantics for the vector column; delete-
+            # then-insert is the documented pattern for idempotent upsert.
+            connection.execute(
+                "DELETE FROM vec_news WHERE rowid = ?", (internal_id,),
+            )
+            connection.execute(
+                "INSERT INTO vec_news (rowid, embedding) VALUES (?, ?)",
+                (internal_id, _pack_vector(emb)),
+            )
     return len(articles)
 
 
@@ -203,15 +237,35 @@ def retrieve_news(
     query: str,
     k: int = 5,
     *,
-    collection=None,
+    conn=None,
     embedder: Callable[[list[str]], list[list[float]]] = _embed_text,
 ) -> list[NewsArticle]:
     """Top-k articles for ticker, ranked by semantic similarity to query."""
-    coll = collection if collection is not None else get_collection()
-    res = coll.query(
-        query_embeddings=embedder([query]),
-        n_results=k,
-        where={"ticker": ticker.upper()},
-    )
-    metas = (res.get("metadatas") or [[]])[0]
-    return [NewsArticle(**m) for m in metas]
+    connection = conn if conn is not None else get_connection()
+    query_embedding = _pack_vector(embedder([query])[0])
+    # Over-fetch a bit and post-filter by ticker so we don't miss the
+    # top-K when other tickers rank higher on similarity. vec0 doesn't
+    # support pre-filtering by joined-table predicates efficiently.
+    fetch_k = max(k * 4, 20)
+    rows = connection.execute(
+        """
+        SELECT
+            a.id, a.ticker, a.headline, a.summary, a.source, a.url,
+            a.published_at, v.distance
+        FROM vec_news v
+        JOIN news_articles a ON a.internal_id = v.rowid
+        WHERE v.embedding MATCH ?
+          AND v.k = ?
+          AND a.ticker = ?
+        ORDER BY v.distance
+        LIMIT ?
+        """,
+        (query_embedding, fetch_k, ticker.upper(), k),
+    ).fetchall()
+    return [
+        NewsArticle(
+            id=r[0], ticker=r[1], headline=r[2], summary=r[3] or "",
+            source=r[4] or "", url=r[5] or "", published_at=r[6],
+        )
+        for r in rows
+    ]

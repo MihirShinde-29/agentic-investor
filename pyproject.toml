@@ -9,7 +9,6 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "alpaca-py>=0.44.0",
-    "chromadb>=1.5.9",
     "fastapi>=0.115.0",
     "instructor>=1.15.4",
     "langfuse>=2.60.0",
@@ -19,6 +18,8 @@ dependencies = [
     "pandas>=3.0.5",
     "pydantic-settings>=2.15.0",
     "sentence-transformers>=6.0.0",
+    # sqlite-vec backs both the M17 rec store (#144) and the news store
+    # (#146) after chromadb was retired for HNSW-corruption fragility.
     "sqlite-vec>=0.1.9",
     "uvicorn[standard]>=0.32.0",
     "yfinance>=1.6.0",

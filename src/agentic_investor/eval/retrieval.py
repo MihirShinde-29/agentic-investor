@@ -1,6 +1,6 @@
 """L1 RAG retrieval evals: measure the news RAG against a golden query set.
 
-Loads hand-curated fixture articles into an ephemeral Chroma collection, runs
+Loads hand-curated fixture articles into an ephemeral sqlite-vec store, runs
 each query, and scores against ground-truth relevant IDs using Hit@k, Recall@k,
 MRR, and NDCG@k. Fully offline once fixtures exist: no live news-API calls.
 The real sentence-transformers embedder is used by default so scores reflect
@@ -12,11 +12,11 @@ from collections.abc import Callable
 from pathlib import Path
 from statistics import mean
 
-import chromadb
 from pydantic import BaseModel, Field
 
 from agentic_investor.tools import news
 from agentic_investor.tools.news import NewsArticle
+from agentic_investor.tools.news_store import open_memory_conn
 
 DEFAULT_FIXTURES = Path(__file__).parent / "datasets" / "news_fixtures.jsonl"
 DEFAULT_CASES = Path(__file__).parent / "datasets" / "news_cases.jsonl"
@@ -105,14 +105,13 @@ def _score(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> Retrieva
     )
 
 
-def _ephemeral_collection():
-    # Unique name per call so parallel runs and repeated eval invocations do
-    # not share state (Chroma EphemeralClient is a per-process singleton).
-    import uuid
-
-    return chromadb.EphemeralClient().get_or_create_collection(
-        name=f"eval_{uuid.uuid4().hex}", metadata={"hnsw:space": "cosine"}
-    )
+def _ephemeral_connection():
+    """A fresh in-memory sqlite-vec conn per call so parallel eval runs
+    and repeated invocations don't share state. Replaces the earlier
+    Chroma EphemeralClient which suffered the same-process-singleton
+    problem in addition to the corruption class we retired in #146.
+    """
+    return open_memory_conn()
 
 
 def run_retrieval_eval(
@@ -127,13 +126,13 @@ def run_retrieval_eval(
     cases = load_cases(cases_path)
 
     embed = embedder if embedder is not None else news._embed_text
-    coll = _ephemeral_collection()
-    news.upsert_news_articles(fixtures, collection=coll, embedder=embed)
+    conn = _ephemeral_connection()
+    news.upsert_news_articles(fixtures, conn=conn, embedder=embed)
 
     per_case: list[CaseResult] = []
     for case in cases:
         retrieved = news.retrieve_news(
-            case.ticker, case.query, k=k, collection=coll, embedder=embed
+            case.ticker, case.query, k=k, conn=conn, embedder=embed
         )
         retrieved_ids = [a.id for a in retrieved]
         metrics = _score(retrieved_ids, set(case.relevant_ids), k)

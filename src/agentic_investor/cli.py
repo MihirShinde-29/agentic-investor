@@ -666,13 +666,15 @@ def _healthcheck() -> int:
     except Exception as e:  # noqa: BLE001
         checks.append(("finBERT model", False, str(e)))
 
-    # Chroma
+    # News vector store (sqlite-vec, post-#146 migration)
     try:
-        from agentic_investor.tools.news import get_collection
-        get_collection().count()
-        checks.append(("Chroma store", True, "reachable"))
+        from agentic_investor.tools.news_store import get_connection
+        n = get_connection().execute(
+            "SELECT COUNT(*) FROM news_articles"
+        ).fetchone()[0]
+        checks.append(("news store", True, f"reachable ({n} articles)"))
     except Exception as e:  # noqa: BLE001
-        checks.append(("Chroma store", False, str(e)))
+        checks.append(("news store", False, str(e)))
 
     print("\nHealthcheck")
     print("  " + "-" * 60)

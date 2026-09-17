@@ -38,11 +38,19 @@ class Settings(BaseSettings):
     langfuse_host: str = "http://localhost:3000"
 
     database_url: str = "sqlite:///./agentic_investor.db"
+    # Legacy chromadb dir; kept for cleanup / migration inspection only.
+    # No live code path reads it anymore (2026-09-17 migration retired
+    # chromadb entirely - recs to rec_store, news to news_store).
     chroma_dir: str = "./.chroma"
     # M17 recommendations vector store (sqlite-vec). Distinct file from
     # database_url because arm subprocesses each have their own DATABASE_URL
     # but the rec index is shared across arms for A/B-safe cross-retrieval.
     rec_store_path: str = "./.rec_store.db"
+    # News article vector store (sqlite-vec). Separate file from
+    # rec_store_path because news has a different lifecycle (fetched fresh
+    # per-ticker; ~1-2 orders of magnitude more rows than recs) and will
+    # get its own TTL/purge in task #147.
+    news_store_path: str = "./.news_store.db"
     data_dir: str = "./data"
 
     # Alpaca paper trading. Sign up at alpaca.markets for free paper keys.

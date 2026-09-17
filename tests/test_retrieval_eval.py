@@ -85,17 +85,21 @@ def test_load_bundled_cases():
 
 
 def _keyword_embedder(texts: list[str]) -> list[list[float]]:
-    """Map text to a 6-dim vector by topic keyword hits. Enough to make ranking
-    deterministic without loading sentence-transformers.
+    """Map text to a keyword-hits vector, padded to EMBED_DIM = 384 with
+    zeros so the vec_news schema is satisfied. Enough distinct dimensions
+    to make ranking deterministic without loading sentence-transformers.
     """
+    from agentic_investor.tools.news_store import EMBED_DIM
+
     keywords = ["earn", "guidance", "product", "regulat", "china", "azure"]
     out = []
     for t in texts:
         low = t.lower()
-        vec = [1.0 if kw in low else 0.0 for kw in keywords]
-        # Normalize to unit length so cosine similarity behaves.
-        norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-        out.append([v / norm for v in vec])
+        head = [1.0 if kw in low else 0.0 for kw in keywords]
+        # Normalize the meaningful head to unit length so cosine ranks.
+        norm = math.sqrt(sum(v * v for v in head)) or 1.0
+        head = [v / norm for v in head]
+        out.append(head + [0.0] * (EMBED_DIM - len(head)))
     return out
 
 

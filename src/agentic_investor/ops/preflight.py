@@ -55,23 +55,25 @@ def check_alpaca_accounts(
 
 
 def check_chroma_seed(min_recs: int = 200) -> tuple[str, bool, str]:
+    """Kept name for backward compat with any calling code, but the store
+    is sqlite-vec since task #146. Renamed the label so ops output isn't
+    misleading.
+    """
     try:
-        import chromadb
-
-        from agentic_investor.config import get_settings
-        client = chromadb.PersistentClient(path=get_settings().chroma_dir)
-        coll = client.get_or_create_collection(name="recommendations")
-        count = coll.count()
+        from agentic_investor.memory.store import get_connection
+        count = get_connection().execute(
+            "SELECT COUNT(*) FROM recs"
+        ).fetchone()[0]
         ok = count >= min_recs
-        return ("chroma:recommendations", ok, f"{count} docs (min={min_recs})")
+        return ("rec-store:recommendations", ok, f"{count} rows (min={min_recs})")
     except Exception as e:  # noqa: BLE001
-        return ("chroma:recommendations", False, f"error: {e}")
+        return ("rec-store:recommendations", False, f"error: {e}")
 
 
 def check_memory_outcomes_sweep() -> tuple[str, bool, str]:
-    """Dry-run the sweep against the current chroma - proves the whole
-    metadata-refresh pipeline works before Tuesday's arm docs start
-    landing in the collection."""
+    """Dry-run the sweep against the current rec store - proves the whole
+    outcome-attribution pipeline works before Tuesday's arm rows start
+    landing in the recs table."""
     try:
         from agentic_investor.memory.outcomes import attach_outcomes_to_index
         n_updated, n_with = attach_outcomes_to_index()

@@ -1,37 +1,36 @@
-"""Unit tests for the news tool.
+"""Unit tests for the news tool (sqlite-vec backed).
 
-No network (alpaca news is mocked), no real embedder (fake maps keywords to
-distinct vectors), and Chroma runs ephemeral (in-memory) so nothing hits disk.
+No network (alpaca news is mocked), no real embedder (fake maps keywords
+to distinct 384-dim vectors), store is an in-memory sqlite-vec conn so
+nothing hits disk.
 """
-
-import uuid
-
-import chromadb
 
 from agentic_investor.tools import news
 from agentic_investor.tools.news import NewsArticle
+from agentic_investor.tools.news_store import EMBED_DIM, open_memory_conn
 
 
 def _fake_embed(texts: list[str]) -> list[list[float]]:
-    # Each topic gets its own axis so cosine similarity is deterministic.
+    """Each topic gets its own axis (dim 0/1/2, others zero) so cosine /
+    L2 similarity is deterministic against the query embeddings.
+    Pads to EMBED_DIM = 384 to match the vec_news schema.
+    """
     out: list[list[float]] = []
     for t in texts:
         low = t.lower()
+        vec = [0.0] * EMBED_DIM
         if "earnings" in low:
-            out.append([1.0, 0.0, 0.0])
+            vec[0] = 1.0
         elif "lawsuit" in low:
-            out.append([0.0, 1.0, 0.0])
+            vec[1] = 1.0
         else:
-            out.append([0.0, 0.0, 1.0])
+            vec[2] = 1.0
+        out.append(vec)
     return out
 
 
-def _fresh_collection():
-    # EphemeralClient is a per-process singleton in Chroma 1.x, so a fixed
-    # collection name leaks state between tests. Unique name = real isolation.
-    return chromadb.EphemeralClient().get_or_create_collection(
-        name=f"test_{uuid.uuid4().hex}", metadata={"hnsw:space": "cosine"}
-    )
+def _fresh_conn():
+    return open_memory_conn()
 
 
 def _sample(ticker, art_id, headline, summary=""):
@@ -70,45 +69,63 @@ def test_fetch_company_news_parses_alpaca_response(monkeypatch):
 
 
 def test_upsert_and_retrieve_ranks_by_semantic_similarity():
-    coll = _fresh_collection()
+    conn = _fresh_conn()
     articles = [
         _sample("AAPL", "a1", "Apple earnings crushed it"),
         _sample("AAPL", "a2", "Apple faces new lawsuit"),
         _sample("AAPL", "a3", "Apple ships new iPhone"),
     ]
-    news.upsert_news_articles(articles, collection=coll, embedder=_fake_embed)
+    news.upsert_news_articles(articles, conn=conn, embedder=_fake_embed)
 
     top = news.retrieve_news(
-        "AAPL", "quarterly earnings", k=1, collection=coll, embedder=_fake_embed
+        "AAPL", "quarterly earnings", k=1, conn=conn, embedder=_fake_embed,
     )
     assert top[0].id == "a1"
 
 
 def test_retrieve_filters_by_ticker():
-    coll = _fresh_collection()
+    conn = _fresh_conn()
     news.upsert_news_articles(
         [
             _sample("AAPL", "a1", "Apple earnings"),
             _sample("MSFT", "m1", "Microsoft earnings"),
         ],
-        collection=coll,
+        conn=conn,
         embedder=_fake_embed,
     )
 
     got = news.retrieve_news(
-        "MSFT", "earnings", k=5, collection=coll, embedder=_fake_embed
+        "MSFT", "earnings", k=5, conn=conn, embedder=_fake_embed,
     )
     assert len(got) == 1
     assert got[0].ticker == "MSFT"
 
 
 def test_upsert_is_idempotent_by_id():
-    coll = _fresh_collection()
+    conn = _fresh_conn()
     art = _sample("AAPL", "same-id", "Apple earnings")
-    news.upsert_news_articles([art], collection=coll, embedder=_fake_embed)
-    news.upsert_news_articles([art], collection=coll, embedder=_fake_embed)
+    news.upsert_news_articles([art], conn=conn, embedder=_fake_embed)
+    news.upsert_news_articles([art], conn=conn, embedder=_fake_embed)
 
     got = news.retrieve_news(
-        "AAPL", "earnings", k=5, collection=coll, embedder=_fake_embed
+        "AAPL", "earnings", k=5, conn=conn, embedder=_fake_embed,
     )
     assert len(got) == 1
+    # Both news_articles + vec_news should have exactly one row.
+    assert conn.execute("SELECT COUNT(*) FROM news_articles").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM vec_news").fetchone()[0] == 1
+
+
+def test_upsert_updates_fields_on_conflict():
+    """A re-upsert with same id but different headline should overwrite."""
+    conn = _fresh_conn()
+    art = _sample("AAPL", "same", "Original headline")
+    news.upsert_news_articles([art], conn=conn, embedder=_fake_embed)
+
+    updated = _sample("AAPL", "same", "Updated headline")
+    news.upsert_news_articles([updated], conn=conn, embedder=_fake_embed)
+
+    row = conn.execute(
+        "SELECT headline FROM news_articles WHERE id = ?", ("same",),
+    ).fetchone()
+    assert row[0] == "Updated headline"
