@@ -128,15 +128,16 @@ def _current_private_bytes() -> int:
 
 
 def _maybe_recycle_for_memory(state, session) -> None:
-    """Exit with code 42 if this process's private VM exceeds the env
-    threshold. The paper-experiment supervisor's restart_kind='crash_only'
-    treats any non-zero exit as a crash and respawns per --max-restarts.
+    """Post-tick fallback check. Real enforcement runs on a background
+    thread (see start_memory_watchdog) because a single graph.invoke()
+    can leak >30 GB before returning - one anthropic streamed response
+    can allocate 40 GB of private commit in ~30 s of wall time on the
+    2026-09-17 leak. A per-tick check runs too rarely; the watchdog
+    thread polls every 5 s and can fire from inside an LLM call.
+    This function is left in place so the tick loop still gets a
+    check, in case the watchdog thread fails to start.
     """
-    threshold_mb_raw = os.environ.get(_MEM_RECYCLE_ENV, "0")
-    try:
-        threshold_mb = int(threshold_mb_raw)
-    except ValueError:
-        return
+    threshold_mb = _mem_recycle_threshold_mb()
     if threshold_mb <= 0:
         return
     private_bytes = _current_private_bytes()
@@ -145,26 +146,88 @@ def _maybe_recycle_for_memory(state, session) -> None:
     private_mb = private_bytes // (1024 * 1024)
     if private_mb < threshold_mb:
         return
+    _fire_memory_recycle(private_mb, threshold_mb, state, session, source="tick")
+
+
+def _mem_recycle_threshold_mb() -> int:
+    try:
+        return int(os.environ.get(_MEM_RECYCLE_ENV, "0"))
+    except ValueError:
+        return 0
+
+
+def _fire_memory_recycle(
+    private_mb: int, threshold_mb: int, state, session, *, source: str,
+) -> None:
+    """Log a memory_recycle event and hard-exit 42. The paper-experiment
+    supervisor's restart_kind='crash_only' respawns non-zero exits.
+    Safe to call from a background thread - uses os._exit so the main
+    thread doesn't need to cooperate.
+    """
     logger.warning(
-        "memory_recycle: private=%d MB >= threshold=%d MB; exiting for supervisor respawn",
-        private_mb, threshold_mb,
+        "memory_recycle[%s]: private=%d MB >= threshold=%d MB; exiting for supervisor respawn",
+        source, private_mb, threshold_mb,
     )
     if session:
         try:
             session.log("memory_recycle", {
                 "private_mb": private_mb,
                 "threshold_mb": threshold_mb,
-                "ticks_run": getattr(state, "ticks_run", None),
+                "source": source,
+                "ticks_run": getattr(state, "ticks_run", None) if state else None,
             })
         except Exception:  # noqa: BLE001
             pass
-    # Best-effort flush of file handles / SQLite journals before hard-exit.
     try:
         sys.stdout.flush()
         sys.stderr.flush()
     except Exception:  # noqa: BLE001
         pass
-    sys.exit(_MEM_RECYCLE_EXIT_CODE)
+    # Background thread can't sys.exit() the process; use os._exit for a
+    # hard interpreter exit that skips atexit handlers but reaches the
+    # supervisor with a non-zero rc immediately.
+    os._exit(_MEM_RECYCLE_EXIT_CODE)
+
+
+def start_memory_watchdog(session=None) -> None:
+    """Kick off a daemon thread that checks own PrivateUsage every 5 s
+    and hard-exits the process (os._exit 42) once it crosses the
+    AGENTIC_MEM_RECYCLE_MB threshold. Idempotent - a second call is a
+    no-op. Silent when the env var is unset or zero.
+    """
+    threshold_mb = _mem_recycle_threshold_mb()
+    if threshold_mb <= 0:
+        return
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    _watchdog_started = True
+
+    import threading
+
+    def _loop() -> None:
+        import time
+        while True:
+            try:
+                pb = _current_private_bytes()
+            except Exception:  # noqa: BLE001
+                pb = 0
+            if pb > 0:
+                pmb = pb // (1024 * 1024)
+                if pmb >= threshold_mb:
+                    _fire_memory_recycle(pmb, threshold_mb, None, session, source="watchdog")
+                    return  # unreachable - os._exit above
+            time.sleep(5.0)
+
+    t = threading.Thread(target=_loop, name="memory-watchdog", daemon=True)
+    t.start()
+    logger.info(
+        "memory_watchdog started: threshold=%d MB, poll=5 s",
+        threshold_mb,
+    )
+
+
+_watchdog_started = False
 
 
 @dataclass
@@ -2880,6 +2943,7 @@ def run_loop(
             "last_rec_date": state.last_rec_date,
         })
     logger.info("paper-loop starting: %s", cfg)
+    start_memory_watchdog(session=session)
     try:
         while True:
             try:
