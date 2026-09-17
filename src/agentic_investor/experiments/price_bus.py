@@ -83,6 +83,93 @@ def _read_desired_tickers(db_path: Path) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _insert_price_tick(
+    db_path: Path,
+    *,
+    ticker: str,
+    price: float,
+    ts_event: str,
+    ts_recv: str,
+) -> None:
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO price_ticks (ticker, price, ts_event, ts_recv) "
+            "VALUES (?,?,?,?)",
+            (ticker, price, ts_event, ts_recv),
+        )
+
+
+def _backfill_ticks_since(
+    db_path: Path,
+    tickers: list[str],
+    since_iso: str | None,
+    until_iso: str,
+    *,
+    max_window_min: float = 15.0,
+) -> int:
+    """REST-query Alpaca historic trades for each ticker in the current
+    subscription set over `[since_iso, until_iso]` and insert missed
+    ticks. Capped at max_window_min so a long disconnect doesn't chew
+    Alpaca quota (Alpaca free tier: 200 req/min).
+
+    Returns the number of ticks inserted across all tickers.
+    """
+    from datetime import timedelta
+
+    from alpaca.data.historical.stock import StockHistoricalDataClient
+    from alpaca.data.requests import StockTradesRequest
+
+    from agentic_investor.config import get_settings
+
+    s = get_settings()
+    if not (s.alpaca_api_key and s.alpaca_api_secret) or not tickers:
+        return 0
+    client = StockHistoricalDataClient(
+        api_key=s.alpaca_api_key, secret_key=s.alpaca_api_secret,
+    )
+
+    until_dt = datetime.fromisoformat(until_iso.replace("Z", "+00:00"))
+    if since_iso:
+        since_dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+    else:
+        since_dt = until_dt - timedelta(minutes=max_window_min)
+    if until_dt - since_dt > timedelta(minutes=max_window_min):
+        since_dt = until_dt - timedelta(minutes=max_window_min)
+
+    now_iso = datetime.now(UTC).isoformat()
+    n_total = 0
+    for symbol in tickers:
+        try:
+            req = StockTradesRequest(
+                symbol_or_symbols=symbol,
+                start=since_dt,
+                end=until_dt,
+                limit=200,
+            )
+            resp = client.get_stock_trades(req)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "price backfill REST call failed for %s: %s", symbol, e,
+            )
+            continue
+        # StockTradesResponse.data is dict[symbol, list[Trade]]
+        for trades in getattr(resp, "data", {}).values():
+            for t in trades:
+                price = float(getattr(t, "price", 0.0))
+                if price <= 0:
+                    continue
+                ts_event = str(getattr(t, "timestamp", None) or now_iso)
+                _insert_price_tick(
+                    db_path,
+                    ticker=symbol.upper(),
+                    price=price,
+                    ts_event=ts_event,
+                    ts_recv=now_iso,
+                )
+                n_total += 1
+    return n_total
+
+
 def run_price_bus_writer(bus_url: str) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -93,11 +180,16 @@ def run_price_bus_writer(bus_url: str) -> int:
 
     from agentic_investor.config import get_settings
     from agentic_investor.experiments._bus_purge import start_purge_thread
+    from agentic_investor.experiments._bus_stream import (
+        BusStatus,
+        run_with_reconnect,
+    )
     from agentic_investor.flags import flags
 
     s = get_settings()
     db_path = bus_path_from_url(bus_url)
     init_price_bus_tables(db_path)
+    status = BusStatus.open(db_path)
     logger.info("price bus writer starting -> %s", db_path)
 
     # TTL purge: drop price_ticks older than PRICE_BUS_TTL_HOURS (default
@@ -108,7 +200,7 @@ def run_price_bus_writer(bus_url: str) -> int:
     price_ttl_h = flags.PRICE_BUS_TTL_HOURS
 
     def _purge_ticks(conn):
-        from datetime import UTC, datetime, timedelta
+        from datetime import timedelta
         cutoff = (
             datetime.now(UTC) - timedelta(hours=price_ttl_h)
         ).isoformat()
@@ -123,12 +215,12 @@ def run_price_bus_writer(bus_url: str) -> int:
         label="price_bus",
     )
 
-    stream = StockDataStream(
-        api_key=s.alpaca_api_key,
-        secret_key=s.alpaca_api_secret,
-    )
-    subscribed: set[str] = set()
-    lock = threading.Lock()
+    # Stream state that reconciler thread + reconnect supervisor share.
+    # `stream` is swapped on each reconnect; `subscribed` resets to empty
+    # because the fresh stream has no active subscriptions.
+    state: dict = {"stream": None, "subscribed": set()}
+    sub_lock = threading.Lock()
+    reconciler_stop = threading.Event()
 
     async def on_trade(trade) -> None:
         try:
@@ -137,55 +229,91 @@ def run_price_bus_writer(bus_url: str) -> int:
             ts_event = str(getattr(trade, "timestamp", datetime.now(UTC)))
             if not symbol or price <= 0:
                 return
-            with sqlite3.connect(str(db_path)) as conn:
-                conn.execute(
-                    "INSERT INTO price_ticks "
-                    "(ticker, price, ts_event, ts_recv) VALUES (?,?,?,?)",
-                    (
-                        symbol,
-                        price,
-                        ts_event,
-                        datetime.now(UTC).isoformat(),
-                    ),
-                )
+            ts_recv = datetime.now(UTC).isoformat()
+            _insert_price_tick(
+                db_path, ticker=symbol, price=price,
+                ts_event=ts_event, ts_recv=ts_recv,
+            )
+            status.record_event(ts_event)
         except Exception as e:  # noqa: BLE001
             logger.warning("price bus on_trade error: %s", e)
 
-    stop = threading.Event()
-
     def _reconcile_loop() -> None:
-        while not stop.is_set():
+        while not reconciler_stop.is_set():
             try:
                 desired = _read_desired_tickers(db_path)
-                with lock:
-                    to_add = desired - subscribed
-                    to_remove = subscribed - desired
-                    if to_add:
-                        stream.subscribe_trades(on_trade, *sorted(to_add))
-                        subscribed.update(to_add)
-                        logger.info(
-                            "price bus subscribed: %s", sorted(to_add),
-                        )
-                    if to_remove:
-                        stream.unsubscribe_trades(*sorted(to_remove))
-                        subscribed.difference_update(to_remove)
-                        logger.info(
-                            "price bus unsubscribed: %s", sorted(to_remove),
-                        )
+                with sub_lock:
+                    stream = state["stream"]
+                    if stream is None:
+                        # No active stream (mid-reconnect); wait.
+                        pass
+                    else:
+                        subscribed = state["subscribed"]
+                        to_add = desired - subscribed
+                        to_remove = subscribed - desired
+                        if to_add:
+                            stream.subscribe_trades(on_trade, *sorted(to_add))
+                            subscribed.update(to_add)
+                            logger.info(
+                                "price bus subscribed: %s", sorted(to_add),
+                            )
+                        if to_remove:
+                            stream.unsubscribe_trades(*sorted(to_remove))
+                            subscribed.difference_update(to_remove)
+                            logger.info(
+                                "price bus unsubscribed: %s", sorted(to_remove),
+                            )
             except Exception as e:  # noqa: BLE001 - reconcile must not die
                 logger.warning("price bus reconcile error: %s", e)
-            if stop.wait(_RECONCILE_INTERVAL_SEC):
+            if reconciler_stop.wait(_RECONCILE_INTERVAL_SEC):
                 return
 
     reconciler = threading.Thread(
         target=_reconcile_loop, name="price-bus-reconcile", daemon=True,
     )
     reconciler.start()
+
+    def _factory():
+        stream = StockDataStream(
+            api_key=s.alpaca_api_key, secret_key=s.alpaca_api_secret,
+        )
+        # Publish the fresh stream + reset subscribed set. Reconciler
+        # will re-add the current desired-ticker set on its next tick.
+        with sub_lock:
+            state["stream"] = stream
+            state["subscribed"] = set()
+        return stream
+
+    def _run(stream):
+        try:
+            stream.run()
+        finally:
+            with sub_lock:
+                # Stream is gone; reconciler must not try to
+                # subscribe/unsubscribe on it until a new one is minted.
+                state["stream"] = None
+
+    def _backfill(before_ts_iso, now_iso):
+        # Ticker set to backfill = current subscription set (what arms
+        # are actually watching right now). Deliberately NOT the pre-
+        # disconnect subscription set, because arms may have moved on.
+        with sub_lock:
+            tickers = sorted(_read_desired_tickers(db_path))
+        n = _backfill_ticks_since(db_path, tickers, before_ts_iso, now_iso)
+        if n > 0:
+            status.record_event(now_iso, count=n)
+        return n
+
     try:
-        stream.run()
+        return run_with_reconnect(
+            stream_factory=_factory,
+            run_stream=_run,
+            on_reconnect=_backfill,
+            status=status,
+            label="price-bus",
+        )
     finally:
-        stop.set()
-    return 0
+        reconciler_stop.set()
 
 
 class PriceBusClient:

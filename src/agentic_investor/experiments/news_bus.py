@@ -65,6 +65,114 @@ class _BusItem:
     source: str
 
 
+def _insert_bus_event(
+    db_path: Path,
+    *,
+    ts_received: str,
+    ts_published: str,
+    symbols: list[str],
+    headline: str,
+    summary: str,
+    url: str,
+    source: str,
+) -> None:
+    """One-shot insert helper - single-column write path shared between
+    the websocket handler and the REST backfill.
+    """
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO bus_events "
+            "(ts_received, ts_published, symbols_json, "
+            " headline, summary, url, source) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                ts_received, ts_published,
+                json.dumps([str(x) for x in symbols]),
+                headline, summary, url, source,
+            ),
+        )
+
+
+def _backfill_news_since(
+    db_path: Path,
+    since_iso: str | None,
+    until_iso: str,
+    *,
+    max_window_hours: float = 4.0,
+) -> int:
+    """REST-query Alpaca News for `[since_iso, until_iso]` and insert
+    any missed events. Returns the count inserted.
+
+    `since_iso=None` means "no prior events" - we cap the window at
+    `max_window_hours` so a first-start / cold-boot doesn't pull the
+    entire historical corpus.
+    """
+    from datetime import timedelta
+
+    from alpaca.data.historical.news import NewsClient
+    from alpaca.data.requests import NewsRequest
+
+    from agentic_investor.config import get_settings
+
+    s = get_settings()
+    if not (s.alpaca_api_key and s.alpaca_api_secret):
+        return 0
+    client = NewsClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_api_secret)
+
+    until_dt = datetime.fromisoformat(until_iso.replace("Z", "+00:00"))
+    if since_iso:
+        since_dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+    else:
+        since_dt = until_dt - timedelta(hours=max_window_hours)
+    # Cap: don't chew Alpaca quota on huge windows.
+    if until_dt - since_dt > timedelta(hours=max_window_hours):
+        since_dt = until_dt - timedelta(hours=max_window_hours)
+
+    req = NewsRequest(
+        symbols=None,  # match the wildcard subscription
+        start=since_dt,
+        end=until_dt,
+        limit=50,
+    )
+    try:
+        resp = client.get_news(req)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("news backfill REST call failed: %s", e)
+        return 0
+
+    now_iso = datetime.now(UTC).isoformat()
+    n = 0
+    # Dedup against what's already in the DB by (headline, ts_published)
+    # so backfill after a partial catch doesn't double-insert.
+    with sqlite3.connect(str(db_path)) as conn:
+        for arts in resp.data.values():
+            for a in arts:
+                headline = str(getattr(a, "headline", ""))
+                if not headline:
+                    continue
+                ts_pub = str(getattr(a, "created_at", None) or now_iso)
+                row = conn.execute(
+                    "SELECT 1 FROM bus_events "
+                    "WHERE headline = ? AND ts_published = ? LIMIT 1",
+                    (headline, ts_pub),
+                ).fetchone()
+                if row is not None:
+                    continue
+                symbols = list(getattr(a, "symbols", None) or [])
+                _insert_bus_event(
+                    db_path,
+                    ts_received=now_iso,
+                    ts_published=ts_pub,
+                    symbols=symbols,
+                    headline=headline,
+                    summary=str(getattr(a, "summary", "")),
+                    url=str(getattr(a, "url", "")),
+                    source=str(getattr(a, "source", "")),
+                )
+                n += 1
+    return n
+
+
 def run_bus_writer(bus_url: str) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -75,11 +183,16 @@ def run_bus_writer(bus_url: str) -> int:
 
     from agentic_investor.config import get_settings
     from agentic_investor.experiments._bus_purge import start_purge_thread
+    from agentic_investor.experiments._bus_stream import (
+        BusStatus,
+        run_with_reconnect,
+    )
     from agentic_investor.flags import flags
 
     s = get_settings()
     db_path = bus_path_from_url(bus_url)
     init_bus_table(db_path)
+    status = BusStatus.open(db_path)
     logger.info("news bus writer starting -> %s", db_path)
 
     # TTL purge: drop bus_events older than NEWS_BUS_TTL_HOURS (default
@@ -166,35 +279,46 @@ def run_bus_writer(bus_url: str) -> int:
             news_store_path,
         )
 
-    stream = NewsDataStream(
-        api_key=s.alpaca_api_key,
-        secret_key=s.alpaca_api_secret,
-    )
-
     async def _on_news(item) -> None:
-        symbols = getattr(item, "symbols", None) or []
+        symbols = list(getattr(item, "symbols", None) or [])
         published = getattr(item, "created_at", None) or datetime.now(UTC)
-        row = (
-            datetime.now(UTC).isoformat(),
-            str(published),
-            json.dumps([str(x) for x in symbols]),
-            str(getattr(item, "headline", "")),
-            str(getattr(item, "summary", "")),
-            str(getattr(item, "url", "")),
-            str(getattr(item, "source", "")),
+        ts_pub = str(published)
+        ts_recv = datetime.now(UTC).isoformat()
+        _insert_bus_event(
+            db_path,
+            ts_received=ts_recv,
+            ts_published=ts_pub,
+            symbols=symbols,
+            headline=str(getattr(item, "headline", "")),
+            summary=str(getattr(item, "summary", "")),
+            url=str(getattr(item, "url", "")),
+            source=str(getattr(item, "source", "")),
         )
-        with sqlite3.connect(str(db_path)) as conn:
-            conn.execute(
-                "INSERT INTO bus_events "
-                "(ts_received, ts_published, symbols_json, "
-                " headline, summary, url, source) "
-                "VALUES (?,?,?,?,?,?,?)",
-                row,
-            )
+        status.record_event(ts_pub)
 
-    stream.subscribe_news(_on_news, "*")
-    stream.run()
-    return 0
+    def _factory():
+        return NewsDataStream(
+            api_key=s.alpaca_api_key,
+            secret_key=s.alpaca_api_secret,
+        )
+
+    def _run(stream):
+        stream.subscribe_news(_on_news, "*")
+        stream.run()
+
+    def _backfill(before_ts_iso, now_iso):
+        n = _backfill_news_since(db_path, before_ts_iso, now_iso)
+        if n > 0:
+            status.record_event(now_iso, count=n)
+        return n
+
+    return run_with_reconnect(
+        stream_factory=_factory,
+        run_stream=_run,
+        on_reconnect=_backfill,
+        status=status,
+        label="news-bus",
+    )
 
 
 class SharedBusStream:
