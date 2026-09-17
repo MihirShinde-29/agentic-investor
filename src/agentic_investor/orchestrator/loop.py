@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -34,6 +35,136 @@ from agentic_investor.tools.paper_store import record_order, record_snapshot
 # for anyone using the simpler --regen-mode daily path.
 
 logger = logging.getLogger(__name__)
+
+
+# --- memory recycling ------------------------------------------------------
+#
+# The LiteLLM + instructor + httpx stack we call every regen has a slow leak:
+# arm B (single-model gpt-4o-mini) reached 42 GB private commit over ~2h on
+# 2026-09-17; arm C (cross-family ensemble adding anthropic/claude-haiku-4-5)
+# hit 40 GB in ~10 min. RSS stays flat at ~1 GB while private/committed VM
+# balloons - the signature of an allocator that reserves address space but
+# never touches it enough to page in. gc.collect() between ensemble samples
+# did not help, so the retained references aren't garbage-collectable Python
+# objects; they live inside third-party C-extension / native code we can't
+# easily patch. Confirmed suspects on the shortlist: LiteLLM's event-loop-
+# keyed httpx client cache (LLMClientCache), Anthropic/OpenAI SDK httpx
+# clients each holding SSL contexts + connection pools, or tokenizer arenas.
+#
+# Real fix needs a proper repro + bisect against the dependency tree; that's
+# a day of work. Meanwhile, this circuit breaker keeps the paper-loop alive
+# through a trading session by recycling the process when its private commit
+# exceeds a threshold. State (positions, last_rec_id, loop counters) is
+# already persisted to SQLite, so respawn resumes cleanly.
+#
+# Enabled via env var so tests + the interactive CLI don't recycle out from
+# under a developer. paper-experiment supervisor sets it for arm processes.
+
+_MEM_RECYCLE_ENV = "AGENTIC_MEM_RECYCLE_MB"
+_MEM_RECYCLE_EXIT_CODE = 42
+
+
+def _current_private_bytes() -> int:
+    """Return this process's committed private VM in bytes; 0 on failure.
+
+    Windows: PrivateUsage from GetProcessMemoryInfo (PROCESS_MEMORY_COUNTERS_EX).
+    That's the field Task Manager labels "Commit size" - what the LiteLLM
+    leak actually inflates, distinct from RSS/WorkingSet.
+
+    Linux: VmData from /proc/self/status (anonymous private data pages,
+    the analogous field). macOS: unsupported, returns 0.
+    """
+    import platform
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t),
+                ]
+
+            counters = _PMC()
+            counters.cb = ctypes.sizeof(counters)
+            psapi = ctypes.WinDLL("psapi.dll")
+            # Explicit types are required: ctypes' default int-return
+            # interpretation truncates the BOOL return here on some
+            # Python 3.12 builds, giving false failures.
+            psapi.GetProcessMemoryInfo.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD,
+            ]
+            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+            kernel32 = ctypes.WinDLL("kernel32.dll")
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            ok = psapi.GetProcessMemoryInfo(
+                kernel32.GetCurrentProcess(),
+                ctypes.byref(counters),
+                ctypes.sizeof(counters),
+            )
+            return int(counters.PrivateUsage) if ok else 0
+        except Exception:  # noqa: BLE001 - never let a memory read crash the loop
+            return 0
+    if platform.system() == "Linux":
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmData:"):
+                        kb = int(line.split()[1])
+                        return kb * 1024
+        except OSError:
+            pass
+    return 0
+
+
+def _maybe_recycle_for_memory(state, session) -> None:
+    """Exit with code 42 if this process's private VM exceeds the env
+    threshold. The paper-experiment supervisor's restart_kind='crash_only'
+    treats any non-zero exit as a crash and respawns per --max-restarts.
+    """
+    threshold_mb_raw = os.environ.get(_MEM_RECYCLE_ENV, "0")
+    try:
+        threshold_mb = int(threshold_mb_raw)
+    except ValueError:
+        return
+    if threshold_mb <= 0:
+        return
+    private_bytes = _current_private_bytes()
+    if private_bytes <= 0:
+        return  # platform unsupported or query failed
+    private_mb = private_bytes // (1024 * 1024)
+    if private_mb < threshold_mb:
+        return
+    logger.warning(
+        "memory_recycle: private=%d MB >= threshold=%d MB; exiting for supervisor respawn",
+        private_mb, threshold_mb,
+    )
+    if session:
+        try:
+            session.log("memory_recycle", {
+                "private_mb": private_mb,
+                "threshold_mb": threshold_mb,
+                "ticks_run": getattr(state, "ticks_run", None),
+            })
+        except Exception:  # noqa: BLE001
+            pass
+    # Best-effort flush of file handles / SQLite journals before hard-exit.
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    sys.exit(_MEM_RECYCLE_EXIT_CODE)
 
 
 @dataclass
@@ -2797,6 +2928,8 @@ def run_loop(
                 logger.exception("tick failed: %s", e)
                 if session:
                     session.log("tick_error", {"error": str(e)})
+
+            _maybe_recycle_for_memory(state, session)
 
             if cfg.once:
                 return state

@@ -96,6 +96,12 @@ def _arm_env(
         env["AGENTIC_NEWS_BUS"] = news_bus_url
     if price_bus_url:
         env["AGENTIC_PRICE_BUS"] = price_bus_url
+    # Memory circuit breaker: recycle an arm subprocess when its private
+    # commit exceeds this many MB. Guards against the LiteLLM/httpx leak
+    # that took arm B to 42 GB on 2026-09-17. Overridable per-arm via
+    # arms.<id>.env in the experiment YAML, or globally via the parent
+    # shell's AGENTIC_MEM_RECYCLE_MB when launching paper-experiment.
+    env.setdefault("AGENTIC_MEM_RECYCLE_MB", "6144")
     if extra_env:
         env.update(extra_env)
     return env
