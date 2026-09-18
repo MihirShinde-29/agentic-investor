@@ -323,14 +323,20 @@ def structured_complete[T: BaseModel](
     *,
     model: str | None = None,
     temperature: float | None = None,
-    max_retries: int = 3,
+    max_retries: int = 5,
     timeout: float = 30.0,
 ) -> T:
     """Call the LLM and return a validated instance of response_model.
 
     Two retry loops layered here:
     - instructor's max_retries re-prompts the LLM when the reply fails schema
-      validation (kept small since the outer loop handles infrastructure).
+      validation. Bumped from 3 to 5 after the 2026-09-18 A/B revealed a
+      recurring 'cash as position' hallucination pattern (gpt-4o-mini
+      occasionally ships `{"ticker": "cash", "cash_pct": ...}` inside the
+      positions list instead of using the top-level cash_pct field). At 3
+      the loop tripped tick_errors on ~3% of ticks across all three arms;
+      5 lets instructor's error-feedback re-prompt heal it silently at
+      the cost of ~1-2 extra LLM calls on the affected ticks.
     - the outer tenacity decorator retries on provider transient errors
       (503, 429, connection blips) with exponential backoff, walking the
       exception chain because instructor wraps provider errors.
