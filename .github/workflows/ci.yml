@@ -31,6 +31,12 @@ jobs:
       - name: ruff
         run: uv run ruff check .
 
+      - name: FLAGS.md drift check
+        # Task #158's pre-commit hook regenerates FLAGS.md when a flag
+        # is added; --check mirrors it in CI so a PR that forgot to
+        # run the hook fails here instead of merging with stale docs.
+        run: uv run python scripts/regen_flags_md.py --check
+
       - name: pytest
         run: uv run pytest
 

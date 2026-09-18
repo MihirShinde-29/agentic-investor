@@ -27,4 +27,5 @@ central `flags` registry. Values shown are defaults.
 | `AGENTIC_NEWS_STORE_TTL_DAYS` | float | `30.0` | Retention window for the news-article sqlite-vec store (news_articles + vec_news tables). Older rows are dropped from both tables in lockstep every hour. |
 | `AGENTIC_PRICE_BUS` | str_opt | `(unset)` | sqlite:/// URL of the shared price bus (same pattern as news bus). |
 | `AGENTIC_PRICE_BUS_TTL_HOURS` | float | `2.0` | Retention window for price_bus.db price_ticks rows. |
+| `AGENTIC_REPLAY_NEWS_SPEED` | float | `1.0` | News-replay playback multiplier. 1.0 = real-time (respects recorded inter-event gaps), 2.0 = twice as fast, 0 = fire everything as fast as the queue drains. Only consulted when AGENTIC_REPLAY_FROM is set. |
 | `AGENTIC_SELF_CONSISTENCY_N` | int | `0` | Number of self-consistency samples for the allocator. 0/1 = single call. Overridden by AGENTIC_ENSEMBLE_MODELS when both set. |
