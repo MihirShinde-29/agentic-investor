@@ -225,6 +225,21 @@ _register(
 )
 
 
+# Trade guardrails --------------------------------------------------------
+
+_register(
+    "AGENTIC_WHIPSAW_GUARD_WINDOW_MIN", 15, "int",
+    "Minutes of look-back for the whipsaw guard. When a fresh order "
+    "on ticker T would reverse the direction of the last trade on T "
+    "within this window AND T isn't in the current news batch's "
+    "trigger_tickers (i.e. no fresh news to justify the flip), the "
+    "order is dropped and a knob_fired name=whipsaw_guard event is "
+    "logged. Motivated by the 2026-09-14/18 A/B: arm C flipped CRM "
+    "6+ times/day and B's best-hit-rate arm still net-lost from "
+    "asymmetric single-tick reversals. 0 disables (arm A baseline).",
+)
+
+
 # Deterministic replay ---------------------------------------------------
 
 _register(

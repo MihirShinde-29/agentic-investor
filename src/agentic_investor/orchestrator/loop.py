@@ -765,6 +765,89 @@ def _direction_of_citation(ticker: str, reasoning) -> str | None:
     return None
 
 
+def _apply_whipsaw_guard(
+    plans,
+    state,
+    session,
+    news_batch_tickers: set[str],
+    now: datetime,
+):
+    """Block plans that would reverse the direction of a recent trade
+    on the same ticker without fresh news to justify the flip.
+
+    Motivating pattern (2026-09-14/18 A/B, 5 days across arms A/B/C):
+    - Arm C flipped CRM 6+ times in one 20-min window at bad prices,
+      churning the position for net-zero economic effect.
+    - Arm B had best hit-rate (3/5 days) but net-lost because a small
+      number of large single-tick reversals wiped out the wins.
+    - Neither the opinion-drift filter nor cite-to-trade caught these:
+      each individual leg was small enough to pass the delta band and
+      the LLM cited *something* every time.
+
+    Rule: for each plan on ticker T,
+      - Look up state.recent_trades[T] = (side, iso_ts).
+      - If side != plan.side AND age_min < window AND T not in
+        news_batch_tickers: drop the plan, emit knob_fired.
+      - Otherwise pass through.
+
+    Window is env-controlled via AGENTIC_WHIPSAW_GUARD_WINDOW_MIN
+    (int minutes, default 15, 0 disables). News-batch-ticker exemption
+    keeps the guard from blocking legitimate reversal-on-fresh-news
+    decisions - what we want to catch is the flip-without-signal
+    pattern, not decisive news-driven exits.
+
+    Returns the filtered plans list.
+    """
+    from agentic_investor.flags import flags
+    window_min = int(flags.WHIPSAW_GUARD_WINDOW_MIN)
+    if window_min <= 0 or not plans:
+        return plans
+    kept = []
+    dropped = 0
+    for p in plans:
+        tk = p.ticker.upper()
+        last = (state.recent_trades or {}).get(tk)
+        if not last:
+            kept.append(p)
+            continue
+        last_side, last_ts_iso = last
+        if last_side == p.side:
+            kept.append(p)  # same side, not a whipsaw
+            continue
+        try:
+            last_ts = datetime.fromisoformat(
+                last_ts_iso.replace("Z", "+00:00"),
+            )
+        except (ValueError, AttributeError):
+            kept.append(p)  # unparseable ts - fail open
+            continue
+        age_min = (now - last_ts).total_seconds() / 60.0
+        if age_min >= window_min:
+            kept.append(p)  # outside window
+            continue
+        if tk in news_batch_tickers:
+            kept.append(p)  # fresh news justifies the reversal
+            continue
+        # Whipsaw: dropped.
+        dropped += 1
+        if session:
+            session.log("knob_fired", {
+                "name": "whipsaw_guard",
+                "reason": "opposite_side_recent",
+                "ticker": tk,
+                "prev_side": last_side,
+                "plan_side": p.side,
+                "age_min": round(age_min, 2),
+                "window_min": window_min,
+            })
+    if dropped and session:
+        session.log("knob_fired", {
+            "name": "whipsaw_guard",
+            "reason": f"blocked_{dropped}",
+        })
+    return kept
+
+
 def _apply_cite_to_trade(plans, rec, prev_rec, session, rec_id):
     """Filter trade plans by whether the LLM cited the ticker in its CoT.
 
@@ -2082,6 +2165,15 @@ def run_tick(
             "name": "cite_to_trade",
             "reason": f"blocked_{n_before_cite - len(plans)}",
         })
+    # Whipsaw guard: drops plans that would reverse the direction of
+    # a recent trade on the same ticker without fresh news to justify
+    # the flip. See _apply_whipsaw_guard docstring for the pattern
+    # this catches (arm C's CRM 6-flip / arm B's asymmetric-loss).
+    plans = _apply_whipsaw_guard(
+        plans, state, session,
+        news_batch_tickers=set(batch_tickers_for_cooldown or set()),
+        now=now,
+    )
 
     # On barely-moved fall-through the LLM offered no fresh conviction, so
     # ADDs would be silent-drift executions of accumulated small target
@@ -2230,10 +2322,12 @@ def run_tick(
             o, source="loop", rec_id=state.last_rec_id,
             triggering_news_ids=news_ids_by_ticker.get(o.ticker.upper()),
         )
-        # Track for wall-clock cooldown ONLY when the arm has opted in.
-        # Arms running cite-to-trade alone leave state.recent_trades empty.
-        if cfg.cooldown_seconds > 0:
-            state.recent_trades[o.ticker.upper()] = (o.side, now.isoformat())
+        # Track most-recent trade per ticker. Read by two independent
+        # consumers: the wall-clock cooldown (opt-in via
+        # cfg.cooldown_seconds > 0) and the whipsaw guard (opt-in via
+        # AGENTIC_WHIPSAW_GUARD_WINDOW_MIN > 0). Populated unconditionally
+        # so either can be enabled per-arm without also enabling the other.
+        state.recent_trades[o.ticker.upper()] = (o.side, now.isoformat())
         if session:
             session.log("order_submitted", {
                 "ticker": o.ticker, "side": o.side, "qty": o.qty,
