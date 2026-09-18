@@ -6,10 +6,16 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Persist the SQLite mirror + session artifacts across container restarts.
+      # SQLite mirror of Alpaca orders + positions.
       - ./agentic_investor.db:/app/agentic_investor.db
+      # M17 recommendation vector store (sqlite-vec, replaces .chroma).
+      # Created on first index; touch the host file before `up` so the
+      # bind-mount doesn't come up as a directory.
+      - ./.rec_store.db:/app/.rec_store.db
+      # News-article vector store (sqlite-vec). Same touch caveat.
+      - ./.news_store.db:/app/.news_store.db
+      # Session logs, recordings (for deterministic-replay), broker snapshots.
       - ./out:/app/out
-      - ./.chroma:/app/.chroma
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
@@ -17,3 +23,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    # Notes:
+    # - AGENTIC_ML_SERVICE_URL can point at a shared ml-service container
+    #   to avoid loading finBERT + sentence-transformer weights inside
+    #   this arm. Not modeled here; the paper-experiment supervisor
+    #   spawns the ml-service subprocess in-process when running arms
+    #   locally.
+    # - The old ./.chroma mount was removed with the sqlite-vec
+    #   migration; re-add only if a legacy image needs it.

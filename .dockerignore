@@ -1,6 +1,14 @@
 .git
 .venv
+# Obsolete chroma segments (kept for a while so old checkouts don't
+# accidentally COPY 44 GB of corrupted HNSW into the build context).
 .chroma
+.chroma.*
+# sqlite-vec stores live in bind mounts, not the image.
+.rec_store.db
+.rec_store.db-*
+.news_store.db
+.news_store.db-*
 .pytest_cache
 .ruff_cache
 node_modules

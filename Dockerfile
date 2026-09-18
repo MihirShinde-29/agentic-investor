@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
 WORKDIR /app
 COPY --from=pydeps /app/.venv /app/.venv
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md FLAGS.md ./
 COPY src/ ./src/
 RUN uv sync --frozen --no-dev
 COPY --from=frontend /app/dashboard/dist /app/dashboard/dist
