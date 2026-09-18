@@ -9,10 +9,47 @@ volume, price structure, patterns) rather than piling up correlated momentum
 indicators.
 """
 
+import logging
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+
+# Class-share tickers Alpaca returns as "BRK.B" / "BF.B" but yfinance
+# indexes as "BRK-B" / "BF-B". Every startup universe-scan without this
+# rewrite spewed "$BRK: possibly delisted" / "HTTP Error 404" per arm.
+_YF_SYMBOL_REWRITES = {
+    "BRK": "BRK-B",   # Berkshire class B is the tradable one
+    "BRK.A": "BRK-A",
+    "BRK.B": "BRK-B",
+    "BF.A": "BF-A",
+    "BF.B": "BF-B",
+    "RDS.A": "RDS-A",
+    "RDS.B": "RDS-B",
+}
+# Symbols we know yfinance no longer indexes. Reduces the 404 noise
+# floor across every startup; keep list small so a genuinely-missing
+# symbol still surfaces the error rather than being silently skipped.
+_YF_DELISTED = {"SNCY"}
+
+
+def _normalise_yf_symbol(ticker: str) -> str | None:
+    """Rewrite Alpaca-style class shares to yfinance's dash format and
+    filter symbols we've confirmed yfinance doesn't index. Returns
+    None for known-delisted symbols so callers can skip cleanly
+    without eating a 404. Case-insensitive; upstream callers pass
+    upper-case already but we normalise defensively.
+    """
+    if not ticker:
+        return None
+    up = ticker.upper()
+    if up in _YF_DELISTED:
+        return None
+    return _YF_SYMBOL_REWRITES.get(up, up)
 
 
 class MarketSnapshot(BaseModel):
@@ -75,8 +112,11 @@ def _pead_features(
     Only returns non-None when the last earnings report is within the drift
     window - outside it, PEAD isn't a live signal.
     """
+    yf_sym = _normalise_yf_symbol(ticker)
+    if yf_sym is None:
+        return None, None
     try:
-        tk = yf.Ticker(ticker)
+        tk = yf.Ticker(yf_sym)
         ed = tk.earnings_dates
         if ed is None or ed.empty:
             return None, None
@@ -199,8 +239,14 @@ def fetch_ohlcv(
         df = _drop_incomplete(df)
         if not df.empty:
             return df
+    yf_sym = _normalise_yf_symbol(ticker)
+    if yf_sym is None:
+        raise ValueError(
+            f"no price data for {ticker!r}: known-delisted per _YF_DELISTED "
+            f"and Alpaca returned empty",
+        )
     if end is None:
-        df = yf.Ticker(ticker).history(
+        df = yf.Ticker(yf_sym).history(
             period=period, interval=interval, auto_adjust=True, timeout=timeout,
         )
     else:
@@ -209,7 +255,7 @@ def fetch_ohlcv(
         end_ts = pd.Timestamp(end)
         years = {"1y": 1, "2y": 2, "5y": 5, "10y": 10, "max": 20}.get(period, 2)
         start_ts = end_ts - pd.DateOffset(years=years)
-        df = yf.Ticker(ticker).history(
+        df = yf.Ticker(yf_sym).history(
             start=start_ts.strftime("%Y-%m-%d"),
             end=end_ts.strftime("%Y-%m-%d"),
             interval=interval,
