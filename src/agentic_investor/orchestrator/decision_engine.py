@@ -41,6 +41,17 @@ NEWS_DRIVEN_TRIGGERS: frozenset[str] = frozenset({
     "batch-window-closed",
     "cooked-news-ready",
     "materiality-bypass-fire",
+    # `force-regen` isn't news-driven by cause, but the first-of-day
+    # force-regen at market open ALWAYS has an overnight news batch
+    # attached (has_news_batch=True), and the orders it produces are
+    # legitimately attributable to that news. Excluding it dropped
+    # the entire open-of-market rebalance from the dashboard's
+    # news-reactions view. The endpoint's downstream match rules
+    # (order-ticker / hot-signal / regen_attribution.trigger_tickers /
+    # macro) still gate whether a specific news event claims a
+    # specific force-regen, so allowing it here doesn't create false
+    # positives on quiet-market force-regens with no batched news.
+    "force-regen",
 })
 COOKED_MIN_AGE_SEC = 15 * 60  # >=15 min = COOKED
 STALE_MIN_AGE_SEC = 60 * 60   # >=60 min = STALE (background only)
