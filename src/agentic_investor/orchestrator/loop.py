@@ -1139,14 +1139,25 @@ def _filter_should_skip(
 
 
 def _extract_tickers_from_batch_ctx(batch_ctx: str) -> list[str]:
-    """Pull tickers out of a rendered batch context.
+    r"""Pull tickers out of a rendered batch context.
 
-    render_batch_context() emits lines like "- [HOT] NVDA  age=..." so a
-    simple regex over the second column recovers the ticker set.
+    render_batch_context() emits lines like
+    "- [HOT] N3f9a2b1c NVDA  age=..." - the leading `N<hex>` is the news
+    id (added so the LLM can cite it via `triggering_news_ids`), and
+    the ticker is the SECOND all-uppercase token. Earlier revisions of
+    this function captured the first `[A-Z][A-Z0-9.\-]+` after the
+    kind tag, which happened to match the news id and truncated it at
+    the first lowercase hex char - so live regen_attribution rows
+    carried values like `N60`/`N08` instead of `NVDA`/`AAPL`, silently
+    breaking the dashboard's news-reactions endpoint's news->rec match
+    rule (which then only matched on direct order-ticker overlap).
     """
     import re
 
-    tickers = re.findall(r"\[(?:HOT|COOKED|STALE)\]\s+([A-Z][A-Z0-9.\-]+)", batch_ctx)
+    tickers = re.findall(
+        r"\[(?:HOT|COOKED|STALE)\]\s+N[0-9a-f]+\s+([A-Z][A-Z0-9.\-]+)",
+        batch_ctx,
+    )
     return list(dict.fromkeys(tickers))
 
 
