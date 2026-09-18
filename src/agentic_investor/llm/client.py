@@ -138,12 +138,21 @@ class _CallStats:
 _stats = _CallStats()
 _stats_lock = threading.Lock()
 
+# Per-call ring buffer for downstream session logging. `_track_usage`
+# appends one dict per successful LiteLLM call; the paper-loop drains
+# this after each allocate/regen so the dashboard can show live
+# cache-hit-rate + spend without depending on end-of-run summaries.
+# Capped so a long-running arm with a broken drainer doesn't leak.
+_RECENT_CALLS_CAP = 500
+_recent_calls: list[dict] = []
+
 
 def reset_call_stats() -> None:
     """Zero out the LLM usage counters (call at the start of each CLI command)."""
     global _stats
     with _stats_lock:
         _stats = _CallStats()
+        _recent_calls.clear()
 
 
 def get_call_stats() -> _CallStats:
@@ -241,8 +250,39 @@ def _track_usage(kwargs, completion_response, start_time, end_time) -> None:
             m["completion"] += completion
             m["cached"] += cached
             m["cost"] += cost
+            # Ring-buffer append for downstream draining. Trim opportunistically
+            # so an arm that never calls pop_recent_calls (unit test, throwaway
+            # script) doesn't accumulate forever.
+            _recent_calls.append({
+                "model": model,
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "cached_tokens": cached,
+                "cache_creation_tokens": creation,
+                "cache_hit_ratio": (cached / prompt) if prompt > 0 else 0.0,
+                "estimated_cost_usd": round(cost, 6),
+            })
+            if len(_recent_calls) > _RECENT_CALLS_CAP:
+                # Drop the oldest half in one splice. Better than
+                # popping one at a time from the head - Python lists
+                # are O(n) on left-pop.
+                del _recent_calls[:len(_recent_calls) - _RECENT_CALLS_CAP // 2]
     except Exception:  # noqa: BLE001 - never let telemetry break a real call
         pass
+
+
+def pop_recent_calls() -> list[dict]:
+    """Return every LLM call since the last drain and clear the buffer.
+
+    Called by the paper-loop after each allocate/regen so a dashboard
+    consumer can see cache-hit-rate per call rather than aggregated over
+    a whole session. Safe to call from any thread; returns [] when no
+    calls were recorded.
+    """
+    with _stats_lock:
+        out = list(_recent_calls)
+        _recent_calls.clear()
+        return out
 
 
 # Register the tracker with LiteLLM. Extend rather than replace so we don't

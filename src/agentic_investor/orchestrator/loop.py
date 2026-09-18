@@ -1218,6 +1218,18 @@ def _log_reasoning_and_ensemble(session, rec, rec_id: int, prev_rec=None) -> Non
     skip cleanly when unset."""
     if not session:
         return
+    # Prompt-cache observability: drain per-call usage recorded by
+    # llm.client._track_usage since the last regen and emit one
+    # `llm_call` event per call. Gives the dashboard live cache-hit
+    # ratios instead of aggregating over the whole session. Deliberately
+    # narrow schema so a downstream parser (ops.session.iter_events)
+    # can filter by event_type='llm_call' without joining tables.
+    try:
+        from agentic_investor.llm.client import pop_recent_calls
+        for call in pop_recent_calls():
+            session.log("llm_call", {"rec_id": rec_id, **call})
+    except Exception:  # noqa: BLE001 - telemetry never blocks a regen
+        pass
     reasoning = getattr(rec.allocation, "reasoning", None)
     if reasoning is not None:
         try:
@@ -2353,10 +2365,27 @@ def run_event_loop(
         initial_tickers = ["*"]
     else:
         initial_tickers = ["SPY"]
-    streamer = NewsStreamer(initial_tickers, event_queue=event_q)
-    streamer.start()
-    if session:
-        session.log("streamer_start", {"tickers": initial_tickers})
+    # Deterministic replay: when AGENTIC_REPLAY_FROM is set, replace
+    # the live Alpaca-backed streamer with a recorder-fed injector so
+    # this arm sees exactly the news it saw during recording. Falling
+    # through to the live streamer in replay mode would leak today's
+    # events into the reconstruction and defeat the point.
+    from agentic_investor.orchestrator.news_replay import (
+        NewsReplayDriver,
+        replay_active,
+    )
+    if replay_active():
+        streamer = NewsReplayDriver(event_queue=event_q)
+        streamer.start()
+        if session:
+            session.log("news_replay_start", {
+                "total": streamer.total,
+            })
+    else:
+        streamer = NewsStreamer(initial_tickers, event_queue=event_q)
+        streamer.start()
+        if session:
+            session.log("streamer_start", {"tickers": initial_tickers})
 
     # Backdate the interval tick so the first loop iteration always fires a
     # tick (interval_due is immediately True). Otherwise --once + no news

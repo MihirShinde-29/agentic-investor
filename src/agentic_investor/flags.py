@@ -209,6 +209,17 @@ _register(
 )
 
 
+# Deterministic replay ---------------------------------------------------
+
+_register(
+    "AGENTIC_REPLAY_NEWS_SPEED", 1.0, "float",
+    "News-replay playback multiplier. 1.0 = real-time (respects "
+    "recorded inter-event gaps), 2.0 = twice as fast, 0 = fire "
+    "everything as fast as the queue drains. Only consulted when "
+    "AGENTIC_REPLAY_FROM is set.",
+)
+
+
 # Session-log rotation (task #147) ---------------------------------------
 
 _register(
