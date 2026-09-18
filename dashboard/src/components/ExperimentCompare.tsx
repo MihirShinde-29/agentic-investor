@@ -18,6 +18,7 @@ import type {
 import { fetcher } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { decodeHtmlEntities } from "@/lib/htmlEntities";
 import { TIMEFRAMES, type Timeframe } from "@/lib/timeframe";
 
 const ARM_COLORS = ["#60a5fa", "#f472b6", "#a78bfa", "#fbbf24", "#34d399"];
@@ -390,9 +391,9 @@ export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
                     </td>
                     <td
                       className="max-w-[380px] truncate py-1.5 pr-2 text-muted-foreground"
-                      title={row.headline}
+                      title={decodeHtmlEntities(row.headline ?? "")}
                     >
-                      {row.headline}
+                      {decodeHtmlEntities(row.headline ?? "")}
                     </td>
                     {armIds.map((id) => {
                       const r = row.per_arm[id];

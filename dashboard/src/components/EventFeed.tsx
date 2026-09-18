@@ -4,6 +4,7 @@ import type { LiveEvent } from "@/hooks/useLiveEvents";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { decodeHtmlEntities } from "@/lib/htmlEntities";
 
 type Kind = "news" | "regen" | "skip" | "trade" | "fill" | "info" | "cost";
 
@@ -70,27 +71,9 @@ function loadFilter(): StoredFilter {
   }
 }
 
-/**
- * Decode the most common HTML entities so headlines pulled from RSS/press
- * feeds render as human text ("NBC's" instead of "NBC&#39;s"). Also strips
- * dangling partial entities left over when an upstream feed truncated a
- * headline mid-entity (e.g. "...Coin Flip&#3" -> "...Coin Flip").
- */
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-    .replace(/&#x([\da-fA-F]+);/g, (_, n) => String.fromCharCode(parseInt(n, 16)))
-    // strip trailing partial entities like `&#3` or `&am` after upstream cut-off
-    .replace(/&#x?[\da-fA-F]*$/, "")
-    .replace(/&[a-zA-Z]{1,6}$/, "")
-    .trimEnd();
-}
+// decodeEntities lives in @/lib/htmlEntities so ExperimentCompare and
+// any other headline-rendering surface can share the same fixups.
+const decodeEntities = decodeHtmlEntities;
 
 function summarize(evt: LiveEvent): string {
   switch (evt.event) {
