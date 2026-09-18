@@ -550,12 +550,17 @@ def test_promotion_extracts_beneficiaries_from_batch_and_caps(monkeypatch):
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_snapshot", lambda *a, **k: 1)
     monkeypatch.setattr("agentic_investor.orchestrator.loop.record_order", lambda *a, **k: None)
 
+    # Format matches render_batch_context (decision_engine.py:213-216):
+    # each line leads with the news_id (N + 8 hex chars) so the LLM can
+    # cite it via Position.triggering_news_ids; the ticker is the
+    # SECOND all-uppercase token. See `_extract_tickers_from_batch_ctx`
+    # for the regression that made this format explicit.
     batch_ctx = (
-        "- [HOT] BE  age=1m: Bloom Energy could benefit\n"
-        "- [HOT] TSM  age=1m: TSMC ramps capacity\n"
-        "- [HOT] AVGO  age=2m: Broadcom secures deal\n"
-        "- [HOT] PLTR  age=2m: Palantir expands contract\n"
-        "- [HOT] SNOW  age=3m: Snowflake beats"
+        "- [HOT] N01aaaaaa BE  age=1m: Bloom Energy could benefit\n"
+        "- [HOT] N02bbbbbb TSM  age=1m: TSMC ramps capacity\n"
+        "- [HOT] N03cccccc AVGO  age=2m: Broadcom secures deal\n"
+        "- [HOT] N04dddddd PLTR  age=2m: Palantir expands contract\n"
+        "- [HOT] N05eeeeee SNOW  age=3m: Snowflake beats"
     )
     cfg = LoopConfig(
         tickers=["AAPL"], band_abs_pct=5.0,
