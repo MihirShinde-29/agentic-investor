@@ -55,12 +55,39 @@ _SCHEMA_SQL_VEC = (
 
 _conn_lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
+# Serializes writes and multi-statement reads across threads. Callers
+# doing an INSERT/UPDATE/DELETE or a compound SELECT+MATCH should
+# acquire this lock; single-statement reads are safe under WAL.
+# Bug that motivated it: LangGraph parallelises the news-agent
+# per-ticker calls across a threadpool, and every worker hit the
+# process-wide singleton connection with sqlite3's default
+# check_same_thread=True, throwing "SQLite objects created in a
+# thread can only be used in that same thread" for every ticker
+# after the first. Setting check_same_thread=False lets threads share
+# the conn; this lock keeps writes and vec-MATCH statements safe.
+_stmt_lock = threading.RLock()
+
+
+def get_stmt_lock() -> threading.RLock:
+    """Public accessor for the write/compound-statement lock. Use
+    `with news_store.get_stmt_lock(): ...` around any transaction
+    that spans more than one .execute() on the shared connection.
+    """
+    return _stmt_lock
 
 
 def _init_conn(path: str) -> sqlite3.Connection:
-    """Open a sqlite connection, load vec0, ensure schema."""
+    """Open a sqlite connection, load vec0, ensure schema.
+
+    `check_same_thread=False` because LangGraph runs the news-agent
+    fan-out on a threadpool and every worker calls into the shared
+    module singleton. See `_stmt_lock` docstring for the incident.
+    Safety rests on: (1) WAL journal + busy_timeout retries handle
+    single-statement contention, (2) `_stmt_lock` serialises writes
+    and vec-MATCH sequences.
+    """
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, isolation_level=None)
+    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)

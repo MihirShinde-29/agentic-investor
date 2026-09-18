@@ -209,6 +209,19 @@ _register(
 )
 
 
+# Price-bus subscription cap ---------------------------------------------
+
+_register(
+    "AGENTIC_PRICE_BUS_MAX_SYMBOLS", 30, "int",
+    "Max concurrent Alpaca websocket trade-subscriptions the shared "
+    "price bus will hold. Alpaca paper returns "
+    "'symbol limit exceeded (405)' on the whole subscribe call once the "
+    "cap is exceeded, so this is enforced client-side. Freshness-based "
+    "eviction: newest updated_at wins. Bump if you upgrade to a data "
+    "plan with a higher cap.",
+)
+
+
 # Deterministic replay ---------------------------------------------------
 
 _register(

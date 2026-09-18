@@ -19,7 +19,11 @@ from functools import lru_cache
 from pydantic import BaseModel
 
 from agentic_investor.config import get_settings
-from agentic_investor.tools.news_store import EMBED_DIM, get_connection
+from agentic_investor.tools.news_store import (
+    EMBED_DIM,
+    get_connection,
+    get_stmt_lock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +199,10 @@ def upsert_news_articles(
     connection = conn if conn is not None else get_connection()
     docs = [f"{a.headline}\n{a.summary}".strip() for a in articles]
     embeddings = embedder(docs)
-    with connection:  # BEGIN / COMMIT
+    # Serialize the multi-statement upsert; the shared conn now runs
+    # with check_same_thread=False (news_store._init_conn) so we need
+    # to prevent interleaving from concurrent LangGraph workers.
+    with get_stmt_lock(), connection:  # BEGIN / COMMIT
         for art, doc, emb in zip(articles, docs, embeddings, strict=True):
             _ = doc  # doc text is what we embed; not persisted separately
             connection.execute(
@@ -247,21 +254,25 @@ def retrieve_news(
     # top-K when other tickers rank higher on similarity. vec0 doesn't
     # support pre-filtering by joined-table predicates efficiently.
     fetch_k = max(k * 4, 20)
-    rows = connection.execute(
-        """
-        SELECT
-            a.id, a.ticker, a.headline, a.summary, a.source, a.url,
-            a.published_at, v.distance
-        FROM vec_news v
-        JOIN news_articles a ON a.internal_id = v.rowid
-        WHERE v.embedding MATCH ?
-          AND v.k = ?
-          AND a.ticker = ?
-        ORDER BY v.distance
-        LIMIT ?
-        """,
-        (query_embedding, fetch_k, ticker.upper(), k),
-    ).fetchall()
+    # vec0 MATCH is not thread-safe on a shared connection; serialise
+    # so concurrent per-ticker news-agent workers don't step on each
+    # other's virtual-table cursors.
+    with get_stmt_lock():
+        rows = connection.execute(
+            """
+            SELECT
+                a.id, a.ticker, a.headline, a.summary, a.source, a.url,
+                a.published_at, v.distance
+            FROM vec_news v
+            JOIN news_articles a ON a.internal_id = v.rowid
+            WHERE v.embedding MATCH ?
+              AND v.k = ?
+              AND a.ticker = ?
+            ORDER BY v.distance
+            LIMIT ?
+            """,
+            (query_embedding, fetch_k, ticker.upper(), k),
+        ).fetchall()
     return [
         NewsArticle(
             id=r[0], ticker=r[1], headline=r[2], summary=r[3] or "",

@@ -71,14 +71,31 @@ def init_price_bus_tables(db_path: Path) -> None:
 
 
 def _read_desired_tickers(db_path: Path) -> set[str]:
+    """Union of currently-desired tickers across all arms, capped at
+    AGENTIC_PRICE_BUS_MAX_SYMBOLS (default 30 — Alpaca paper's per-
+    connection cap for stock trade subscriptions).
+
+    Alpaca returns `symbol limit exceeded (405)` on the whole
+    subscribe_trades call once the total exceeds the cap, so we must
+    do the cap client-side. Ordering by MAX(updated_at) DESC keeps the
+    freshest arm registrations (most likely to be held/on-deck NOW)
+    and drops the stalest ones. TTL cutoff still applies so a ticker
+    an arm hasn't touched in `_SUBSCRIPTION_TTL_SEC` won't consume a
+    slot regardless.
+    """
+    from agentic_investor.flags import flags
+    cap = int(flags.PRICE_BUS_MAX_SYMBOLS)
     cutoff = (
         datetime.now(UTC) - timedelta(seconds=_SUBSCRIPTION_TTL_SEC)
     ).isoformat()
     with sqlite3.connect(str(db_path)) as conn:
         rows = conn.execute(
-            "SELECT DISTINCT ticker FROM price_subscriptions "
-            "WHERE updated_at > ?",
-            (cutoff,),
+            "SELECT ticker FROM price_subscriptions "
+            "WHERE updated_at > ? "
+            "GROUP BY ticker "
+            "ORDER BY MAX(updated_at) DESC "
+            "LIMIT ?",
+            (cutoff, cap),
         ).fetchall()
     return {r[0] for r in rows}
 

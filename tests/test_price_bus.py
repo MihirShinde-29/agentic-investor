@@ -400,3 +400,86 @@ def test_get_latest_price_registers_ticker_on_first_call(tmp_path,
             "SELECT arm_id, ticker FROM price_subscriptions"
         ).fetchall()
     assert rows == [("A", "TSLA")]
+
+
+def _register(db_path, arm: str, ticker: str, offset_sec: float = 0.0) -> None:
+    """Simulate an arm-side call to register a ticker at a given
+    freshness (positive offset = older). Uses direct SQL to sidestep
+    the client-side debounce logic that's a different test's concern.
+    """
+    from datetime import UTC, datetime, timedelta
+    ts = (datetime.now(UTC) - timedelta(seconds=offset_sec)).isoformat()
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO price_subscriptions (arm_id, ticker, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(arm_id, ticker) DO UPDATE SET updated_at = excluded.updated_at",
+            (arm, ticker.upper(), ts),
+        )
+
+
+def test_read_desired_tickers_caps_at_max_symbols(tmp_path, monkeypatch):
+    """Alpaca paper returns 'symbol limit exceeded (405)' on the whole
+    subscribe call once the total exceeds the cap. _read_desired_tickers
+    must enforce a client-side ceiling so we never issue that call.
+    """
+    from agentic_investor.experiments.price_bus import (
+        _read_desired_tickers,
+        init_price_bus_tables,
+    )
+
+    db = tmp_path / "pb.db"
+    init_price_bus_tables(db)
+    monkeypatch.setenv("AGENTIC_PRICE_BUS_MAX_SYMBOLS", "5")
+    # Seed 12 distinct tickers, all fresh.
+    for i in range(12):
+        _register(db, "A", f"T{i:02d}")
+
+    got = _read_desired_tickers(db)
+    assert len(got) == 5, f"expected cap=5 tickers, got {len(got)}"
+
+
+def test_read_desired_tickers_prefers_freshest_on_overflow(tmp_path, monkeypatch):
+    """On overflow, the freshest updated_at wins. Older registrations
+    get dropped so a stale on-deck ticker doesn't consume a slot the
+    current book needs.
+    """
+    from agentic_investor.experiments.price_bus import (
+        _read_desired_tickers,
+        init_price_bus_tables,
+    )
+
+    db = tmp_path / "pb.db"
+    init_price_bus_tables(db)
+    monkeypatch.setenv("AGENTIC_PRICE_BUS_MAX_SYMBOLS", "3")
+    # 3 old registrations (60s ago) and 3 fresh (now). Only the fresh
+    # trio should survive the cap.
+    for t in ("OLD1", "OLD2", "OLD3"):
+        _register(db, "A", t, offset_sec=60.0)
+    for t in ("NEW1", "NEW2", "NEW3"):
+        _register(db, "B", t, offset_sec=0.0)
+
+    got = _read_desired_tickers(db)
+    assert got == {"NEW1", "NEW2", "NEW3"}, (
+        f"expected freshest 3 to survive, got {sorted(got)}"
+    )
+
+
+def test_read_desired_tickers_dedupes_across_arms(tmp_path, monkeypatch):
+    """Two arms registering the same ticker count as one slot; the
+    cap is a global-symbol cap, not a per-arm cap.
+    """
+    from agentic_investor.experiments.price_bus import (
+        _read_desired_tickers,
+        init_price_bus_tables,
+    )
+
+    db = tmp_path / "pb.db"
+    init_price_bus_tables(db)
+    monkeypatch.setenv("AGENTIC_PRICE_BUS_MAX_SYMBOLS", "10")
+    for arm in ("A", "B", "C"):
+        for t in ("AAPL", "MSFT", "NVDA"):
+            _register(db, arm, t)
+
+    got = _read_desired_tickers(db)
+    assert got == {"AAPL", "MSFT", "NVDA"}
