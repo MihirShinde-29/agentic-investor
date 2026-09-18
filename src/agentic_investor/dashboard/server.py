@@ -418,23 +418,28 @@ def create_app(
         if not news:
             return {"experiment": exp.name, "news_reactions": []}
 
-        # Per-arm indexes: regens + skips + order submissions + hot
-        # signals. finbert_hot_signal events tell us *which specific
-        # news ticker* fast-triggered a subsequent finbert-hot-headline
-        # regen; the ticker's regen orders may not include the news
-        # ticker (rotation cases like "ABBV upgrade -> A rotates
-        # MRK -> ABBV") but the news IS causally the trigger.
+        # Per-arm indexes: regens (for rec metadata lookup) + attribution
+        # rows (the actual trade-burst anchors) + skips + order
+        # submissions + hot signals. Two paths fire orders in the loop:
+        #
+        # 1. Fresh regen: regen_start -> regen_done -> trade_plan ->
+        #    regen_attribution -> order_submitted x N.
+        # 2. Drift-band on stale rec: regen_start -> opinion_drift_skip
+        #    -> trade_plan -> regen_attribution -> order_submitted x N
+        #    (no regen_done - the LLM said "barely moved", but prices
+        #    drifted enough that the existing rec's targets warrant
+        #    trades).
+        #
+        # Both paths emit regen_attribution ~150ms before the orders.
+        # So we anchor trade buckets on regen_attribution, not
+        # regen_done. Pre-fix we bucketed on regen_done + a 5s grace
+        # window and lost all drift-band trades (their originating rec's
+        # regen_done was minutes/hours earlier, way outside the grace).
         per_arm_regens: dict[str, list[tuple[_dt, dict]]] = {}
         per_arm_skips: dict[str, list[tuple[_dt, dict]]] = {}
         per_arm_orders: dict[str, list[tuple[_dt, dict]]] = {}
         per_arm_hot_signals: dict[str, list[tuple[_dt, dict]]] = {}
-        # rec_id -> trigger_tickers, per arm. The loop already computed which
-        # news tickers fired each regen via regen_attribution; using it here
-        # catches rotation cases (news about MRK causes LLM to sell MRK by
-        # buying CRM instead) that order-ticker matching alone misses.
-        per_arm_trigger_tickers: dict[str, dict[int, set[str]]] = {
-            a.arm_id: {} for a in exp.arms
-        }
+        per_arm_attributions: dict[str, list[tuple[_dt, dict]]] = {}
         for arm in exp.arms:
             evs = _load_events(
                 arm.arm_id,
@@ -451,6 +456,7 @@ def create_app(
             skips: list[tuple[_dt, dict]] = []
             orders: list[tuple[_dt, dict]] = []
             hots: list[tuple[_dt, dict]] = []
+            attrs: list[tuple[_dt, dict]] = []
             for ev in evs:
                 ts = _parse_ts(ev.get("ts", ""))
                 if ts is None:
@@ -462,23 +468,32 @@ def create_app(
                 elif ev["event"] == "finbert_hot_signal":
                     hots.append((ts, ev))
                 elif ev["event"] == "regen_attribution":
-                    rid = ev.get("rec_id")
-                    if rid is not None:
-                        per_arm_trigger_tickers[arm.arm_id][int(rid)] = {
-                            t.upper() for t in (ev.get("trigger_tickers") or [])
-                        }
+                    attrs.append((ts, ev))
                 else:
                     skips.append((ts, ev))
             per_arm_regens[arm.arm_id] = regens
             per_arm_skips[arm.arm_id] = skips
             per_arm_orders[arm.arm_id] = orders
             per_arm_hot_signals[arm.arm_id] = hots
+            per_arm_attributions[arm.arm_id] = sorted(attrs)
+
+        # rec_id -> most-recent regen_done metadata, for looking up
+        # targets_count + cash_pct + trigger on drift-band bursts that
+        # trade against a stale rec.
+        per_arm_rec_meta: dict[str, dict[int, dict]] = {
+            a.arm_id: {} for a in exp.arms
+        }
+        for arm in exp.arms:
+            for _r_ts, r in per_arm_regens.get(arm.arm_id, []):
+                rid = r.get("rec_id")
+                if rid is None:
+                    continue
+                per_arm_rec_meta[arm.arm_id][int(rid)] = r
 
         # A regen counts as "reacting to news" only if its trigger came
         # from the news pipeline. Startup regens (no-unprocessed-news),
-        # force-regens (force-regen), price-move triggers, etc. would
-        # dump their orders under whatever news happened to arrive
-        # nearby - noise, not signal.
+        # price-move triggers, etc. would dump their orders under
+        # whatever news happened to arrive nearby - noise, not signal.
         from agentic_investor.orchestrator.decision_engine import (
             NEWS_DRIVEN_TRIGGERS as news_driven_triggers,
         )
@@ -489,32 +504,38 @@ def create_app(
         macro_news_tickers = {
             "SPY", "QQQ", "DIA", "IWM", "VOO", "VTI", "VGK", "EEM",
         }
-        # Once a regen has been "claimed" by a news event, don't let a
-        # second news event also claim it (avoid one regen appearing
-        # under multiple headlines).
-        claimed_regens: dict[str, set[int]] = {a.arm_id: set() for a in exp.arms}
-
-        # Orders come from a regen. Group orders that landed within a
-        # tight window (<=5s) after each regen_done into that regen's
-        # "trades" list. That's the canonical attribution.
-        ORDER_GRACE = 5.0
-        per_arm_regen_orders: dict[str, dict[int, list[dict]]] = {
-            a.arm_id: {} for a in exp.arms
+        # Bursts are the attribution anchor now (not regen_done), so a
+        # single rec_id can produce multiple bursts (fresh regen + N
+        # drift-band trades). Track claimed by (rec_id, attribution_ts)
+        # so the "first news wins" rule still holds per-burst.
+        claimed_bursts: dict[str, set[tuple[int, float]]] = {
+            a.arm_id: set() for a in exp.arms
         }
+
+        # For each attribution, collect orders in the window
+        # [attribution_ts, next_attribution_ts) capped at ORDER_GRACE.
+        # ORDER_GRACE is per-burst, not per-rec, so the drift-band
+        # trades that fire 17 min after their rec's regen_done still
+        # get bucketed correctly - their attribution row landed ~150ms
+        # before the orders regardless of how stale the rec is.
+        ORDER_GRACE = 5.0
+
+        # Per-arm bursts: list of dicts anchored on regen_attribution.
+        # Each entry has attribution ts, rec_id, trigger (from the
+        # attribution row itself), trigger_tickers (news tickers the
+        # loop attributed to this burst), and the orders bucket.
+        per_arm_bursts: dict[str, list[dict]] = {a.arm_id: [] for a in exp.arms}
         for arm in exp.arms:
-            regens_ts_sorted = sorted(per_arm_regens.get(arm.arm_id, []))
-            for i, (r_ts, r) in enumerate(regens_ts_sorted):
-                rec_id = r.get("rec_id")
+            attribs = per_arm_attributions.get(arm.arm_id, [])
+            orders_all = sorted(per_arm_orders.get(arm.arm_id, []))
+            for i, (a_ts, a) in enumerate(attribs):
+                rec_id = a.get("rec_id")
                 if rec_id is None:
                     continue
-                cutoff = (
-                    regens_ts_sorted[i + 1][0]
-                    if i + 1 < len(regens_ts_sorted)
-                    else None
-                )
+                cutoff = attribs[i + 1][0] if i + 1 < len(attribs) else None
                 bucket: list[dict] = []
-                for o_ts, o in per_arm_orders.get(arm.arm_id, []):
-                    delta = (o_ts - r_ts).total_seconds()
+                for o_ts, o in orders_all:
+                    delta = (o_ts - a_ts).total_seconds()
                     if delta < 0 or delta > ORDER_GRACE:
                         continue
                     if cutoff is not None and o_ts >= cutoff:
@@ -528,7 +549,15 @@ def create_app(
                         "side": (o.get("side") or "?").lower(),
                         "qty": round(qty, 4),
                     })
-                per_arm_regen_orders[arm.arm_id][rec_id] = bucket
+                per_arm_bursts[arm.arm_id].append({
+                    "attribution_ts": a_ts,
+                    "rec_id": int(rec_id),
+                    "trigger": a.get("trigger") or "",
+                    "trigger_tickers": {
+                        t.upper() for t in (a.get("trigger_tickers") or [])
+                    },
+                    "orders": bucket,
+                })
 
         # Scan a wider window of news than we return so we don't miss
         # older-but-matched events (news arrives faster than reactions
@@ -544,40 +573,39 @@ def create_app(
             is_macro = news_ticker in macro_news_tickers if news_ticker else False
             per_arm: dict[str, dict] = {}
             for arm in exp.arms:
-                # A regen R attributes to news N if either N.ticker is
-                # in R's orders (direct trade), OR an arm-local
+                # A burst B attributes to news N if either N.ticker is
+                # in B's orders (direct trade), OR an arm-local
                 # finbert_hot_signal for N.ticker fired within ~90s
-                # before R (causal trigger, even if R rotated to a peer
-                # instead), OR N is a broad-market macro ticker. On
-                # match, all orders in R are shown so rotations count as
-                # reactions, not just the ticker-matching leg.
+                # before B (causal trigger, even if B rotated to a peer
+                # instead), OR N is a broad-market macro ticker, OR
+                # the loop's own regen_attribution.trigger_tickers on
+                # B lists N.ticker. On match, all orders in B are
+                # shown so rotations count as reactions, not just the
+                # ticker-matching leg.
                 HOT_LOOKBACK_SEC = 90.0
                 matching_orders: list[dict] = []
                 matched_regen: dict | None = None
                 arm_hots = per_arm_hot_signals.get(arm.arm_id, [])
-                for r_ts, r in per_arm_regens.get(arm.arm_id, []):
-                    delta = (r_ts - n_ts).total_seconds()
+                for burst in per_arm_bursts.get(arm.arm_id, []):
+                    b_ts = burst["attribution_ts"]
+                    delta = (b_ts - n_ts).total_seconds()
                     if delta < 0 or delta > WINDOW_SEC:
                         continue
-                    trigger = r.get("trigger") or ""
+                    trigger = burst["trigger"]
                     if trigger not in news_driven_triggers:
                         continue
-                    rec_id = r.get("rec_id")
-                    if rec_id is None:
-                        continue
-                    candidate_orders = per_arm_regen_orders[arm.arm_id].get(
-                        rec_id, [],
-                    )
+                    rec_id = burst["rec_id"]
+                    candidate_orders = burst["orders"]
                     order_tickers = {
                         (o.get("ticker") or "").upper() for o in candidate_orders
                     }
                     # Rule (a): direct order-ticker match.
                     matches = bool(news_ticker and news_ticker in order_tickers)
                     # Rule (b): news ticker triggered a hot-signal within
-                    # the ~90s before the regen.
+                    # the ~90s before the burst.
                     if not matches and news_ticker:
                         for h_ts, h in arm_hots:
-                            gap = (r_ts - h_ts).total_seconds()
+                            gap = (b_ts - h_ts).total_seconds()
                             if gap < 0 or gap > HOT_LOOKBACK_SEC:
                                 continue
                             if (h.get("ticker") or "").upper() == news_ticker:
@@ -586,33 +614,35 @@ def create_app(
                     # Rule (c): broad-market macro news.
                     if not matches and is_macro:
                         matches = True
-                    # Rule (d): loop's own attribution. If the regen's
+                    # Rule (d): loop's own attribution. If the burst's
                     # regen_attribution.trigger_tickers lists this news
                     # ticker, count it as attributed even if the LLM
                     # rotated away to a different name.
                     if not matches and news_ticker:
-                        rec_triggers = per_arm_trigger_tickers[arm.arm_id].get(
-                            rec_id, set(),
-                        )
-                        if news_ticker in rec_triggers:
+                        if news_ticker in burst["trigger_tickers"]:
                             matches = True
                     if not matches:
                         continue
-                    if rec_id in claimed_regens[arm.arm_id]:
-                        # This regen has already been attributed to an
+                    burst_key = (rec_id, b_ts.timestamp())
+                    if burst_key in claimed_bursts[arm.arm_id]:
+                        # This burst has already been attributed to an
                         # earlier news event - don't duplicate it under
                         # every nearby SPY/QQQ macro row. First
                         # matching news wins.
                         continue
                     matching_orders = candidate_orders
+                    rec_meta = per_arm_rec_meta[arm.arm_id].get(rec_id) or {}
                     matched_regen = {
                         "seconds": round(delta, 1),
                         "rec_id": rec_id,
-                        "targets_count": len(r.get("targets") or {}),
-                        "cash_pct": r.get("cash_pct"),
+                        "targets_count": len(rec_meta.get("targets") or {}),
+                        "cash_pct": rec_meta.get("cash_pct"),
+                        # Prefer burst's own trigger (may differ from
+                        # the rec's original regen_done trigger when
+                        # this is a drift-band re-attribution).
                         "trigger": trigger,
                     }
-                    claimed_regens[arm.arm_id].add(rec_id)
+                    claimed_bursts[arm.arm_id].add(burst_key)
                     break
                 regen_info = matched_regen
                 orders_list = matching_orders
