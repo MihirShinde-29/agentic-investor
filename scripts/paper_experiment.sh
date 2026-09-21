@@ -51,7 +51,7 @@ mkdir -p out/logs
 # from tracking the process at all.
 nohup $BIN paper-experiment "$EXP" \
   --serve-dashboard --dashboard-port 8000 \
-  --paper-loop-args --auto --top-n 8 --regen-mode event \
+  --paper-loop-args --auto --top-n 8 --regen-mode event --amount 50000 \
   "$@" > out/logs/experiment.out 2>&1 &
 
 PID=$!

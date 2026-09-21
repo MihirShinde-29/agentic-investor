@@ -23,15 +23,30 @@ REM The default paper-loop-args (--auto --top-n 8 --regen-mode event)
 REM match what was running for the 2026-09-14/18 A/B; override by
 REM adding --paper-loop-args ... after the experiment name.
 
-setlocal
+setlocal EnableDelayedExpansion
 set REPO=%~dp0..
 if "%~1"=="" (
   echo Usage: %~nx0 ^<experiment-name^> [extra paper-experiment args]
   echo Example: %~nx0 reasoning-quality
   exit /b 2
 )
-set EXP=%1
+set EXP=%~1
 shift
+
+REM Collect any additional args (%2, %3, ...) into EXTRA. Windows
+REM `shift` does NOT shift %*, so we can't reuse %*. Iterate through
+REM the remaining positional args (`%~1` after the shift) and build
+REM a space-joined string; if none, EXTRA stays empty. Without this
+REM the previous version leaked the already-consumed experiment name
+REM back onto the tail via %* and every arm's paper-loop process
+REM crashed with `unrecognized arguments: <expname>`.
+set EXTRA=
+:collect_extras
+if "%~1"=="" goto extras_done
+set EXTRA=!EXTRA! %~1
+shift
+goto collect_extras
+:extras_done
 
 REM Belt + suspenders: even though the new console is independent of
 REM this shell's parent, set the harness env var too so a downstream
@@ -45,7 +60,7 @@ REM window but also re-parent to this shell (defeats the purpose); use
 REM a real title instead so the user can find + close the window from
 REM Task Manager.
 start "agentic-investor: paper-experiment %EXP%" /D "%REPO%" cmd /c ^
-  ".venv\Scripts\agentic-investor.exe paper-experiment %EXP% --serve-dashboard --dashboard-port 8000 --paper-loop-args --auto --top-n 8 --regen-mode event %* > out\logs\experiment.out 2>&1"
+  ".venv\Scripts\agentic-investor.exe paper-experiment %EXP% --serve-dashboard --dashboard-port 8000 --paper-loop-args --auto --top-n 8 --regen-mode event --amount 50000 !EXTRA! > out\logs\experiment.out 2>&1"
 
 echo Launched paper-experiment %EXP% in a new console.
 echo Log:      %REPO%\out\logs\experiment.out
