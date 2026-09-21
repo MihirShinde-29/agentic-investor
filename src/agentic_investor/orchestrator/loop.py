@@ -2680,12 +2680,47 @@ def run_event_loop(
                     (e.ticker or "").upper() for e in decision_state.unprocessed
                 }
                 overlap = batch_tickers & material
+                # Jev typed materiality gate (arm C flag). Consults
+                # jev_client.materiality_check with the full batch +
+                # portfolio context. Uses a sentinel to reuse the
+                # existing `overlap` truthy/falsy branches - overriding
+                # `overlap` to a non-empty sentinel when Jev says
+                # material, to empty when Jev says not-material.
+                # Deterministic fallback in jev_client handles Jev
+                # outages / missing key without changing behaviour.
+                _jev_forced_skip = False
+                from agentic_investor.flags import flags as _flags
+                if _flags.JEV_MATERIALITY_ENABLED:
+                    from agentic_investor.llm.jev_client import (
+                        materiality_check as _jev_materiality,
+                    )
+                    _headlines = [
+                        (e.headline or "").strip()
+                        for e in decision_state.unprocessed
+                        if e.headline
+                    ]
+                    _jev = _jev_materiality(_headlines, material)
+                    if session:
+                        session.log("jev_materiality_gate", {
+                            "material": _jev.material,
+                            "confidence": round(_jev.confidence, 3),
+                            "from_jev": _jev.from_jev,
+                            "n_headlines": len(_headlines),
+                            "n_portfolio": len(material),
+                        })
+                    if _jev.material:
+                        overlap = {"__jev_material__"}
+                    else:
+                        overlap = set()
+                        # Skip the high-signal-keyword promotion path
+                        # too - Jev evaluated the full context already.
+                        _jev_forced_skip = True
                 if not overlap:
                     high_signal_events = [
                         e for e in decision_state.unprocessed
                         if _is_high_signal_headline(e.headline or "")
                     ]
-                    if high_signal_events:
+                    if high_signal_events and not _jev_forced_skip:
                         # Promote high-signal non-material tickers to on-deck
                         # instead of firing a full regen. Keeps the discovery
                         # pipeline alive (LLM will see them on its next
