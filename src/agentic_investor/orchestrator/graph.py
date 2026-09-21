@@ -893,6 +893,26 @@ def _messages(state: GraphState) -> list[dict]:
             + precedents
         )
 
+    # Verdict-feedback block (arm B's Jev integration). Self-serves
+    # from paper_snapshots + paper_orders under settings.database_url;
+    # returns "" when the JEV_VERDICT_ENABLED flag is off so arms A/C
+    # get no extra prompt content. Behind try/except because a prompt-
+    # block bug should never break the whole regen path.
+    try:
+        from agentic_investor.config import get_settings as _get_settings
+        from agentic_investor.orchestrator.verdict_feedback import (
+            build_verdict_feedback_block,
+        )
+        _db_url = _get_settings().database_url
+        if _db_url.startswith("sqlite:///"):
+            from pathlib import Path as _Path
+            _db_path = _Path(_db_url.removeprefix("sqlite:///"))
+            _verdict_block = build_verdict_feedback_block(_db_path)
+            if _verdict_block:
+                fast_sections.append(_verdict_block)
+    except Exception as _e:  # noqa: BLE001
+        logger.debug("verdict-feedback block skipped: %s", _e)
+
     slow_prefix = USER_PREAMBLE + "\n\n" + "\n\n".join(slow_sections)
     fast_tail = "\n\n".join(fast_sections) + "\n\nProduce a valid Allocation."
 
