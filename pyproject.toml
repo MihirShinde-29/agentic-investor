@@ -36,6 +36,12 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.3",
+    # Test coverage for the Jev integration paths (see llm/jev_client.py)
+    # needs `Choice` / `Noul` importable so the mocked-client tests don't
+    # trip the wrapper's try/except and silently fall back. Dev-only;
+    # runtime behaviour is unchanged and the optional `jev` group is
+    # still the "you're actually going to call Jev at runtime" install.
+    "typesafe-sdk>=0.1.0",
 ]
 # Optional: TypeSafe AI's Jev System-One model. Used for the
 # per-arm feature-flagged verdict-labels + materiality-gate paths

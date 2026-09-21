@@ -37,6 +37,7 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+    { name = "typesafe-sdk" },
 ]
 jev = [
     { name = "typesafe-sdk" },
@@ -63,6 +64,7 @@ requires-dist = [
 dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.16.3" },
+    { name = "typesafe-sdk", specifier = ">=0.1.0" },
 ]
 jev = [{ name = "typesafe-sdk", specifier = ">=0.1.0" }]
 
