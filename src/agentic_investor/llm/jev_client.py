@@ -287,8 +287,19 @@ def materiality_check(
             },
         )
         answer = resp.answers["material"]
-        is_material = bool(answer.noul)
-        conf = _extract_confidence(answer)
+        # NoulAnswer.noul is a *calibrated probability* that the
+        # assertion is true, not a bool. Bucket at 0.5 to get the
+        # yes/no; keep the probability as the confidence field so
+        # downstream logging can grade calibration over time. The
+        # SDK docstring and earlier docs implied bool - this bit us
+        # in the live smoke test where every batch came back True
+        # regardless of content because bool(0.02) == True.
+        noul_prob = float(getattr(answer, "noul", 0.5) or 0.0)
+        is_material = noul_prob >= 0.5
+        # Distance-from-ambiguity as confidence: 0.5 -> 0, 0.02 or
+        # 0.98 -> ~1.0. Matches how a Bernoulli-like output should
+        # be scored.
+        conf = min(1.0, abs(noul_prob - 0.5) * 2.0)
         return MaterialityResult(
             material=is_material, confidence=conf, from_jev=True,
         )

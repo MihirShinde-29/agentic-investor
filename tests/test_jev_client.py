@@ -196,20 +196,38 @@ def test_verdict_jev_exception_falls_back(monkeypatch):
 
 
 def test_materiality_uses_jev_when_flag_on(monkeypatch):
+    """NoulAnswer.noul is a *probability float*, not a bool. High
+    probability (0.85) -> material=True with confidence
+    2*(0.85-0.5) = 0.70.
+    """
     monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_ENABLED", "1")
     monkeypatch.setenv("TYPESAFE_API_KEY", "fake-key")
     monkeypatch.setattr(
         jev_client, "_get_client",
-        lambda: _FakeClient(
-            {"material": _FakeAnswer(noul=True, probability=0.71)},
-        ),
+        lambda: _FakeClient({"material": _FakeAnswer(noul=0.85)}),
     )
     r = materiality_check(
         ["Fed hikes 25bp", "SPY reaches new high"], {"AAPL", "MSFT"},
     )
     assert r.from_jev is True
     assert r.material is True
-    assert 0.70 < r.confidence < 0.72
+    assert 0.69 < r.confidence < 0.71
+
+
+def test_materiality_low_prob_returns_false(monkeypatch):
+    """A 0.02 probability from Jev - like the bakery/weather batch
+    from the live smoke test - must return material=False. Pre-fix
+    this bit us: bool(0.02) is True in Python."""
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_ENABLED", "1")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "fake-key")
+    monkeypatch.setattr(
+        jev_client, "_get_client",
+        lambda: _FakeClient({"material": _FakeAnswer(noul=0.02)}),
+    )
+    r = materiality_check(["local bakery news"], {"AAPL"})
+    assert r.from_jev is True
+    assert r.material is False
+    assert r.confidence > 0.9  # 2 * |0.02 - 0.5| = 0.96
 
 
 def test_materiality_empty_headlines_short_circuits(monkeypatch):
