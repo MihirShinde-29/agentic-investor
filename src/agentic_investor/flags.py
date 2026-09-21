@@ -225,6 +225,35 @@ _register(
 )
 
 
+# Jev (TypeSafe AI System-One model) integration --------------------------
+#
+# Per-arm feature-flagged use of Jev's typed-decision API for the two
+# spots in our stack that are typed classification (not text generation).
+# Motivated by 2026-09-21 spike: swapping the LLM's materiality gate for
+# Jev on arm C is projected to cut C's ~$2.80/day spend by ~65% because
+# Jev's typed calls are ~$0.042/M input tokens with free output vs
+# gpt-4o-mini's ~$0.15/M in + ~$0.60/M out on those same decisions.
+
+_register(
+    "AGENTIC_JEV_VERDICT_ENABLED", False, "bool_01",
+    "When '1', an arm renders verdict labels (WORKING/WRONG/UNCLEAR/"
+    "TOO-EARLY) on its own recent fills + drift-skips into the "
+    "allocator prompt's fast_tail so the LLM sees which of its own "
+    "recent decisions worked. Backed by Jev (Choice primitive). Falls "
+    "back to a deterministic threshold heuristic if the Jev call "
+    "fails. Arm B in the current 3-arm A/B enables this; A stays "
+    "off as control.",
+)
+_register(
+    "AGENTIC_JEV_MATERIALITY_ENABLED", False, "bool_01",
+    "When '1', an arm routes the news-materiality prefilter decision "
+    "through Jev's Noul primitive instead of the finBERT + threshold "
+    "stack. Cheaper AND typed - no hallucination possible. Arm C in "
+    "the current 3-arm A/B enables this; A stays off as control. "
+    "Falls back to the existing finBERT prefilter path if Jev fails.",
+)
+
+
 # Trade guardrails --------------------------------------------------------
 
 _register(

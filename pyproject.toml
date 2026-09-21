@@ -37,6 +37,14 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.3",
 ]
+# Optional: TypeSafe AI's Jev System-One model. Used for the
+# per-arm feature-flagged verdict-labels + materiality-gate paths
+# (see AGENTIC_JEV_* flags). A fresh clone without the group still
+# installs cleanly; anything that touches jev_client falls back to
+# the deterministic path when the SDK isn't importable.
+jev = [
+    "typesafe-sdk>=0.1.0",
+]
 
 [tool.uv]
 # Project and uv cache live on different drives (D: vs C:), so hardlinking
