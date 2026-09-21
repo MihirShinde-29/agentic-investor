@@ -1,50 +1,71 @@
-# M14.5 (Sept 15+): three-arm A/B testing two variables at once:
+# reasoning-quality: 3-arm A/B on Alpaca paper accounts.
 #
-#   1. Trade gate: wall-clock cooldown (A) vs cite-to-trade (B, C)
-#   2. Model stack: single call (A, B) vs cross-family ensemble (C)
+# Sept 14-18 ran the M14.5 shape (cooldown vs cite-to-trade vs
+# ensemble-on-cite). That series closed Fri 09-18 with all three arms
+# net-negative for the week (A -$70, B -$75, C -$168). See B14 for
+# the postmortem.
 #
-# Each arm differs from at least one other by exactly ONE variable so we
-# can attribute causally:
+# Week 2 (Sept 22+) pivots the same three accounts to orthogonal Jev
+# integrations without changing account routing. Each arm now tests
+# exactly one Jev insertion point so the comparison stays clean:
 #
-#   A vs B  -> did replacing cooldown with cite-to-trade help? (same
-#              model, only the gate differs)
-#   B vs C  -> does cross-family ensemble help ON TOP of cite-to-trade?
-#              (same gate, only the model stack differs)
-#   A vs C  -> combined effect (2 things differ; less clean but still
-#              interesting for the overall shipping decision)
+#   A -> pure baseline (control). NO Jev, cite-to-trade off.
+#        Answers: does Jev help ANYWHERE vs the plain gpt-4o-mini
+#        stack we've been running?
 #
-# Shared across all three arms (feature toggles, not experimental):
+#   B -> Jev VERDICT-FEEDBACK on. cite-to-trade off (so the effect
+#        we measure is self-attribution, not gate stacking). Whipsaw
+#        guard on. Uses the new '## 12. Recent decision verdicts'
+#        prompt block backed by jev_client.verdict_for_trade.
+#
+#   C -> Jev MATERIALITY on. Replaces the finBERT+ticker-overlap
+#        prefilter with jev_client.materiality_check. Keeps
+#        cite-to-trade on (so we can isolate what the cheaper +
+#        typed materiality gate does vs the current ~$2.80/day
+#        cost profile). Whipsaw guard on.
+#
+# Shared across arms:
 #   - pre-market lead 30 min (--pre-market-lead-min 30 on launch)
-#   - confidence field emitted on every rec (M15 calibration data)
-#   - all other loop config identical
+#   - AGENTIC_MEM_RECYCLE_MB=6144 (supervisor sets this)
+#   - all price/news bus + ml-service infra identical
 #
-# Prior week (Sept 9-11) ran a different reasoning-quality design; this
-# YAML supersedes it. Deleted old cross-tier config since M14 already
-# validated within-family ensemble under-earned at 3.5x cost.
+# NOT changed this week:
+#   - No new Alpaca account (arm D deferred). Same 3-account layout.
+#   - No new experiment (extends this manifest in place).
+#   - No mid-week config changes; freeze until Fri 2026-09-26 close.
 name: reasoning-quality
 arms:
-  A:  # old-world reference - restores the wall-clock cooldown we
-      # deleted this weekend. Answers "was deleting cooldown a mistake?"
+  A:  # Pure baseline / control. No Jev anywhere, no whipsaw guard,
+      # cite-to-trade off. Same shape A ran last week.
     alpaca_account: primary
     config_diff:
-      cooldown_seconds: 1500          # 25min per-ticker flip lockout
+      cooldown_seconds: 1500          # keep the 25min flip lockout
     env:
-      AGENTIC_CITE_TO_TRADE: "0"      # disable new gate for A only
+      AGENTIC_CITE_TO_TRADE: "0"
+      AGENTIC_JEV_VERDICT_ENABLED: "0"
+      AGENTIC_JEV_MATERIALITY_ENABLED: "0"
+      AGENTIC_WHIPSAW_GUARD_WINDOW_MIN: "0"
 
-  B:  # current world - cite-to-trade alone, single LLM call. This is
-      # what we shipped this weekend, isolated.
+  B:  # Jev verdict-feedback in the prompt tail. Tests whether the
+      # LLM adapts when it sees its own recent trade outcomes.
+      # cite-to-trade OFF so the observed effect is attributable to
+      # the verdict block, not gate stacking.
     alpaca_account: secondary
     config_diff: {}
+    env:
+      AGENTIC_CITE_TO_TRADE: "0"
+      AGENTIC_JEV_VERDICT_ENABLED: "1"
+      AGENTIC_JEV_MATERIALITY_ENABLED: "0"
+      AGENTIC_WHIPSAW_GUARD_WINDOW_MIN: "15"
 
-  C:  # M14 upside - cross-family ensemble on top of cite-to-trade.
-      # Tests whether two independently-trained models agree in a way
-      # that beats single-call at ~2x cost.
+  C:  # Jev materiality gate replaces the finBERT+ticker-overlap
+      # prefilter. cite-to-trade left ON so we can measure the
+      # cost delta apples-to-apples with last week's C. Expected
+      # ~65% cost reduction on materiality-gate calls (Jev at
+      # $0.042/M in vs gpt-4o-mini at $0.15/M in + $0.60/M out).
     alpaca_account: tertiary
     config_diff: {}
     env:
-      # FROZEN through 2026-09-19 (Fri close). Day-2 analysis showed C
-      # is the only arm making money on drift-thrashed names via the
-      # ensemble's filter-inversion mechanic. The Anthropic cost is
-      # ~$5/day but the finding is worth the $15-20 through Friday.
-      # Cheap-model swap deferred to arm D (Mon 2026-09-22 launch).
-      AGENTIC_ENSEMBLE_MODELS: "gpt-4o-mini,anthropic/claude-haiku-4-5"
+      AGENTIC_JEV_VERDICT_ENABLED: "0"
+      AGENTIC_JEV_MATERIALITY_ENABLED: "1"
+      AGENTIC_WHIPSAW_GUARD_WINDOW_MIN: "15"
