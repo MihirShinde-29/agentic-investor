@@ -2701,12 +2701,28 @@ def run_event_loop(
                     ]
                     _jev = _jev_materiality(_headlines, material)
                     if session:
+                        # Include per-headline breakdown from the new
+                        # per-headline mode so we can audit exactly
+                        # which headline flipped the batch. Truncate
+                        # each entry so a big batch doesn't bloat the
+                        # session log.
+                        per_h = [
+                            {
+                                "headline": h[:120],
+                                "prob": round(p, 3),
+                                "material": bool(m),
+                            }
+                            for (h, p, m) in (
+                                getattr(_jev, "per_headline", ()) or ()
+                            )[:12]
+                        ]
                         session.log("jev_materiality_gate", {
                             "material": _jev.material,
                             "confidence": round(_jev.confidence, 3),
                             "from_jev": _jev.from_jev,
                             "n_headlines": len(_headlines),
                             "n_portfolio": len(material),
+                            "per_headline": per_h,
                         })
                     if _jev.material:
                         overlap = {"__jev_material__"}

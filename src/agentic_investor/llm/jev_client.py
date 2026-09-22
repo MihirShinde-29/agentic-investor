@@ -235,9 +235,14 @@ def _render_trade_state(trade: dict, trajectory: list[dict]) -> str:
 
 @dataclass(frozen=True)
 class MaterialityResult:
-    material: bool      # True = worth firing a regen on
-    confidence: float   # [0, 1]
+    material: bool             # True = worth firing a regen on
+    confidence: float          # [0, 1] - max per-headline in per-headline mode
     from_jev: bool
+    # Per-headline breakdown (populated in per-headline mode; empty in
+    # batch mode + deterministic fallback). Each entry is
+    # (headline, probability, material_bool). Callers can log this
+    # for audit so we see which specific headline flipped the batch.
+    per_headline: tuple = ()   # tuple[tuple[str, float, bool], ...]
 
 
 def _deterministic_materiality(
@@ -254,14 +259,62 @@ def _deterministic_materiality(
     return MaterialityResult(material=False, confidence=1.0, from_jev=False)
 
 
+def _jev_noul_per_headline(
+    client: object,
+    headline: str,
+    portfolio_tickers: set[str],
+) -> tuple[float, bool] | None:
+    """One Jev call for one headline. Returns (probability, material_bool)
+    or None on any error (caller falls back for this specific headline).
+    """
+    try:
+        port = ", ".join(sorted(t.upper() for t in portfolio_tickers)) or "(empty)"
+        state = (
+            f"portfolio: {port}\n"
+            f"headline: {(headline or '').strip()[:400]}"
+        )
+        resp = client.system_one(
+            state=state,
+            questions={
+                "material": Noul(
+                    instructions=(
+                        "This single headline would change the risk or "
+                        "return outlook for at least one ticker in the "
+                        "current portfolio at a magnitude worth "
+                        "re-evaluating positions for"
+                    ),
+                ),
+            },
+        )
+        prob = float(getattr(resp.answers["material"], "noul", 0.5) or 0.0)
+        return prob, prob >= 0.5
+    except Exception as e:  # noqa: BLE001
+        logger.debug("jev per-headline noul failed: %s", e)
+        return None
+
+
 def materiality_check(
     headlines: list[str], portfolio_tickers: set[str],
 ) -> MaterialityResult:
-    """Return a typed material/not decision on a news batch.
+    """Per-headline typed materiality decision.
+
+    Loops each headline through Jev individually and marks the batch
+    material if ANY headline is material. Preserves signal in the
+    "1 good headline + N noise headlines" case that the older batch-
+    level call would dilute into False.
+
+    Cost: N Jev calls per batch instead of 1. Jev is $0.042/M input
+    with free output and typical headlines are ~50 tokens each, so a
+    batch of 10 headlines costs ~$0.00002 — negligible next to the
+    ~$0.005 LLM regen we're deciding whether to skip. Latency: N
+    round-trips instead of 1 (~200ms each, so ~2s for a batch of 10
+    vs ~200ms). Runs at batch-window close so the extra 1-2s is
+    absorbed into the ~60s window naturally.
 
     Gated on AGENTIC_JEV_MATERIALITY_ENABLED=1. When off, or on any
     Jev failure, falls back to the deterministic ticker-mention
-    check above.
+    check above. Individual per-headline failures degrade gracefully
+    to the deterministic check for that headline only.
     """
     from agentic_investor.flags import flags
     if not flags.JEV_MATERIALITY_ENABLED:
@@ -271,6 +324,57 @@ def materiality_check(
         return _deterministic_materiality(headlines, portfolio_tickers)
     if not headlines:
         return MaterialityResult(material=False, confidence=1.0, from_jev=False)
+    try:
+        per: list[tuple[str, float, bool]] = []
+        any_material = False
+        max_prob = 0.0
+        for h in headlines:
+            result = _jev_noul_per_headline(client, h, portfolio_tickers)
+            if result is None:
+                # Fall back for THIS headline only - keep the loop going.
+                up_port = {t.upper() for t in portfolio_tickers}
+                u = (h or "").upper()
+                mentioned = any(t in u for t in up_port)
+                prob = 1.0 if mentioned else 0.0
+                mat = mentioned
+            else:
+                prob, mat = result
+            per.append((h[:200], prob, mat))
+            if mat:
+                any_material = True
+            if prob > max_prob:
+                max_prob = prob
+        # Confidence: max per-headline probability when material=True,
+        # distance-from-ambiguity of the max otherwise.
+        if any_material:
+            conf = max_prob
+        else:
+            conf = min(1.0, abs(max_prob - 0.5) * 2.0)
+        return MaterialityResult(
+            material=any_material,
+            confidence=conf,
+            from_jev=True,
+            per_headline=tuple(per),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "jev_client.materiality_check unexpected failure (%s); "
+            "falling back", e,
+        )
+        return _deterministic_materiality(headlines, portfolio_tickers)
+
+
+def _materiality_check_batch_deprecated(
+    headlines: list[str], portfolio_tickers: set[str],
+) -> MaterialityResult:
+    """Legacy batch-mode Jev call. Kept for reference / rollback but
+    not on the code path anymore. Batch mode was found to dilute a
+    single good headline hiding in a batch of noise, so we moved
+    per-headline in the arm-C launch on 2026-09-22.
+    """
+    client = _get_client()
+    if client is None:
+        return _deterministic_materiality(headlines, portfolio_tickers)
     try:
         state = _render_materiality_state(headlines, portfolio_tickers)
         resp = client.system_one(
