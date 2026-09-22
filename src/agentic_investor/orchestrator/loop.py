@@ -2703,18 +2703,22 @@ def run_event_loop(
                     if session:
                         # Include per-headline breakdown from the new
                         # per-headline mode so we can audit exactly
-                        # which headline flipped the batch. Truncate
-                        # each entry so a big batch doesn't bloat the
-                        # session log.
+                        # which headline flipped the batch. Log all
+                        # entries - truncating masked a 36-headline
+                        # post-bounce backlog batch on 2026-09-22
+                        # where a material=True flip came from a
+                        # headline past position 12. Trim each entry
+                        # aggressively instead so a big batch stays
+                        # under a few KB per gate event.
                         per_h = [
                             {
-                                "headline": h[:120],
+                                "headline": h[:100],
                                 "prob": round(p, 3),
                                 "material": bool(m),
                             }
                             for (h, p, m) in (
                                 getattr(_jev, "per_headline", ()) or ()
-                            )[:12]
+                            )
                         ]
                         session.log("jev_materiality_gate", {
                             "material": _jev.material,
