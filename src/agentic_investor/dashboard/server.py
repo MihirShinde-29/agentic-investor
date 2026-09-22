@@ -681,6 +681,56 @@ def create_app(
                     for a in r["per_arm"].values()
                 )
             ]
+
+        # Post-boot backlog attribution: on any restart, each arm's
+        # first force-regen fires against ~N hours of overnight news
+        # accumulated in the shared news_bus (SQLite), not the arm's
+        # own live-streamer session log. So the news_received rows the
+        # main loop above matches against don't exist for that batch,
+        # and 8-20 orders per arm land in a black hole from the UI's
+        # perspective. Synthesise one pseudo-row per arm whose burst
+        # went unclaimed so those orders are visible somewhere.
+        pseudo_rows: list[dict] = []
+        for arm in exp.arms:
+            for burst in per_arm_bursts.get(arm.arm_id, []):
+                if burst["trigger"] != "force-regen":
+                    continue
+                burst_key = (burst["rec_id"], burst["attribution_ts"].timestamp())
+                if burst_key in claimed_bursts[arm.arm_id]:
+                    continue
+                if not burst["orders"]:
+                    continue
+                rec_meta = per_arm_rec_meta[arm.arm_id].get(
+                    burst["rec_id"],
+                ) or {}
+                pseudo_rows.append({
+                    "ts": burst["attribution_ts"].isoformat(),
+                    "ticker": "__POST_BOOT_BACKLOG__",
+                    "headline": (
+                        f"[{arm.arm_id}] post-boot backlog: "
+                        f"force-regen rec {burst['rec_id']} shipped "
+                        f"{len(burst['orders'])} orders against "
+                        "news_bus content from before this arm booted"
+                    ),
+                    "per_arm": {
+                        arm.arm_id: {
+                            "reacted": "regen",
+                            "regen": {
+                                "seconds": 0.0,
+                                "rec_id": burst["rec_id"],
+                                "targets_count": len(
+                                    rec_meta.get("targets") or {},
+                                ),
+                                "cash_pct": rec_meta.get("cash_pct"),
+                                "trigger": "force-regen",
+                            },
+                            "orders": burst["orders"],
+                        },
+                    },
+                })
+        if pseudo_rows:
+            reactions = pseudo_rows + reactions
+
         reactions = reactions[-limit:]
         return {"experiment": exp.name, "news_reactions": list(reversed(reactions))}
 
