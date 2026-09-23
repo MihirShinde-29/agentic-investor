@@ -85,6 +85,7 @@ Alpaca paper account(s)                yfinance / SEC EDGAR
 | RAG vector store | **sqlite-vec** (rec index + news collection, migrated off chromadb) |
 | Embeddings | sentence-transformers (local) via shared paper-ml-service |
 | Sentiment | finBERT (ProsusAI/finbert) via shared paper-ml-service |
+| Typed decisions (opt-in) | Jev (TypeSafe AI) — non-autoregressive Bool/Choice/Score primitives; drives arm C's per-headline materiality gate + arm B's post-trade verdict feedback |
 | Backtesting | vectorbt |
 | Live dashboard | FastAPI + WebSockets + Vite/React |
 | Observability | Langfuse (opt-in), structured JSONL session logs |
@@ -165,6 +166,8 @@ src/agentic_investor/
   eval/             backtest + retrieval + LLM-judge harnesses
 tests/              ~560 tests
 scripts/            operational scripts (leak hunts, flag regen, hooks)
+                    + analytics (day_pnl_report, audit_jev_vs_finbert,
+                    close_postmortem)
 ```
 
 ## Reliability + ops
@@ -193,6 +196,19 @@ long-form story):
   human-readable console line and a JSONL row through a payload
   sanitizer (Pydantic / datetime / Path / Decimal).
   Programmatic reader: `ops.session.iter_events(session_dir, ...)`.
+- **News-materiality gate (pluggable)**: default is finBERT sentiment
+  + held-ticker-overlap with a high-signal-keyword bypass. Arm C
+  runs a Jev per-headline calibrated probability instead (both
+  paths flag-gated, each falls back to a deterministic ticker-
+  mention check on failure). Per-arm cost + block-rate + cross-arm
+  disagreement breakdown from `scripts/audit_jev_vs_finbert.py`.
+- **Post-trade verdict feedback**: arm B appends a "recent decision
+  verdicts" section to the allocator prompt scored by Jev
+  (`verdict_for_trade`). Self-serving from the arm's own SQLite so
+  no broker in scope at prompt-build time.
+- **Close-of-day postmortem composer**: `scripts/close_postmortem.py`
+  chains per-arm P&L + cross-arm gate audit + A-vs-B same-ticker
+  divergence + whipsaw-guard fingerprint into one text report.
 - **Deterministic replay**: `AGENTIC_RECORD_TO` + `AGENTIC_REPLAY_FROM`
   capture and reserve every LLM call (hash-keyed), market clock, price
   tick, news event. `AGENTIC_REPLAY_MISS=strict|live` picks
