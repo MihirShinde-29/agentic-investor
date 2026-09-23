@@ -96,6 +96,11 @@ def _arm_gate_stats(rows: list[dict], arm: str) -> dict:
             for ph in (r.get("per_headline") or [])
             if ph.get("material")
         )
+        ms_totals = [r.get("jev_ms_total", 0) for r in jev_rows
+                     if r.get("jev_ms_total")]
+        if ms_totals:
+            out["avg_gate_ms"] = round(sum(ms_totals) / len(ms_totals), 1)
+            out["max_gate_ms"] = round(max(ms_totals), 1)
     return out
 
 

@@ -183,6 +183,20 @@ def build_verdict_feedback_block(
     if not lines:
         return ""
 
+    # Compact per-regen summary of which labels the LLM will see -
+    # the day-1 A/B showed 99% of B's losses were on tickers B also
+    # whipsawed, and this log lets us line up "block said WRONG on
+    # X" against "LLM proposed reversal on X next regen." Info-level
+    # so it lands in experiment.out; no session in scope here.
+    from collections import Counter
+    label_counts = Counter(line.rsplit(": ", 1)[-1].split(" ")[0]
+                           for line in lines)
+    tickers = [line.split()[3] for line in lines if len(line.split()) > 3]
+    logger.info(
+        "verdict_feedback_block rendered: n_lines=%d labels=%s tickers=%s",
+        len(lines), dict(label_counts), tickers,
+    )
+
     return (
         "## 12. Recent decision verdicts (self-attribution feedback)\n"
         "Your recent fills, evaluated against their current P&L. "

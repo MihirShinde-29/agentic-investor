@@ -243,6 +243,11 @@ class MaterialityResult:
     # (headline, probability, material_bool). Callers can log this
     # for audit so we see which specific headline flipped the batch.
     per_headline: tuple = ()   # tuple[tuple[str, float, bool], ...]
+    # Aggregate Jev wall-clock across the per-headline calls. 0.0 when
+    # from_jev=False (deterministic fallback). Lets the audit script
+    # answer "how much of a regen tick did the gate cost?"
+    jev_ms_total: float = 0.0
+    jev_ms_max: float = 0.0
 
 
 def _deterministic_materiality(
@@ -263,16 +268,19 @@ def _jev_noul_per_headline(
     client: object,
     headline: str,
     portfolio_tickers: set[str],
-) -> tuple[float, bool] | None:
-    """One Jev call for one headline. Returns (probability, material_bool)
-    or None on any error (caller falls back for this specific headline).
+) -> tuple[float, bool, float] | None:
+    """One Jev call for one headline. Returns (probability, material_bool,
+    elapsed_ms) or None on any error (caller falls back for this
+    specific headline).
     """
+    import time as _time
     try:
         port = ", ".join(sorted(t.upper() for t in portfolio_tickers)) or "(empty)"
         state = (
             f"portfolio: {port}\n"
             f"headline: {(headline or '').strip()[:400]}"
         )
+        _t0 = _time.perf_counter()
         resp = client.system_one(
             state=state,
             questions={
@@ -286,8 +294,9 @@ def _jev_noul_per_headline(
                 ),
             },
         )
+        elapsed_ms = (_time.perf_counter() - _t0) * 1000.0
         prob = float(getattr(resp.answers["material"], "noul", 0.5) or 0.0)
-        return prob, prob >= 0.5
+        return prob, prob >= 0.5, elapsed_ms
     except Exception as e:  # noqa: BLE001
         logger.debug("jev per-headline noul failed: %s", e)
         return None
@@ -328,6 +337,8 @@ def materiality_check(
         per: list[tuple[str, float, bool]] = []
         any_material = False
         max_prob = 0.0
+        ms_total = 0.0
+        ms_max = 0.0
         for h in headlines:
             result = _jev_noul_per_headline(client, h, portfolio_tickers)
             if result is None:
@@ -338,7 +349,10 @@ def materiality_check(
                 prob = 1.0 if mentioned else 0.0
                 mat = mentioned
             else:
-                prob, mat = result
+                prob, mat, ms = result
+                ms_total += ms
+                if ms > ms_max:
+                    ms_max = ms
             per.append((h[:200], prob, mat))
             if mat:
                 any_material = True
@@ -355,6 +369,8 @@ def materiality_check(
             confidence=conf,
             from_jev=True,
             per_headline=tuple(per),
+            jev_ms_total=ms_total,
+            jev_ms_max=ms_max,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(

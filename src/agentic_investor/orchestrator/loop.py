@@ -2727,6 +2727,8 @@ def run_event_loop(
                             "n_headlines": len(_headlines),
                             "n_portfolio": len(material),
                             "per_headline": per_h,
+                            "jev_ms_total": round(_jev.jev_ms_total, 1),
+                            "jev_ms_max": round(_jev.jev_ms_max, 1),
                         })
                     if _jev.material:
                         overlap = {"__jev_material__"}
