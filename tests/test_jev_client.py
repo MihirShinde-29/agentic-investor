@@ -306,6 +306,51 @@ def test_materiality_per_headline_fallback_on_single_call_error(monkeypatch):
     assert r.from_jev is True  # overall still counts as Jev path
 
 
+def test_materiality_populates_jev_ms_timing(monkeypatch):
+    """Per-headline mode records wall-clock so the postmortem can
+    say "avg 200ms/call, max 800ms in the tail" instead of just
+    reporting cost. Both fields must be populated on the happy path,
+    and jev_ms_total must be at least jev_ms_max (invariant: sum
+    over N calls >= max of those calls when N >= 1).
+    """
+    import time as _time
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_ENABLED", "1")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "fake-key")
+
+    class _SlowClient:
+        """Each call sleeps briefly so perf_counter records a
+        non-zero delta. A truly-instant mock would leave ms_max=0
+        and hide a bug where we forgot to record.
+        """
+        def system_one(self, *, state, questions):
+            _time.sleep(0.005)
+            return _FakeResponse({"material": _FakeAnswer(noul=0.10)})
+
+    monkeypatch.setattr(jev_client, "_get_client", lambda: _SlowClient())
+    r = materiality_check(["h1", "h2", "h3"], {"AAPL"})
+    assert r.from_jev is True
+    assert r.jev_ms_max > 0.0, "max per-call ms should be populated"
+    assert r.jev_ms_total >= r.jev_ms_max, (
+        "sum-over-calls must be >= max-over-calls"
+    )
+    # 3 calls x ~5ms each = ~15ms total; upper bound generous so the
+    # assertion survives a loaded CI runner.
+    assert r.jev_ms_total < 5000.0
+
+
+def test_materiality_ms_zero_on_deterministic_fallback(monkeypatch):
+    """When the flag is off (deterministic path) we never call Jev
+    so both timing fields must stay 0.0. A leaked non-zero here
+    would confuse the postmortem's "avg gate ms" over an arm that
+    doesn't run Jev at all.
+    """
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_ENABLED", "0")
+    r = materiality_check(["h1"], {"AAPL"})
+    assert r.from_jev is False
+    assert r.jev_ms_total == 0.0
+    assert r.jev_ms_max == 0.0
+
+
 def test_materiality_empty_headlines_short_circuits(monkeypatch):
     """Never call Jev for an empty batch — the answer is always False.
     Preserves the free-tier request quota on quiet-market windows."""
