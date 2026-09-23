@@ -72,6 +72,43 @@ Alpaca paper account(s)                yfinance / SEC EDGAR
                        Langfuse traces
 ```
 
+## Jev integration surface
+
+`typesafe-sdk` (Jev) plugs into two flag-gated slots. Each arm can
+opt in independently via env vars; unset flags fall back to the
+existing behaviour with no code path skipped.
+
+```mermaid
+flowchart LR
+    N[news batch<br/>at window close] --> G{AGENTIC_JEV_<br/>MATERIALITY_<br/>ENABLED?}
+    G -- "0 (arm A/B)" --> F[finBERT sentiment<br/>+ ticker overlap<br/>+ high-signal bypass]
+    G -- "1 (arm C)" --> J[Jev per-headline<br/>Noul prob >= 0.5<br/>batch material if ANY]
+    F --> R{material?}
+    J --> R
+    R -- yes --> A[LangGraph<br/>allocator regen]
+    R -- no --> S[skip regen]
+
+    A --> P[fast_tail prompt<br/>section 1..N]
+    V{AGENTIC_JEV_<br/>VERDICT_<br/>ENABLED?}
+    V -- "1 (arm B)" --> B12["## 12. Recent decision<br/>verdicts (Jev-scored<br/>WORKING / WRONG /<br/>UNCLEAR / TOO_EARLY)"]
+    B12 -.appended.-> P
+    P --> LLM[gpt-4o-mini<br/>allocator]
+    LLM --> W[whipsaw guard<br/>if AGENTIC_WHIPSAW_<br/>GUARD_WINDOW_MIN>0]
+    W --> BR[broker.submit]
+```
+
+- **Materiality gate**: arm C runs Jev per-headline; A/B keep
+  finBERT + ticker-overlap. Both paths fall back to deterministic
+  ticker-mention on SDK failure so no arm gets fewer regens because
+  the gate is down.
+- **Verdict feedback**: arm B appends a Jev-scored recap of recent
+  fills to the allocator prompt tail; the block is empty (and no
+  extra prompt tokens are sent) when the flag is off.
+- **Cost + latency**: Jev is $0.042/M input, output free; a 10-
+  headline batch is ~10 sequential calls at ~200ms each (absorbed
+  into the ~60s batch window). Per-headline `jev_ms_total` and
+  `jev_ms_max` are logged on every gate event.
+
 ## Tech stack
 
 | Layer | Pick |
