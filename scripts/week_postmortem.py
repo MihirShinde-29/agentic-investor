@@ -31,7 +31,6 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-
 BASELINE_LAST_WEEK = {"A": -70.0, "B": -75.0, "C": -168.0}
 
 
