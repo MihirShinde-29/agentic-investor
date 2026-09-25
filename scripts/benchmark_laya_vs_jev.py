@@ -115,38 +115,54 @@ def _read_corpus(path: Path) -> list[dict]:
 
 
 def _run_laya(rows: list[dict]) -> list[dict]:
-    """Attach Laya's decision to each row. Placeholder until the
-    laya package is installed post-Fri; keeps the CLI shape stable
-    so a downstream compare step works either way.
+    """Attach Laya's decision to each row. Same instruction as Jev's
+    per-headline gate so the two are comparable head-to-head.
     """
     try:
-        import laya  # type: ignore  # noqa: F401
+        import laya  # type: ignore
     except ImportError:
-        print("laya not installed - post-Fri: pip install laya",
-              file=sys.stderr)
-        print("(exiting; use --extract-only to just dump the corpus)",
+        print("laya not installed - pip install laya", file=sys.stderr)
+        print("(use --extract-only to just dump the Jev corpus)",
               file=sys.stderr)
         sys.exit(2)
-    # Post-install wiring (kept close to the Jev shape so a compare
-    # is 1:1). Batching is important for Laya's throughput claim.
-    from laya import Client  # type: ignore
-    client = Client()
-    out: list[dict] = []
     import time as _time
-    for r in rows:
-        t0 = _time.perf_counter()
-        resp = client.decide(
-            state=f"headline: {r['headline'][:400]}",
-            question={"material": "bool"},
+    import torch  # type: ignore
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"laya device: {device}", file=sys.stderr)
+    agent = laya.Agent("convaiinnovations/laya", device=device)
+    instructions = (
+        "This single headline would change the risk or return outlook "
+        "for at least one ticker in the current portfolio at a "
+        "magnitude worth re-evaluating positions for"
+    )
+    out: list[dict] = []
+    for i, r in enumerate(rows):
+        state = (
+            f"portfolio: (holds {r.get('n_portfolio', 0)} tickers)\n"
+            f"headline: {r['headline'][:400]}"
         )
-        ms = (_time.perf_counter() - t0) * 1000.0
-        prob = float(getattr(resp, "material_prob", 0.5) or 0.0)
+        t0 = _time.perf_counter()
+        try:
+            resp = agent.system_one(
+                state=state,
+                questions={"material": {
+                    "type": "noul", "instructions": instructions,
+                }},
+            )
+            ms = (_time.perf_counter() - t0) * 1000.0
+            prob = float(resp["answers"]["material"].get("noul", 0.5))
+        except Exception as e:  # noqa: BLE001
+            print(f"laya call {i} failed: {e}", file=sys.stderr)
+            prob = 0.5
+            ms = 0.0
         out.append({
             **r,
             "laya_prob": prob,
             "laya_material": prob >= 0.5,
             "laya_ms": round(ms, 1),
         })
+        if (i + 1) % 100 == 0:
+            print(f"  laya progress: {i+1}/{len(rows)}", file=sys.stderr)
     return out
 
 
