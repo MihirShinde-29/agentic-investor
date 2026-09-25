@@ -263,7 +263,16 @@ def create_app(
         }
 
     @app.get("/api/experiment/compare/summary")
-    def experiment_compare_summary() -> dict:
+    def experiment_compare_summary(period: str | None = None) -> dict:
+        """Per-arm summary + P&L delta.
+
+        `period` matches the equity chart's period selector (1d/3d/1w/
+        1mo/3mo/1y). When set, delta_dollars/delta_pct are computed
+        against the FIRST snapshot inside the window, so the table
+        agrees with what the chart is showing instead of always
+        reporting session-lifetime P&L. Unset -> session baseline
+        (behaviour before this change).
+        """
         exp = app.state.experiment
         if exp is None:
             return JSONResponse(
@@ -335,13 +344,39 @@ def create_app(
                     snaps = list_snapshots(limit=5000)
                     if snaps:
                         summary["last_snapshot_at"] = snaps[0]["captured_at"]
-                        # Snapshots are captured chronologically; the oldest
-                        # (last in the list, since list_snapshots orders
-                        # newest-first) is the arm's session-open baseline.
-                        # Equity lives inside the parsed account_json blob,
-                        # not at the row's top level.
-                        open_equity = float(snaps[-1]["account"]["equity"])
+                        # snaps is newest-first. Baseline = oldest inside
+                        # `period` when set (so the table's delta aligns
+                        # with what the equity chart is showing), else
+                        # the arm's session-open (snaps[-1]).
+                        baseline_snap = snaps[-1]
+                        if period:
+                            from datetime import UTC as _UTC
+                            from datetime import datetime as _dt
+                            from datetime import timedelta as _td
+                            days_map = {
+                                "1d": 1, "3d": 3, "1w": 7,
+                                "1mo": 31, "3mo": 93, "1y": 366,
+                            }
+                            n = days_map.get(period.lower(), 1)
+                            cutoff = _dt.now(_UTC) - _td(days=n)
+
+                            def _fresh(iso: str) -> bool:
+                                try:
+                                    ts = _dt.fromisoformat(
+                                        iso.replace("Z", "+00:00")
+                                    )
+                                    return ts >= cutoff
+                                except ValueError:
+                                    return True
+
+                            in_window = [
+                                s for s in snaps if _fresh(s["captured_at"])
+                            ]
+                            if in_window:
+                                baseline_snap = in_window[-1]  # oldest in window
+                        open_equity = float(baseline_snap["account"]["equity"])
                         summary["opening_equity"] = round(open_equity, 2)
+                        summary["baseline_at"] = baseline_snap["captured_at"]
                         if "equity" in summary and open_equity > 0:
                             delta = summary["equity"] - open_equity
                             summary["delta_dollars"] = round(delta, 2)

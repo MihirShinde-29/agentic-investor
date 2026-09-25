@@ -171,6 +171,7 @@ export type ArmSummaryRow = {
   opening_equity?: number;
   delta_dollars?: number;
   delta_pct?: number;
+  baseline_at?: string;
   n_orders?: number;
   buys_notional?: number;
   sells_notional?: number;

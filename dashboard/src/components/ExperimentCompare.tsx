@@ -33,7 +33,7 @@ function fmtUsd(n: number | undefined): string {
 export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
   const tf = TIMEFRAMES[timeframe];
   const { data: summary } = useSWR<CompareSummaryResp>(
-    "/api/experiment/compare/summary",
+    `/api/experiment/compare/summary?period=${tf.period}`,
     fetcher,
     // 20s: each poll fires 3 arms x ~4 Alpaca calls = 12 requests.
     // At 10s we tripped rate limits during live session. 20s stays
