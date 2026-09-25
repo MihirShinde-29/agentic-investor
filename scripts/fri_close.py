@@ -26,7 +26,6 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-
 TICKER_ROW = re.compile(
     r"^\s*(?P<tk>[A-Z][A-Z0-9.\-]+)\s+\$"
     r"(?P<sign>[+-])(?P<amt>[0-9]+\.[0-9]+)\s+\(",

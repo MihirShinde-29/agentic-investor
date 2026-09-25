@@ -360,12 +360,16 @@ def create_app(
                             n = days_map.get(period.lower(), 1)
                             cutoff = _dt.now(_UTC) - _td(days=n)
 
-                            def _fresh(iso: str) -> bool:
+                            def _fresh(iso: str, _cut=cutoff) -> bool:
+                                # `cutoff` bound as a default arg (not a
+                                # free var) so B023 doesn't flag a
+                                # closure-in-loop capture -- this fn
+                                # only lives for the current iteration.
                                 try:
                                     ts = _dt.fromisoformat(
                                         iso.replace("Z", "+00:00")
                                     )
-                                    return ts >= cutoff
+                                    return ts >= _cut
                                 except ValueError:
                                     return True
 

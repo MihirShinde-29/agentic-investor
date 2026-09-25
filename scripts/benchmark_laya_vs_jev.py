@@ -31,7 +31,6 @@ import argparse
 import glob
 import json
 import sys
-from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -126,6 +125,7 @@ def _run_laya(rows: list[dict]) -> list[dict]:
               file=sys.stderr)
         sys.exit(2)
     import time as _time
+
     import torch  # type: ignore
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"laya device: {device}", file=sys.stderr)
