@@ -1209,6 +1209,16 @@ def _paper_loop(
         from agentic_investor.dashboard.server import serve_in_thread
         serve_in_thread(port=dashboard_port)
         print(f"Dashboard: http://localhost:{dashboard_port}\n")
+    # Warm up the Laya model at arm-start (~5-15s cold-load) so the
+    # first pre-market regen doesn't eat that latency inside a tick
+    # and miss the pre-market lead window. No-op on arms with the
+    # flag off.
+    from agentic_investor.flags import flags as _flags
+    if _flags.LAYA_MATERIALITY_ENABLED:
+        from agentic_investor.llm.laya_client import preload as _laya_preload
+        session.log("laya_preload_start", {})
+        loaded = _laya_preload()
+        session.log("laya_preload_done", {"loaded": bool(loaded)})
     reset_call_stats()
     cfg = LoopConfig(
         profile_name=profile_name,

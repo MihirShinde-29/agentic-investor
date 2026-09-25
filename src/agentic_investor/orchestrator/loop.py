@@ -2748,6 +2748,47 @@ def run_event_loop(
                         # Skip the high-signal-keyword promotion path
                         # too - Jev evaluated the full context already.
                         _jev_forced_skip = True
+                # Laya typed materiality gate (arm B flag as of Mon
+                # 2026-09-28). Parallel to the Jev branch above so the
+                # two never run on the same arm - the flags are
+                # mutually exclusive in the yaml. Same sentinel
+                # override pattern reuses `overlap` truthy/falsy.
+                elif _flags.LAYA_MATERIALITY_ENABLED:
+                    from agentic_investor.llm.laya_client import (
+                        materiality_check as _laya_materiality,
+                    )
+                    _headlines = [
+                        (e.headline or "").strip()
+                        for e in decision_state.unprocessed
+                        if e.headline
+                    ]
+                    _laya = _laya_materiality(_headlines, material)
+                    if session:
+                        per_h = [
+                            {
+                                "headline": h[:100],
+                                "prob": round(p, 3),
+                                "material": bool(m),
+                            }
+                            for (h, p, m) in (
+                                getattr(_laya, "per_headline", ()) or ()
+                            )
+                        ]
+                        session.log("laya_materiality_gate", {
+                            "material": _laya.material,
+                            "confidence": round(_laya.confidence, 3),
+                            "from_laya": _laya.from_laya,
+                            "n_headlines": len(_headlines),
+                            "n_portfolio": len(material),
+                            "per_headline": per_h,
+                            "laya_ms_total": round(_laya.laya_ms_total, 1),
+                            "laya_ms_max": round(_laya.laya_ms_max, 1),
+                        })
+                    if _laya.material:
+                        overlap = {"__laya_material__"}
+                    else:
+                        overlap = set()
+                        _jev_forced_skip = True  # same "gate had final say" flag
                 if not overlap:
                     high_signal_events = [
                         e for e in decision_state.unprocessed

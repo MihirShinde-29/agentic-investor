@@ -252,6 +252,18 @@ _register(
     "the current 3-arm A/B enables this; A stays off as control. "
     "Falls back to the existing finBERT prefilter path if Jev fails.",
 )
+_register(
+    "AGENTIC_LAYA_MATERIALITY_ENABLED", False, "bool_01",
+    "When '1', an arm routes the news-materiality prefilter through "
+    "the open-source Laya (ConvAI Innovations) System-One model "
+    "instead of finBERT or Jev. Same typed noul primitive as Jev but "
+    "runs locally (no API dependency, no rate limits) with different "
+    "calibration priors - the 2026-09-28 A/B tests whether Laya's "
+    "more-conservative bias helps or hurts P&L vs Jev at the same "
+    "insertion point. Model auto-loads on first call (~5s GPU / ~15s "
+    "CPU cold start); falls back to deterministic ticker-mention on "
+    "load or SDK failure.",
+)
 
 
 # Trade guardrails --------------------------------------------------------

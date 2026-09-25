@@ -46,17 +46,21 @@ arms:
       AGENTIC_JEV_MATERIALITY_ENABLED: "0"
       AGENTIC_WHIPSAW_GUARD_WINDOW_MIN: "0"
 
-  B:  # Jev verdict-feedback in the prompt tail. Tests whether the
-      # LLM adapts when it sees its own recent trade outcomes.
-      # cite-to-trade OFF so the observed effect is attributable to
-      # the verdict block, not gate stacking.
+  B:  # Week 3 (Mon 2026-09-28+): Laya per-headline materiality gate.
+      # Same insertion point as C's Jev gate so B vs C is a direct
+      # model-vs-model head-to-head with no other confound. Jev
+      # verdict-feedback was falsified last week (loser-chasing
+      # pattern) so it's now off. Whipsaw guard also off to isolate
+      # the gate-model effect; can turn back on next week if the
+      # Laya arm needs the same reversal protection C has.
     alpaca_account: secondary
     config_diff: {}
     env:
       AGENTIC_CITE_TO_TRADE: "0"
-      AGENTIC_JEV_VERDICT_ENABLED: "1"
+      AGENTIC_JEV_VERDICT_ENABLED: "0"
       AGENTIC_JEV_MATERIALITY_ENABLED: "0"
-      AGENTIC_WHIPSAW_GUARD_WINDOW_MIN: "15"
+      AGENTIC_LAYA_MATERIALITY_ENABLED: "1"
+      AGENTIC_WHIPSAW_GUARD_WINDOW_MIN: "0"
 
   C:  # Jev materiality gate replaces the finBERT+ticker-overlap
       # prefilter. cite-to-trade left ON so we can measure the
