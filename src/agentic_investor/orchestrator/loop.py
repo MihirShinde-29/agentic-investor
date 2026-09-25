@@ -2285,11 +2285,22 @@ def run_tick(
         # the plan - first market-open tick will re-regen with fresh
         # state and submit then. Logging so we can audit "how much
         # signal did we absorb pre-market vs at open."
+        #
+        # Also log the per-ticker plan (side + qty) so the first
+        # post-open regen can retrieve today's pre-market intent from
+        # session.jsonl and pass it into the prompt as an "opening
+        # intent" block. Prevents the "30 min of pre-market work goes
+        # to waste at 9:30" gap the Wed evening design pass flagged.
         if session:
             session.log("pre_market_hold", {
                 "rec_id": state.last_rec_id,
                 "plan_count": len(plans),
                 "tickers": sorted({p.ticker.upper() for p in plans}),
+                "plans": [
+                    {"ticker": p.ticker.upper(), "side": p.side,
+                     "qty": round(float(p.qty), 4)}
+                    for p in plans
+                ],
             })
         return TickResult(
             tick_at=tick_at, rec_id=state.last_rec_id,

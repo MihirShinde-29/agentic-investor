@@ -913,6 +913,21 @@ def _messages(state: GraphState) -> list[dict]:
     except Exception as _e:  # noqa: BLE001
         logger.debug("verdict-feedback block skipped: %s", _e)
 
+    # Opening-intent block: today's pre-market held plans. Returns
+    # "" outside the first post-open regens (when nothing is held)
+    # or if the module can't find the session dir. Same try/except
+    # discipline as verdict-feedback - a prompt-block bug should
+    # never break the regen path.
+    try:
+        from agentic_investor.orchestrator.opening_intent import (
+            build_opening_intent_block,
+        )
+        _oi_block = build_opening_intent_block()
+        if _oi_block:
+            fast_sections.append(_oi_block)
+    except Exception as _e:  # noqa: BLE001
+        logger.debug("opening-intent block skipped: %s", _e)
+
     slow_prefix = USER_PREAMBLE + "\n\n" + "\n\n".join(slow_sections)
     fast_tail = "\n\n".join(fast_sections) + "\n\nProduce a valid Allocation."
 
