@@ -60,7 +60,7 @@ REM window but also re-parent to this shell (defeats the purpose); use
 REM a real title instead so the user can find + close the window from
 REM Task Manager.
 start "agentic-investor: paper-experiment %EXP%" /D "%REPO%" cmd /c ^
-  ".venv\Scripts\agentic-investor.exe paper-experiment %EXP% --serve-dashboard --dashboard-port 8000 --paper-loop-args --auto --top-n 8 --regen-mode event --amount 50000 !EXTRA! > out\logs\experiment.out 2>&1"
+  ".venv\Scripts\agentic-investor.exe paper-experiment %EXP% --serve-dashboard --dashboard-port 8000 --paper-loop-args --auto --top-n 8 --regen-mode event --amount 50000 --pre-market-lead-min 30 !EXTRA! > out\logs\experiment.out 2>&1"
 
 echo Launched paper-experiment %EXP% in a new console.
 echo Log:      %REPO%\out\logs\experiment.out
