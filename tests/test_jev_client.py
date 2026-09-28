@@ -26,7 +26,11 @@ from agentic_investor.llm.jev_client import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_client():
+def _reset_client(monkeypatch):
+    # Existing per-headline tests use call-order-dependent fake clients
+    # (self.i += 1). Pin the pool to 1 so their assumptions hold.
+    # Parallel-path tests below override this explicitly.
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_MAX_WORKERS", "1")
     jev_client._reset_client_for_tests()
     yield
     jev_client._reset_client_for_tests()
@@ -394,3 +398,145 @@ def test_return_types():
     assert isinstance(r1, VerdictResult)
     r2 = _deterministic_materiality([], set())
     assert isinstance(r2, MaterialityResult)
+
+
+# --- parallel per-headline path ------------------------------------------
+
+class _ContentKeyedClient:
+    """Thread-safe fake keyed off headline text (via `state` string
+    substring match), not call count. Lets parallel-path tests reason
+    about results regardless of which thread finishes first.
+    """
+    def __init__(self, mapping: dict[str, float]):
+        # substring -> noul probability
+        self._mapping = mapping
+        import threading as _th
+        self._lock = _th.Lock()
+        self.calls: list[str] = []
+
+    def system_one(self, *, state: str, questions: dict) -> _FakeResponse:
+        with self._lock:
+            self.calls.append(state)
+        for needle, noul in self._mapping.items():
+            if needle in state:
+                return _FakeResponse({"material": _FakeAnswer(noul=noul)})
+        return _FakeResponse({"material": _FakeAnswer(noul=0.0)})
+
+
+def test_materiality_parallel_pool_faster_than_serial(monkeypatch):
+    """Wall-clock proof: N slow calls in a pool of 8 finish in ~one
+    call's worth of time, not N. Uses a client that sleeps a fixed
+    amount per call so the speedup is deterministic on CI."""
+    import time as _time
+
+    class _SlowClient:
+        def system_one(self, *, state, questions):
+            _time.sleep(0.05)  # 50ms per call
+            return _FakeResponse({"material": _FakeAnswer(noul=0.10)})
+
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_ENABLED", "1")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "fake-key")
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_MAX_WORKERS", "8")
+    monkeypatch.setattr(jev_client, "_get_client", lambda: _SlowClient())
+
+    heads = [f"headline {i}" for i in range(8)]
+    t0 = _time.perf_counter()
+    r = materiality_check(heads, {"NVDA"})
+    wall_ms = (_time.perf_counter() - t0) * 1000.0
+
+    # Serial would be ~400ms (8 * 50ms). Parallel with 8 workers
+    # should land under ~200ms even on a loaded CI runner.
+    assert r.from_jev is True
+    assert wall_ms < 250.0, f"parallel wall-clock {wall_ms:.0f}ms too high"
+    # Timing invariant still holds: total >= max per-call.
+    assert r.jev_ms_total >= r.jev_ms_max
+
+
+def test_materiality_parallel_preserves_per_headline_order(monkeypatch):
+    """per_headline output must be aligned to input headline order even
+    though the pool completes calls out of order. Uses jittered sleeps
+    so calls definitely finish in a different order than they started.
+    """
+    import random as _rand
+    import time as _time
+    _rand.seed(0)
+
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_ENABLED", "1")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "fake-key")
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_MAX_WORKERS", "8")
+
+    mapping = {
+        "APPLE": 0.11,
+        "BANANA": 0.22,
+        "CHERRY": 0.33,
+        "DATE": 0.44,
+        "ELDER": 0.55,
+    }
+
+    class _JitteredClient(_ContentKeyedClient):
+        def system_one(self, *, state, questions):
+            _time.sleep(_rand.uniform(0.005, 0.030))
+            return super().system_one(state=state, questions=questions)
+
+    monkeypatch.setattr(
+        jev_client, "_get_client",
+        lambda: _JitteredClient(mapping),
+    )
+
+    heads = list(mapping.keys())
+    r = materiality_check(heads, {"XYZ"})
+    # ELDER's 0.55 flips the batch.
+    assert r.material is True
+    assert len(r.per_headline) == 5
+    # Each per-headline entry's probability matches its input position.
+    for i, needle in enumerate(heads):
+        assert needle in r.per_headline[i][0]
+        assert abs(r.per_headline[i][1] - mapping[needle]) < 1e-6
+
+
+def test_materiality_parallel_partial_failure_falls_back_per_headline(
+    monkeypatch,
+):
+    """One call raising in parallel must not abort the batch; that
+    headline routes through ticker-mention while others keep their
+    Jev decisions. Same contract the serial path already had."""
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_ENABLED", "1")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "fake-key")
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_MAX_WORKERS", "4")
+
+    class _MixedClient:
+        def system_one(self, *, state, questions):
+            if "BOOM" in state:
+                raise RuntimeError("simulated jev flake")
+            return _FakeResponse({"material": _FakeAnswer(noul=0.10)})
+
+    monkeypatch.setattr(jev_client, "_get_client", lambda: _MixedClient())
+    heads = ["quiet 1", "BOOM mentions NVDA", "quiet 2"]
+    r = materiality_check(heads, {"NVDA"})
+    # BOOM headline raised -> mention path -> material=True
+    assert r.material is True
+    assert r.from_jev is True
+
+
+def test_materiality_serial_when_max_workers_1(monkeypatch):
+    """max_workers=1 must skip the thread pool entirely (no
+    ThreadPoolExecutor overhead on quiet windows)."""
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_ENABLED", "1")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "fake-key")
+    monkeypatch.setenv("AGENTIC_JEV_MATERIALITY_MAX_WORKERS", "1")
+
+    class _CountingClient:
+        def __init__(self):
+            self.thread_names: list[str] = []
+        def system_one(self, *, state, questions):
+            import threading as _th
+            self.thread_names.append(_th.current_thread().name)
+            return _FakeResponse({"material": _FakeAnswer(noul=0.10)})
+
+    cc = _CountingClient()
+    monkeypatch.setattr(jev_client, "_get_client", lambda: cc)
+    materiality_check(["a", "b", "c"], {"NVDA"})
+    # All three calls happened on the same (main) thread.
+    assert len(set(cc.thread_names)) == 1
+    # And it wasn't a jev-mat worker.
+    assert not any(n.startswith("jev-mat") for n in cc.thread_names)

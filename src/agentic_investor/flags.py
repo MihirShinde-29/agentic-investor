@@ -253,6 +253,19 @@ _register(
     "Falls back to the existing finBERT prefilter path if Jev fails.",
 )
 _register(
+    "AGENTIC_JEV_MATERIALITY_MAX_WORKERS", 8, "int",
+    "How many per-headline Jev noul calls to run concurrently in "
+    "materiality_check. 1 = serial (old behaviour). 8 collapses the "
+    "per-headline wall-clock from sum(latencies) to ~max(latencies) "
+    "when Jev's tail latency spikes (2026-09-28 open: single batches "
+    "hitting 63s total from 5-15 x 2-8s calls; parallel drops the "
+    "same batch to the slowest single call). Threading is safe here "
+    "because the Jev SDK's HTTP client is a plain requests.Session "
+    "and every call is I/O-bound - GIL releases during the round-"
+    "trip. Cap: keep <= 16 to stay under typesafe-sdk's connection "
+    "pool default. Values <=0 also fall back to serial.",
+)
+_register(
     "AGENTIC_LAYA_MATERIALITY_ENABLED", False, "bool_01",
     "When '1', an arm routes the news-materiality prefilter through "
     "the open-source Laya (ConvAI Innovations) System-One model "

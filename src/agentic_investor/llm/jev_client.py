@@ -315,10 +315,13 @@ def materiality_check(
     Cost: N Jev calls per batch instead of 1. Jev is $0.042/M input
     with free output and typical headlines are ~50 tokens each, so a
     batch of 10 headlines costs ~$0.00002 — negligible next to the
-    ~$0.005 LLM regen we're deciding whether to skip. Latency: N
-    round-trips instead of 1 (~200ms each, so ~2s for a batch of 10
-    vs ~200ms). Runs at batch-window close so the extra 1-2s is
-    absorbed into the ~60s window naturally.
+    ~$0.005 LLM regen we're deciding whether to skip.
+
+    Latency: the N per-headline round-trips run through a
+    ThreadPoolExecutor (AGENTIC_JEV_MATERIALITY_MAX_WORKERS, default
+    8). Wall-clock becomes max(latencies) rather than sum(latencies)
+    on days when Jev's tail spikes. Set the flag to 1 to force serial
+    if the SDK ever turns out not to be thread-safe.
 
     Gated on AGENTIC_JEV_MATERIALITY_ENABLED=1. When off, or on any
     Jev failure, falls back to the deterministic ticker-mention
@@ -334,25 +337,40 @@ def materiality_check(
     if not headlines:
         return MaterialityResult(material=False, confidence=1.0, from_jev=False)
     try:
+        max_workers = max(1, int(flags.JEV_MATERIALITY_MAX_WORKERS or 1))
+        up_port = {t.upper() for t in portfolio_tickers}
+
+        def _one(h: str) -> tuple[float, bool, float]:
+            r = _jev_noul_per_headline(client, h, portfolio_tickers)
+            if r is not None:
+                return r
+            # Per-headline fallback: ticker-mention only, ms=0 so it
+            # doesn't inflate the timing rollup.
+            u = (h or "").upper()
+            mentioned = any(t in u for t in up_port)
+            return (1.0 if mentioned else 0.0, mentioned, 0.0)
+
+        if max_workers == 1 or len(headlines) == 1:
+            results = [_one(h) for h in headlines]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            workers = min(max_workers, len(headlines))
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="jev-mat",
+            ) as ex:
+                # executor.map preserves input order so per_headline
+                # stays aligned to the caller's headline list.
+                results = list(ex.map(_one, headlines))
+
         per: list[tuple[str, float, bool]] = []
         any_material = False
         max_prob = 0.0
         ms_total = 0.0
         ms_max = 0.0
-        for h in headlines:
-            result = _jev_noul_per_headline(client, h, portfolio_tickers)
-            if result is None:
-                # Fall back for THIS headline only - keep the loop going.
-                up_port = {t.upper() for t in portfolio_tickers}
-                u = (h or "").upper()
-                mentioned = any(t in u for t in up_port)
-                prob = 1.0 if mentioned else 0.0
-                mat = mentioned
-            else:
-                prob, mat, ms = result
-                ms_total += ms
-                if ms > ms_max:
-                    ms_max = ms
+        for h, (prob, mat, ms) in zip(headlines, results, strict=True):
+            ms_total += ms
+            if ms > ms_max:
+                ms_max = ms
             per.append((h[:200], prob, mat))
             if mat:
                 any_material = True
