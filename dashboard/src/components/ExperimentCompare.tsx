@@ -20,6 +20,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { decodeHtmlEntities } from "@/lib/htmlEntities";
 import { TIMEFRAMES, type Timeframe } from "@/lib/timeframe";
+import {
+  DivergenceTile,
+  GateLatencyChart,
+  MemoryStrip,
+  SignificanceTile,
+  WhipsawTable,
+} from "@/components/ExperimentPanels";
 
 const ARM_COLORS = ["#60a5fa", "#f472b6", "#a78bfa", "#fbbf24", "#34d399"];
 
@@ -71,14 +78,12 @@ export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
   const chartData = useMemo(() => {
     if (!equity || equity.arms.length === 0) return [];
     const now = Date.now();
-    // On 1D, clip to today's local midnight so the chart shows only
-    // today's session, matching how PortfolioChart / ticker charts feel.
-    // Wider timeframes (3D, 1W, etc) still show the full window from
-    // the backend period param.
-    const todayStart =
-      timeframe === "1D"
-        ? new Date(new Date().setHours(0, 0, 0, 0)).getTime()
-        : 0;
+    // Historically clipped the "1D" window to the browser's local
+    // midnight. That broke outside US timezones: for a viewer east
+    // of ET, local midnight falls DURING US market hours, so the
+    // clip would eat the first few hours of session data. Backend
+    // now filters "1D" to today's 9:30 ET open (see server.py
+    // _period_cutoff), so we just trust whatever points it returns.
     // Normalize each arm to % change from its own baseline. Baseline is
     // opening_equity from summary (session-open) if available, else the
     // arm's first snapshot in the window. Always append a synthetic
@@ -86,9 +91,7 @@ export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
     const perArmNormalized: Record<string, { ts: number; pct: number }[]> = {};
     for (const arm of equity.arms) {
       const live = liveByArm[arm.arm_id];
-      const inWindow = arm.points.filter(
-        (p) => new Date(p.ts).getTime() >= todayStart,
-      );
+      const inWindow = arm.points;
       const baseline =
         live?.open ?? (inWindow.length > 0 ? inWindow[0].equity : null);
       if (baseline === null || baseline <= 0) {
@@ -125,12 +128,21 @@ export function ExperimentCompare({ timeframe }: { timeframe: Timeframe }) {
       }
       return row;
     });
-  }, [equity, liveByArm, timeframe]);
+  }, [equity, liveByArm]);
 
   const armIds = equity?.arms.map((a) => a.arm_id) ?? [];
 
   return (
     <div className="space-y-4">
+      <div className="grid gap-4 lg:grid-cols-2">
+        <SignificanceTile />
+        <MemoryStrip />
+      </div>
+      <DivergenceTile />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <WhipsawTable />
+        <GateLatencyChart />
+      </div>
       <Card>
         <CardHeader>
           <CardTitle className="text-sm">

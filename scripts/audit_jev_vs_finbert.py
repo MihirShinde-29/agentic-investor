@@ -32,6 +32,14 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
+# Headlines occasionally carry zero-width spaces and other non-latin1
+# codepoints that choke Windows' default cp1252 stdout. Re-wrap so
+# we don't crash the whole close-time postmortem on a cosmetic print.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass
+
 
 def _load_session(arm: str, date: str) -> list[dict]:
     """All session.jsonl rows across every session dir this arm had

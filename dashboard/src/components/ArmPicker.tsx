@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import type { ExperimentMeta } from "@/lib/api";
+import type { DashboardView, ExperimentMeta } from "@/lib/api";
 import { navigateArmView } from "@/lib/api";
 
 export function ArmPicker({
@@ -9,7 +9,7 @@ export function ArmPicker({
 }: {
   meta: ExperimentMeta;
   currentArm: string | null;
-  view: "single" | "compare";
+  view: DashboardView;
 }) {
   if (meta.mode !== "experiment") return null;
 
@@ -46,6 +46,18 @@ export function ArmPicker({
         title="cross-arm comparison view"
       >
         compare
+      </button>
+      <button
+        onClick={() => navigateArmView(null, "eod")}
+        className={cn(
+          "ml-1 rounded px-1.5 py-0.5 font-medium transition-colors",
+          view === "eod"
+            ? "bg-primary/20 text-primary ring-1 ring-primary/40"
+            : "text-muted-foreground hover:bg-muted",
+        )}
+        title="end-of-day consolidated report"
+      >
+        eod
       </button>
     </div>
   );

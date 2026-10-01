@@ -20,6 +20,7 @@ import { WatchlistPanel } from "@/components/WatchlistPanel";
 import { TimeframeSelector } from "@/components/TimeframeSelector";
 import { ArmPicker } from "@/components/ArmPicker";
 import { ExperimentCompare } from "@/components/ExperimentCompare";
+import { EodView } from "@/components/EodView";
 import type { Timeframe } from "@/lib/timeframe";
 import type { ExperimentMeta } from "@/lib/api";
 import { fetcher, useArmParam, useViewParam } from "@/lib/api";
@@ -87,6 +88,7 @@ function App() {
   const headerLabel = (() => {
     if (!meta || meta.mode === "single") return "Live paper trading dashboard";
     if (view === "compare") return `Experiment ${meta.name} · comparison`;
+    if (view === "eod") return `Experiment ${meta.name} · end-of-day report`;
     return `Experiment ${meta.name} · arm ${arm || meta.default_arm}`;
   })();
 
@@ -141,7 +143,11 @@ function App() {
         ) : null}
       </header>
 
-      {view === "compare" ? (
+      {view === "eod" ? (
+        <main className="mx-auto max-w-[1600px] px-6 py-6">
+          <EodView />
+        </main>
+      ) : view === "compare" ? (
         <main className="mx-auto max-w-[1600px] space-y-4 px-6 py-6">
           <ExperimentCompare timeframe={timeframe} />
         </main>

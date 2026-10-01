@@ -200,6 +200,42 @@ def _basic_auth_guard(request: Request) -> Response | None:
     )
 
 
+def _period_cutoff(period: str):
+    """UTC cutoff timestamp for a dashboard period selector.
+
+    `1d` means "since today's market open (9:30 ET)", not "24 hours
+    ago". The compare chart and summary table use this so the baseline
+    doesn't drift leftward as the trading day progresses - before this
+    helper, a rolling 24h window moved the chart's leftmost point and
+    the summary's delta baseline forward with wall-clock time, which
+    looked like "the chart is moving on its own".
+
+    Called before today's 9:30 ET open, rolls back to yesterday's open
+    so there's always some data to render.
+
+    Longer periods (`3d`, `1w`, `1mo`, `3mo`, `1y`) stay on a plain
+    calendar-rolling cutoff - the session-alignment only matters when
+    the question is "is this today's data".
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    import zoneinfo
+
+    p = (period or "").lower()
+    now = _dt.now(_UTC)
+    if p == "1d":
+        et = zoneinfo.ZoneInfo("America/New_York")
+        now_et = now.astimezone(et)
+        open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        if now_et < open_et:
+            open_et = open_et - _td(days=1)
+        return open_et.astimezone(_UTC)
+    days_map = {"3d": 3, "1w": 7, "1mo": 31, "3mo": 93, "1y": 366}
+    n = days_map.get(p, 1)
+    return now - _td(days=n)
+
+
 def create_app(
     experiment: ExperimentContext | None = None,
 ) -> FastAPI:
@@ -350,15 +386,8 @@ def create_app(
                         # the arm's session-open (snaps[-1]).
                         baseline_snap = snaps[-1]
                         if period:
-                            from datetime import UTC as _UTC
                             from datetime import datetime as _dt
-                            from datetime import timedelta as _td
-                            days_map = {
-                                "1d": 1, "3d": 3, "1w": 7,
-                                "1mo": 31, "3mo": 93, "1y": 366,
-                            }
-                            n = days_map.get(period.lower(), 1)
-                            cutoff = _dt.now(_UTC) - _td(days=n)
+                            cutoff = _period_cutoff(period)
 
                             def _fresh(iso: str, _cut=cutoff) -> bool:
                                 # `cutoff` bound as a default arg (not a
@@ -780,9 +809,7 @@ def create_app(
             return JSONResponse(
                 {"error": "not in experiment mode"}, status_code=400,
             )
-        from datetime import UTC as _UTC
         from datetime import datetime as _dt
-        from datetime import timedelta as _td
 
         from agentic_investor.runtime_context import (
             reset_arm_context,
@@ -790,11 +817,7 @@ def create_app(
         )
         from agentic_investor.tools.paper_store import list_snapshots
 
-        days_map = {
-            "1d": 1, "3d": 3, "1w": 7, "1mo": 31, "3mo": 93, "1y": 366,
-        }
-        n = days_map.get(period.lower(), 1)
-        cutoff = _dt.now(_UTC) - _td(days=n)
+        cutoff = _period_cutoff(period)
 
         def _fresh(iso: str) -> bool:
             try:
@@ -820,6 +843,253 @@ def create_app(
                 reset_arm_context(tokens)
             series.append({"arm_id": arm.arm_id, "points": pts})
         return {"experiment": exp.name, "period": period, "arms": series}
+
+    @app.get("/api/experiment/significance")
+    def experiment_significance(since: str = "2026-09-22") -> dict:
+        """Current A-vs-B / A-vs-C / B-vs-C paired-delta stats.
+        Subprocesses scripts/ab_significance.py so we don't duplicate the
+        bootstrap/Wilcoxon math; parses its stdout. Cached for 5 min
+        since the inputs (close postmortems) only change at EOD.
+        """
+        import re as _re
+        import subprocess as _sp
+        import sys as _sys
+        import time as _time
+
+        cache_key = f"sig::{since}"
+        cache = app.state.__dict__.setdefault("_sig_cache", {})
+        hit = cache.get(cache_key)
+        if hit and (_time.time() - hit["at"]) < 300:
+            return hit["value"]
+
+        try:
+            result = _sp.run(
+                [_sys.executable, "scripts/ab_significance.py",
+                 "--since", since],
+                cwd=Path(__file__).resolve().parents[3],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=30,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"significance subprocess failed: {exc}"}
+        text = (result.stdout or "") + (result.stderr or "")
+        # Grab the three pair blocks via block-level regex.
+        pairs: list[dict] = []
+        block_re = _re.compile(
+            r"=== (\w+) vs (\w+) ===\s*\n"
+            r"  n paired \(ticker,day\): (\d+)\s*\n"
+            r"  mean delta:\s+\$([-+]?[0-9.]+)\s+\(median \$([-+]?[0-9.]+)\)\s*\n"
+            r"  bootstrap 95% CI:\s+\[\$([-+]?[0-9.]+), \$([-+]?[0-9.]+)\]\s*\n"
+            r"  Wilcoxon p-value:\s+([0-9.]+|N/A)",
+        )
+        for m in block_re.finditer(text):
+            lhs, rhs, n, mean, median, ci_lo, ci_hi, p = m.groups()
+            try:
+                p_val = float(p) if p != "N/A" else None
+            except ValueError:
+                p_val = None
+            pairs.append({
+                "lhs": lhs, "rhs": rhs, "n": int(n),
+                "mean_delta_usd": float(mean),
+                "median_delta_usd": float(median),
+                "ci_low_usd": float(ci_lo),
+                "ci_high_usd": float(ci_hi),
+                "p_value": p_val,
+                "significant": p_val is not None and p_val < 0.05,
+            })
+        days_header = _re.search(r"loaded (\d+) days: (\S+) \.\. (\S+)", text)
+        payload = {
+            "since": since,
+            "n_days": int(days_header.group(1)) if days_header else 0,
+            "first_day": days_header.group(2) if days_header else None,
+            "last_day": days_header.group(3) if days_header else None,
+            "pairs": pairs,
+        }
+        cache[cache_key] = {"at": _time.time(), "value": payload}
+        return payload
+
+    @app.get("/api/experiment/divergences")
+    def experiment_divergences(date_str: str | None = None,
+                               limit: int = 50) -> dict:
+        """Today's gate divergences + aggregate stats. Reads the JSONL
+        the EOD workflow writes; falls back to synthesising from the
+        log if the file isn't there yet (mid-session case)."""
+        from datetime import date as _date
+        import json as _json
+
+        day = date_str or _date.today().isoformat()
+        path = (Path(__file__).resolve().parents[3]
+                / "out" / "analytics" / f"gate_divergences_{day}.jsonl")
+        rows: list[dict] = []
+        if path.exists():
+            with path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rows.append(_json.loads(line))
+                    except _json.JSONDecodeError:
+                        continue
+        rows.sort(key=lambda r: r.get("ts", ""), reverse=True)
+        b_fires = sum(1 for r in rows if r.get("acting_arm") == "B")
+        c_fires = sum(1 for r in rows if r.get("acting_arm") == "C")
+        with_effect = [r for r in rows
+                       if r.get("acting_arm_pnl_15min_usd") is not None]
+        net_effect = sum(r.get("acting_arm_pnl_15min_usd") or 0.0
+                         for r in with_effect)
+        return {
+            "date": day,
+            "total": len(rows),
+            "b_fires_c_abstains": b_fires,
+            "c_fires_b_abstains": c_fires,
+            "with_forward_pnl": len(with_effect),
+            "net_forward_pnl_usd": round(net_effect, 2),
+            "rows": rows[:limit],
+        }
+
+    @app.get("/api/experiment/memory")
+    def experiment_memory() -> dict:
+        """Latest memory_watchdog heartbeat per arm, plus the threshold
+        each arm is running against. Lets the frontend render a strip
+        bar that goes red when an arm is <200MB from recycle."""
+        import re as _re
+        from datetime import date as _date
+
+        day = _date.today().isoformat()
+        log_path = (Path(__file__).resolve().parents[3]
+                    / "out" / "logs" / "experiment.out")
+        if not log_path.exists():
+            return {"arms": []}
+        hb_re = _re.compile(
+            r"\[([ABC])\] " + day + r" (\d{2}:\d{2}:\d{2}),\d+ .*"
+            r"memory_watchdog heartbeat: private=(\d+) MB / threshold=(\d+) MB"
+        )
+        latest: dict[str, dict] = {}
+        with log_path.open(encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                m = hb_re.search(line)
+                if not m:
+                    continue
+                arm, hms, mb, thr = m.groups()
+                latest[arm] = {
+                    "arm": arm, "ts": hms,
+                    "private_mb": int(mb),
+                    "threshold_mb": int(thr),
+                    "pct": round(100 * int(mb) / int(thr), 1),
+                    "headroom_mb": int(thr) - int(mb),
+                }
+        return {"date": day, "arms": sorted(latest.values(),
+                                            key=lambda a: a["arm"])}
+
+    @app.get("/api/experiment/whipsaws")
+    def experiment_whipsaws(date_str: str | None = None,
+                            min_flips: int = 2) -> dict:
+        """Count same-ticker buy/sell direction changes per arm per
+        day. A whipsaw = adjacent orders on the same ticker with
+        opposite sides. 2+ flips surfaces today's CVX / AMGN stories."""
+        import re as _re
+        from datetime import date as _date
+
+        day = date_str or _date.today().isoformat()
+        log_path = (Path(__file__).resolve().parents[3]
+                    / "out" / "logs" / "experiment.out")
+        if not log_path.exists():
+            return {"date": day, "rows": []}
+        order_re = _re.compile(
+            r"\[([ABC])\] " + day + r" (\d{2}:\d{2}:\d{2}),\d+ .*"
+            r"\[order_submitted\] ticker=([A-Z][A-Z0-9.\-]+) side=(buy|sell)"
+        )
+        # arm -> ticker -> list[side], in time order
+        trail: dict[str, dict[str, list[str]]] = {}
+        with log_path.open(encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                m = order_re.search(line)
+                if not m:
+                    continue
+                arm, _, ticker, side = m.groups()
+                trail.setdefault(arm, {}).setdefault(ticker, []).append(side)
+        rows: list[dict] = []
+        for arm, by_ticker in trail.items():
+            for ticker, sides in by_ticker.items():
+                flips = sum(1 for i in range(1, len(sides))
+                            if sides[i] != sides[i - 1])
+                if flips >= min_flips:
+                    rows.append({
+                        "arm": arm, "ticker": ticker,
+                        "flips": flips,
+                        "n_orders": len(sides),
+                        "pattern": "".join(
+                            "B" if s == "buy" else "S" for s in sides
+                        ),
+                    })
+        rows.sort(key=lambda r: (-r["flips"], r["arm"], r["ticker"]))
+        return {"date": day, "rows": rows}
+
+    @app.get("/api/experiment/jev-latency")
+    def experiment_jev_latency(date_str: str | None = None,
+                               limit: int = 200) -> dict:
+        """Recent (ts, max_ms, n_headlines) tuples from Jev gates.
+        Powers the Jev tail-latency sparkline. Also returns the Laya
+        counterpart so the chart can overlay both."""
+        import re as _re
+        from datetime import date as _date
+
+        day = date_str or _date.today().isoformat()
+        log_path = (Path(__file__).resolve().parents[3]
+                    / "out" / "logs" / "experiment.out")
+        if not log_path.exists():
+            return {"date": day, "jev": [], "laya": []}
+        gate_re = _re.compile(
+            r"\[([BC])\] " + day + r" (\d{2}:\d{2}:\d{2}),\d+ .*"
+            r"\[(laya|jev)_materiality_gate\] .* "
+            r"n_headlines=(\d+) .*"
+            r"\w+_ms_total=([0-9.]+) \w+_ms_max=([0-9.]+)"
+        )
+        jev: list[dict] = []
+        laya: list[dict] = []
+        with log_path.open(encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                m = gate_re.search(line)
+                if not m:
+                    continue
+                _arm, hms, kind, nh, total, max_ms = m.groups()
+                row = {
+                    "ts": hms,
+                    "n_headlines": int(nh),
+                    "ms_total": float(total),
+                    "ms_max": float(max_ms),
+                }
+                (jev if kind == "jev" else laya).append(row)
+        return {
+            "date": day,
+            "jev": jev[-limit:],
+            "laya": laya[-limit:],
+        }
+
+    @app.get("/api/experiment/eod")
+    def experiment_eod(date_str: str | None = None) -> dict:
+        """Serve the Markdown EOD report body + metadata. date_str
+        defaults to today; if today isn't written yet, falls back to
+        the most recent report."""
+        from datetime import date as _date
+
+        eod_dir = Path(__file__).resolve().parents[3] / "out" / "eod"
+        if not eod_dir.exists():
+            return {"date": None, "markdown": None}
+        day = date_str or _date.today().isoformat()
+        target = eod_dir / f"{day}_eod.md"
+        if not target.exists():
+            # Fall back to most recent report so the tab is never empty.
+            candidates = sorted(eod_dir.glob("*_eod.md"), reverse=True)
+            if not candidates:
+                return {"date": None, "markdown": None}
+            target = candidates[0]
+            day = target.stem.replace("_eod", "")
+        return {
+            "date": day,
+            "markdown": target.read_text(encoding="utf-8"),
+        }
 
     @app.get("/api/portfolio")
     def portfolio() -> dict:

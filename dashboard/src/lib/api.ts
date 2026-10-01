@@ -79,11 +79,14 @@ export function currentArm(): string | null {
   return new URLSearchParams(window.location.search).get("arm");
 }
 
-export function currentView(): "single" | "compare" {
+export type DashboardView = "single" | "compare" | "eod";
+
+export function currentView(): DashboardView {
   if (typeof window === "undefined") return "single";
-  return new URLSearchParams(window.location.search).get("view") === "compare"
-    ? "compare"
-    : "single";
+  const v = new URLSearchParams(window.location.search).get("view");
+  if (v === "compare") return "compare";
+  if (v === "eod") return "eod";
+  return "single";
 }
 
 export function withArm(path: string): string {
@@ -103,14 +106,14 @@ export function withArm(path: string): string {
  */
 export function navigateArmView(
   arm: string | null,
-  view: "single" | "compare",
+  view: DashboardView,
 ): void {
   if (typeof window === "undefined") return;
   const params = new URLSearchParams(window.location.search);
   if (arm) params.set("arm", arm);
   else params.delete("arm");
-  if (view === "compare") params.set("view", "compare");
-  else params.delete("view");
+  if (view === "single") params.delete("view");
+  else params.set("view", view);
   const qs = params.toString();
   window.location.href = qs
     ? `${window.location.pathname}?${qs}`
@@ -135,7 +138,7 @@ export function useArmParam(): string | null {
   return useUrlParam(currentArm);
 }
 
-export function useViewParam(): "single" | "compare" {
+export function useViewParam(): DashboardView {
   return useUrlParam(currentView);
 }
 
@@ -233,4 +236,95 @@ export type NewsReactionRow = {
 export type NewsReactionsResp = {
   experiment: string;
   news_reactions: NewsReactionRow[];
+};
+
+export type SignificancePair = {
+  lhs: string;
+  rhs: string;
+  n: number;
+  mean_delta_usd: number;
+  median_delta_usd: number;
+  ci_low_usd: number;
+  ci_high_usd: number;
+  p_value: number | null;
+  significant: boolean;
+};
+
+export type SignificanceResp = {
+  since: string;
+  n_days: number;
+  first_day: string | null;
+  last_day: string | null;
+  pairs: SignificancePair[];
+  error?: string;
+};
+
+export type DivergenceRow = {
+  ts: string;
+  n_headlines: number;
+  laya_material: boolean;
+  laya_conf: number;
+  jev_material: boolean;
+  jev_conf: number;
+  acting_arm: "B" | "C";
+  pair_gap_sec: number;
+  acting_arm_order_count?: number;
+  acting_arm_tickers?: string[];
+  acting_arm_notional_usd?: number;
+  acting_arm_pnl_15min_usd?: number | null;
+};
+
+export type DivergencesResp = {
+  date: string;
+  total: number;
+  b_fires_c_abstains: number;
+  c_fires_b_abstains: number;
+  with_forward_pnl: number;
+  net_forward_pnl_usd: number;
+  rows: DivergenceRow[];
+};
+
+export type MemoryArmRow = {
+  arm: string;
+  ts: string;
+  private_mb: number;
+  threshold_mb: number;
+  pct: number;
+  headroom_mb: number;
+};
+
+export type MemoryResp = {
+  date: string;
+  arms: MemoryArmRow[];
+};
+
+export type WhipsawRow = {
+  arm: string;
+  ticker: string;
+  flips: number;
+  n_orders: number;
+  pattern: string;
+};
+
+export type WhipsawsResp = {
+  date: string;
+  rows: WhipsawRow[];
+};
+
+export type JevLatencyRow = {
+  ts: string;
+  n_headlines: number;
+  ms_total: number;
+  ms_max: number;
+};
+
+export type JevLatencyResp = {
+  date: string;
+  jev: JevLatencyRow[];
+  laya: JevLatencyRow[];
+};
+
+export type EodResp = {
+  date: string | null;
+  markdown: string | null;
 };
