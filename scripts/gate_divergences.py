@@ -31,7 +31,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 LOG = Path("out/logs/experiment.out")
@@ -181,7 +181,6 @@ class _BarFetcher:
     def close_at(self, ticker: str, ts: datetime) -> float | None:
         """Last 1-min bar close at or just before `ts` (US/Eastern-aware
         timestamps the log uses). Returns None on miss or error."""
-        from datetime import timezone
         # Normalize to the minute - Alpaca 1Min bars start on the minute.
         minute = ts.replace(second=0, microsecond=0)
         key = (ticker, minute)
@@ -195,8 +194,8 @@ class _BarFetcher:
             req = StockBarsRequest(
                 symbol_or_symbols=ticker,
                 timeframe=TimeFrame.Minute,
-                start=(minute - timedelta(minutes=2)).replace(tzinfo=timezone.utc),
-                end=(minute + timedelta(minutes=2)).replace(tzinfo=timezone.utc),
+                start=(minute - timedelta(minutes=2)).replace(tzinfo=UTC),
+                end=(minute + timedelta(minutes=2)).replace(tzinfo=UTC),
                 feed="iex",
             )
             resp = self._client.get_stock_bars(req)
@@ -209,8 +208,8 @@ class _BarFetcher:
             # exact bar is missing.
             match = None
             for b in bars:
-                b_min = b.timestamp.replace(tzinfo=timezone.utc)
-                if b_min <= minute.replace(tzinfo=timezone.utc) + timedelta(minutes=1):
+                b_min = b.timestamp.replace(tzinfo=UTC)
+                if b_min <= minute.replace(tzinfo=UTC) + timedelta(minutes=1):
                     match = b
             price = float(match.close) if match is not None else None
             self._cache[key] = price

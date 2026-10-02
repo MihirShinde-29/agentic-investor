@@ -217,10 +217,10 @@ def _period_cutoff(period: str):
     calendar-rolling cutoff - the session-alignment only matters when
     the question is "is this today's data".
     """
+    import zoneinfo
     from datetime import UTC as _UTC
     from datetime import datetime as _dt
     from datetime import timedelta as _td
-    import zoneinfo
 
     p = (period or "").lower()
     now = _dt.now(_UTC)
@@ -914,8 +914,8 @@ def create_app(
         """Today's gate divergences + aggregate stats. Reads the JSONL
         the EOD workflow writes; falls back to synthesising from the
         log if the file isn't there yet (mid-session case)."""
-        from datetime import date as _date
         import json as _json
+        from datetime import date as _date
 
         day = date_str or _date.today().isoformat()
         path = (Path(__file__).resolve().parents[3]
